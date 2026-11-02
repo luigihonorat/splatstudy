@@ -45,8 +45,9 @@ pub fn percentile_box(points: &[Vec3], low: f32, high: f32) -> Option<Aabb> {
 }
 
 impl Aabb {
+    /// Halves first, so bounds near the float limit don't overflow.
     pub fn centre(&self) -> Vec3 {
-        (self.min + self.max) / 2.0
+        self.min * 0.5 + self.max * 0.5
     }
 
     pub fn size(&self) -> Vec3 {
@@ -94,8 +95,15 @@ impl Reference {
         let Some(bounds) = percentile_box(points, LOW, HIGH) else {
             return;
         };
-        let radius = bounds.size().length() / 2.0;
-        self.align.centre = bounds.centre();
+        // Halves first, so bounds near the float limit don't overflow; a
+        // centre or size that still isn't finite leaves the file as it is.
+        let radius = (bounds.max * 0.5 - bounds.min * 0.5).length();
+        let centre = bounds.centre();
+        self.align.centre = if centre.is_finite() {
+            centre
+        } else {
+            Vec3::ZERO
+        };
         self.align.scale = if radius > 1e-12 && radius.is_finite() {
             1.0 / radius
         } else {
@@ -174,5 +182,27 @@ mod tests {
             "the floater stays out of the slider range"
         );
         assert_eq!(range.min.x, 0.0, "nor beyond the points");
+    }
+
+    #[test]
+    fn bounds_near_the_float_limit_still_fit() {
+        let big = 3.0e38;
+        let points = vec![Vec3::splat(big), Vec3::splat(big * 0.9), Vec3::splat(big)];
+        let n = points.len();
+        let splats = Splats {
+            positions: points,
+            scales: vec![Vec3::splat(0.1); n],
+            rotations: vec![glam::Quat::IDENTITY; n],
+            colors: vec![[255; 4]; n],
+        };
+        let source = Source {
+            name: "far".into(),
+            bytes: Arc::from([]),
+        };
+        let mut r = Reference::new(source, Content::Splats(splats));
+        r.fit();
+        assert!(r.align.centre.is_finite(), "{}", r.align.centre);
+        assert!(r.align.centre.x > big * 0.8);
+        assert!(r.align.scale.is_finite() && r.align.scale > 0.0);
     }
 }
