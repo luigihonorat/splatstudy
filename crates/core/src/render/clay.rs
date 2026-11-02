@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Draws the clay mesh, and other meshes shaded like it (scanned
-//! references). The pipeline is shared; each mesh owns its buffers, and
+//! references). The pipelines are shared; each mesh owns its buffers, and
 //! each [`Slot`] its camera.
+//!
+//! A slot has two sets of uniforms: one for ordinary draws and one for the
+//! ghost, a see-through mesh laid over what the slot already shows (the
+//! reference over the sculpt). Both can be prepared for one submit.
 
 use egui::Color32;
 use glam::{Mat4, Vec3};
@@ -32,7 +36,8 @@ pub struct Look {
     pub flat: bool,
     /// 0..1. Below 1 the mesh blends over what was drawn before it. Every
     /// surface blends, back faces too (there is no culling); a see-through
-    /// mesh meant to read as one layer needs a depth pre-pass first.
+    /// mesh meant to read as one layer is drawn with
+    /// [`ClayPass::draw_ghost`], which keeps only its nearest surface.
     pub opacity: f32,
     /// Use the vertices' own colours, as scans have.
     pub vertex_colours: bool,
@@ -48,16 +53,37 @@ impl Look {
             vertex_colours: false,
         }
     }
+
+    /// Filled flat with one colour, opaque: a silhouette.
+    pub const fn flat(colour: Color32) -> Self {
+        Self {
+            flat: true,
+            ..Self::lit(colour)
+        }
+    }
 }
 
 /// The key light, in view space: above, to the left and in front, like a
 /// north window over the modelling stand.
 const LIGHT: Vec3 = Vec3::new(-0.45, 0.65, 0.6);
 
+/// Which set of a slot's uniforms a draw reads.
+#[derive(Clone, Copy)]
+enum Layer {
+    Main,
+    Ghost,
+}
+
 pub struct ClayPass {
     pipeline: wgpu::RenderPipeline,
-    /// Uniforms and their bind group, one per slot.
-    slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
+    /// The ghost's three steps: push the depth back to the far plane where
+    /// the ghost covers, keep its nearest surface's depth, then blend that
+    /// surface alone over the colour already drawn.
+    ghost_clear: wgpu::RenderPipeline,
+    ghost_depth: wgpu::RenderPipeline,
+    ghost_colour: wgpu::RenderPipeline,
+    /// Uniforms and their bind group, per slot and layer.
+    slots: Vec<[(wgpu::Buffer, wgpu::BindGroup); 2]>,
 }
 
 /// A mesh's GPU buffers.
@@ -94,6 +120,16 @@ impl GpuMesh {
     }
 }
 
+/// What differs between the clay pipelines.
+struct Variant {
+    label: &'static str,
+    fragment: &'static str,
+    depth_write: bool,
+    depth_compare: wgpu::CompareFunction,
+    /// Writes and blends colour; otherwise only depth.
+    colour: bool,
+}
+
 impl ClayPass {
     pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("clay.wgsl"));
@@ -110,81 +146,117 @@ impl ClayPass {
                 count: None,
             }],
         });
-        let slots = Slot::ALL
-            .map(|_| {
-                let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("clay uniforms"),
-                    size: size_of::<Uniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("clay"),
-                    layout: &layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniforms.as_entire_binding(),
-                    }],
-                });
-                (uniforms, bind_group)
-            })
-            .into();
+        let uniforms = || {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("clay uniforms"),
+                size: size_of::<Uniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("clay"),
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            (buffer, bind_group)
+        };
+        let slots = Slot::ALL.map(|_| [uniforms(), uniforms()]).into();
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("clay"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("clay"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3,
-                        1 => Float32x3,
-                        2 => Unorm8x4,
-                    ],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: VIEW_FORMAT,
-                    // The shader writes premultiplied colour: opaque draws
-                    // replace, see-through ones blend.
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+        let pipeline = |v: Variant| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(v.label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3,
+                            1 => Float32x3,
+                            2 => Unorm8x4,
+                        ],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(v.fragment),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: VIEW_FORMAT,
+                        // The shader writes premultiplied colour: opaque
+                        // draws replace, see-through ones blend.
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: if v.colour {
+                            wgpu::ColorWrites::ALL
+                        } else {
+                            wgpu::ColorWrites::empty()
+                        },
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    // No culling: thin forms and the inside of open shapes stay visible.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(v.depth_write),
+                    depth_compare: Some(v.depth_compare),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: SAMPLES,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        use wgpu::CompareFunction::{Always, Less, LessEqual};
+        Self {
+            pipeline: pipeline(Variant {
+                label: "clay",
+                fragment: "fs",
+                depth_write: true,
+                depth_compare: Less,
+                colour: true,
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                // No culling: thin forms and the inside of open shapes stay visible.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
+            ghost_clear: pipeline(Variant {
+                label: "ghost clear",
+                fragment: "fs_far",
+                depth_write: true,
+                depth_compare: Always,
+                colour: false,
             }),
-            multisample: wgpu::MultisampleState {
-                count: SAMPLES,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
-        Self { pipeline, slots }
+            ghost_depth: pipeline(Variant {
+                label: "ghost depth",
+                fragment: "fs_blank",
+                depth_write: true,
+                depth_compare: Less,
+                colour: false,
+            }),
+            ghost_colour: pipeline(Variant {
+                label: "ghost",
+                fragment: "fs",
+                depth_write: false,
+                depth_compare: LessEqual,
+                colour: true,
+            }),
+            slots,
+        }
     }
 
     /// Sets the camera and look for the slot's next draws. Each slot keeps
@@ -193,6 +265,31 @@ impl ClayPass {
         &self,
         queue: &wgpu::Queue,
         slot: Slot,
+        camera: &OrbitCamera,
+        aspect: f32,
+        look: &Look,
+    ) {
+        self.write(queue, slot, Layer::Main, camera, aspect, look);
+    }
+
+    /// Like [`prepare`](Self::prepare), for the slot's ghost draws. Kept
+    /// apart, so the slot's own draws and its ghost can share one submit.
+    pub fn prepare_ghost(
+        &self,
+        queue: &wgpu::Queue,
+        slot: Slot,
+        camera: &OrbitCamera,
+        aspect: f32,
+        look: &Look,
+    ) {
+        self.write(queue, slot, Layer::Ghost, camera, aspect, look);
+    }
+
+    fn write(
+        &self,
+        queue: &wgpu::Queue,
+        slot: Slot,
+        layer: Layer,
         camera: &OrbitCamera,
         aspect: f32,
         look: &Look,
@@ -211,13 +308,29 @@ impl ClayPass {
                 0.0,
             ],
         };
-        let (buffer, _) = &self.slots[slot.index()];
+        let (buffer, _) = &self.slots[slot.index()][layer as usize];
         queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, slot: Slot, mesh: &GpuMesh) {
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.slots[slot.index()].1, &[]);
+        self.draw_mesh(pass, slot, Layer::Main, mesh);
+    }
+
+    /// Lays `mesh` over everything the pass has drawn so far, as one
+    /// see-through layer with the look given to
+    /// [`prepare_ghost`](Self::prepare_ghost): only its nearest surface
+    /// shows, and nothing drawn before hides it. It leaves the ghost's depth
+    /// in the depth buffer, so draw it last.
+    pub fn draw_ghost(&self, pass: &mut wgpu::RenderPass<'_>, slot: Slot, mesh: &GpuMesh) {
+        for pipeline in [&self.ghost_clear, &self.ghost_depth, &self.ghost_colour] {
+            pass.set_pipeline(pipeline);
+            self.draw_mesh(pass, slot, Layer::Ghost, mesh);
+        }
+    }
+
+    fn draw_mesh(&self, pass: &mut wgpu::RenderPass<'_>, slot: Slot, layer: Layer, mesh: &GpuMesh) {
+        pass.set_bind_group(0, &self.slots[slot.index()][layer as usize].1, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..1);

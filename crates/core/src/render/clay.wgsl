@@ -80,3 +80,26 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let srgb = to_srgb(clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0)));
     return vec4<f32>(srgb * opacity, opacity);
 }
+
+// The ghost's first step: where it covers, the depth goes back to the far
+// plane, so what was drawn before it cannot hide it. Its pipeline writes no
+// colour.
+struct Far {
+    @location(0) colour: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+@fragment
+fn fs_far() -> Far {
+    var out: Far;
+    out.colour = vec4<f32>(0.0);
+    out.depth = 1.0;
+    return out;
+}
+
+// Depth only (its pipeline writes no colour): keeps the ghost's nearest
+// surface, so the colour step blends that one alone.
+@fragment
+fn fs_blank() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}
