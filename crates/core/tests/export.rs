@@ -194,3 +194,238 @@ fn end_card_shows_the_title_and_the_footer() {
     assert!(frame.inked(w / 3..2 * w / 3, h - 50..h - 30) > 50);
     assert_eq!(frame.inked(0..w / 6, 0..h / 4), 0);
 }
+
+mod job {
+    use glam::Vec3;
+    use splatstudy_core::export::{
+        EncodedFrame, Gpu, Job, Progress, Settings, Sink, Support, VideoConfig, VideoEncoder,
+        mp4::Mp4, zip::Zip,
+    };
+    use splatstudy_core::sculpt::{Brush, Dab, Replay, Sculpt};
+
+    use super::*;
+
+    /// Stands in for the browser's encoder: each frame becomes a short
+    /// "access unit" holding its index and the first pixel, a frame later,
+    /// as real encoders lag.
+    #[derive(Default)]
+    struct FakeEncoder {
+        config: Option<VideoConfig>,
+        queue: Vec<EncodedFrame>,
+        out: Vec<EncodedFrame>,
+        finished: bool,
+        frames: u64,
+    }
+
+    impl VideoEncoder for FakeEncoder {
+        fn support(&self) -> Support {
+            Support::Yes
+        }
+        fn start(&mut self, config: &VideoConfig) -> Result<(), String> {
+            self.config = Some(*config);
+            Ok(())
+        }
+        fn pending(&self) -> usize {
+            self.queue.len()
+        }
+        fn encode(&mut self, rgba: &[u8], index: u64, key: bool) -> Result<(), String> {
+            let c = self.config.unwrap();
+            assert_eq!(rgba.len(), (c.width * c.height * 4) as usize);
+            assert_eq!(index, self.frames, "frames arrive in order");
+            self.frames += 1;
+            let mut data = 9u32.to_be_bytes().to_vec();
+            data.extend_from_slice(&(index as u32).to_be_bytes());
+            data.extend_from_slice(&rgba[..4]);
+            data.push(0x65);
+            self.out.append(&mut self.queue);
+            self.queue.push(EncodedFrame { data, key });
+            Ok(())
+        }
+        fn finish(&mut self) {
+            self.out.append(&mut self.queue);
+            self.finished = true;
+        }
+        fn take(&mut self) -> Vec<EncodedFrame> {
+            std::mem::take(&mut self.out)
+        }
+        fn config(&self) -> Option<Vec<u8>> {
+            (self.frames > 0).then(|| vec![1, 0x64, 0, 0x28, 0xFF, 0xE0, 0])
+        }
+        fn done(&self) -> bool {
+            self.finished
+        }
+        fn error(&self) -> Option<String> {
+            None
+        }
+        fn cancel(&mut self) {}
+    }
+
+    /// Three seconds of strokes on a small sphere.
+    fn replay() -> Replay {
+        let start = Mesh::icosphere(3);
+        let mut s = Sculpt::new(start.clone());
+        for k in 0..6 {
+            s.set_clock(k as f64 * 0.5);
+            s.begin_stroke();
+            s.dab(Dab {
+                brush: Brush::Clay,
+                centre: Vec3::new(0.2 * k as f32 - 0.5, 0.3, 1.0).normalize(),
+                radius: 0.4,
+                strength: 1.0,
+                invert: false,
+                symmetry: true,
+                direction: Vec3::ZERO,
+            });
+            s.end_stroke();
+            s.refresh();
+        }
+        Replay::new(start, s.log().to_vec())
+    }
+
+    fn settings() -> Settings {
+        Settings {
+            layout: Layout::SideBySide,
+            shape: Shape::Wide,
+            short_side: 90,
+            fps: 10,
+            speed: 1.0,
+        }
+    }
+
+    /// Steps a job to the end like the app does, frame after frame.
+    fn run(
+        job: &mut Job,
+        gpu: &Gpu,
+        mut encoder: Option<&mut FakeEncoder>,
+    ) -> (Progress, Vec<(String, Vec<u8>)>) {
+        let mut writes = Vec::new();
+        let mut reference_draws = 0;
+        // Steps don't wait for the GPU, so this spins; give it time when
+        // other tests share the GPU.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
+            let encoder = encoder.as_deref_mut().map(|e| e as &mut dyn VideoEncoder);
+            let progress = job.step(
+                gpu,
+                encoder,
+                &mut |_, _, aspect| {
+                    assert!(aspect > 0.0);
+                    reference_draws += 1;
+                },
+                &mut writes,
+            );
+            if !matches!(progress, Progress::Working { .. }) {
+                assert!(reference_draws > 0, "the reference half was drawn");
+                return (progress, writes);
+            }
+        }
+        panic!("the export never finished");
+    }
+
+    fn be32(d: &[u8], at: usize) -> usize {
+        u32::from_be_bytes(d[at..at + 4].try_into().unwrap()) as usize
+    }
+
+    #[test]
+    fn a_video_export_muxes_every_frame_in_order() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipping export test");
+            return;
+        };
+        let clay = ClayPass::new(&device);
+        let gpu = Gpu {
+            device: &device,
+            queue: &queue,
+            clay: &clay,
+        };
+        let replay = replay();
+        let settings = settings();
+        let expected = settings.timelapse_frames(replay.duration()) + 4 * 10;
+        let mut encoder = FakeEncoder::default();
+        let mut job = Job::new(
+            &device,
+            settings,
+            replay,
+            [OrbitCamera::default(); 2],
+            Some("credit".into()),
+            EndCard::default(),
+            "study".into(),
+            Sink::Video(Mp4::new(160, 90, 10)),
+            Some(&mut encoder),
+        )
+        .unwrap();
+        assert_eq!(job.total(), expected);
+        assert_eq!(encoder.config.unwrap().width, 160);
+        let (progress, _) = run(&mut job, &gpu, Some(&mut encoder));
+        let Progress::File { name, mime, bytes } = progress else {
+            panic!("{progress:?}");
+        };
+        assert_eq!((name.as_str(), mime), ("study.mp4", "video/mp4"));
+        assert_eq!(encoder.frames, expected);
+        // The sample size table lists every frame, each 13 bytes.
+        let stsz = bytes.windows(4).position(|w| w == b"stsz").unwrap();
+        // After the type: version and flags, a size for all (0: they vary),
+        // the count, then each size.
+        assert_eq!(be32(&bytes, stsz + 8), 0);
+        assert_eq!(be32(&bytes, stsz + 12), expected as usize);
+        assert_eq!(be32(&bytes, stsz + 16), 13);
+        // In mdat, the frames follow each other in order.
+        let mdat = bytes.windows(4).position(|w| w == b"mdat").unwrap() + 4;
+        for i in 0..expected as usize {
+            assert_eq!(be32(&bytes, mdat + 13 * i + 4), i);
+        }
+        // The last frames are the end card: black where the clay was.
+        let last = mdat + 13 * (expected as usize - 1);
+        assert_eq!(&bytes[last + 8..last + 11], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn image_exports_zip_or_write_every_frame() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipping export test");
+            return;
+        };
+        let clay = ClayPass::new(&device);
+        let gpu = Gpu {
+            device: &device,
+            queue: &queue,
+            clay: &clay,
+        };
+        let new_job = |sink| {
+            Job::new(
+                &device,
+                settings(),
+                replay(),
+                [OrbitCamera::default(); 2],
+                None,
+                EndCard::default(),
+                "study".into(),
+                sink,
+                None,
+            )
+            .unwrap()
+        };
+
+        let mut job = new_job(Sink::Zip(Zip::new()));
+        let total = job.total() as usize;
+        let (progress, writes) = run(&mut job, &gpu, None);
+        assert!(writes.is_empty());
+        let Progress::File { name, bytes, .. } = progress else {
+            panic!("{progress:?}");
+        };
+        assert_eq!(name, "study.zip");
+        let end = bytes.len() - 22;
+        assert_eq!(
+            u16::from_le_bytes([bytes[end + 10], bytes[end + 11]]) as usize,
+            total
+        );
+
+        let mut job = new_job(Sink::Folder("out".into()));
+        let (progress, writes) = run(&mut job, &gpu, None);
+        assert!(matches!(progress, Progress::Written { frames } if frames as usize == total));
+        assert_eq!(writes.len(), total);
+        let first = std::path::Path::new(&writes[0].0);
+        assert_eq!(first, std::path::Path::new("out").join("study_00000.png"));
+        assert_eq!(&writes[0].1[1..4], b"PNG");
+    }
+}

@@ -4,20 +4,24 @@
 //! MP4 video, or saved as PNG images when no video encoder is there.
 
 pub mod compositor;
+pub mod job;
 pub mod layout;
 pub mod mp4;
 pub mod video;
 pub mod zip;
 
 pub use compositor::{Compositor, EndCard, Overlay};
+pub use job::{Gpu, Job, Progress, Settings, Sink};
 pub use layout::{Layout, Placement, PxRect, Shape, place};
 pub use video::{EncodedFrame, Support, VideoConfig, VideoEncoder};
 
 /// An RGBA8 frame as a PNG, without the alpha (frames are opaque).
 pub fn png(rgba: &[u8], size: [u32; 2]) -> Result<Vec<u8>, png::EncodingError> {
     let rgb: Vec<u8> = rgba
-        .chunks_exact(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [r, g, b])
         .collect();
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, size[0], size[1]);
