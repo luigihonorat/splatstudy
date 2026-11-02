@@ -4,8 +4,8 @@
 //! resources, takes input events and draws frames.
 
 use egui::{
-    Align, Align2, Color32, CursorIcon, Frame, Key, Layout, Margin, PointerButton, Pos2, Rect,
-    RichText, Sense, Stroke,
+    Align2, Color32, CursorIcon, Frame, Key, Margin, PointerButton, Pos2, Rect, RichText, Sense,
+    Stroke,
 };
 use glam::{Vec2, Vec3};
 
@@ -14,15 +14,32 @@ use crate::input::{Button, InputEvent, InputState, Modifiers, PointerKind, Point
 use crate::navigation::{NavAction, NavStyle};
 use crate::render::{self, ViewTarget, clay::ClayPass, clay::GpuMesh};
 use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh, Sculpt};
-use crate::ui::{self, fonts, i18n::Lang, theme, theme::ThemeMode};
+use crate::ui::{self, fonts, i18n::Lang, i18n::Tr, menu, theme, theme::ThemeMode};
 
 /// What the shell should do after a frame.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FrameOutput {
     pub cursor: CursorIcon,
     /// Seconds until the next frame is needed; `None` waits for input.
     pub repaint_after: Option<f64>,
+    /// The user chose exit: the shell should close the app.
+    pub quit: bool,
+    /// A link the shell should open in the browser.
+    pub open_url: Option<String>,
 }
+
+/// The browser keeps a tab open and owns some shortcuts (Ctrl+N), so the
+/// web build leaves those items out.
+const WEB: bool = cfg!(target_arch = "wasm32");
+const ISSUES_URL: &str = "https://github.com/luigihonorat/splatstudy/issues";
+const REPO_URL: &str = "https://github.com/luigihonorat/splatstudy";
+const SITE_URL: &str = "https://splatstudy.com";
+/// Every build ships the notices; the web page has them next to it.
+const LICENCES_URL: &str = if WEB {
+    "licenses.html"
+} else {
+    "https://splatstudy.com/licenses.html"
+};
 
 const SCULPT: usize = 0;
 const REFERENCE: usize = 1;
@@ -63,6 +80,20 @@ fn tool_index(tool: Brush) -> usize {
     }
 }
 
+/// Preset viewpoints: label, key, yaw and pitch. Right and left are the
+/// viewer's, as seen in the front view.
+fn viewpoints(tr: &Tr) -> [(&'static str, Option<Key>, f32, f32); 6] {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+    [
+        (tr.front, Some(Key::Num1), 0.0, 0.0),
+        (tr.back, None, PI, 0.0),
+        (tr.left, None, -FRAC_PI_2, 0.0),
+        (tr.right, Some(Key::Num3), FRAC_PI_2, 0.0),
+        (tr.top, Some(Key::Num7), 0.0, FRAC_PI_2),
+        (tr.three_quarter, None, FRAC_PI_4, 0.3),
+    ]
+}
+
 /// What a drag in a view is doing.
 #[derive(Clone, Copy)]
 enum Drag {
@@ -98,6 +129,11 @@ pub struct App {
     lang: Lang,
     theme: ThemeMode,
     nav: NavStyle,
+    /// Shortcuts read Cmd instead of Ctrl.
+    mac: bool,
+    show_shortcuts: bool,
+    show_about: bool,
+    quit: bool,
     debug: bool,
     /// Share of the central width given to the sculpt view.
     split: f32,
@@ -150,6 +186,10 @@ impl App {
             lang,
             theme,
             nav: NavStyle::default(),
+            mac: cfg!(target_os = "macos"),
+            show_shortcuts: false,
+            show_about: false,
+            quit: false,
             debug: false,
             split: 0.5,
             views,
@@ -162,6 +202,11 @@ impl App {
             tool: ToolSettings::default(),
             dirty: true,
         }
+    }
+
+    /// Shows shortcuts with Cmd; the web shell knows this from the browser.
+    pub fn set_mac(&mut self, mac: bool) {
+        self.mac = mac;
     }
 
     pub fn set_debug(&mut self, on: bool) {
@@ -219,6 +264,14 @@ impl App {
         let ctx = self.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| self.ui(ui));
         self.input.samples.clear();
+        let open_url = output
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                _ => None,
+            });
 
         let resized = self.fit_views(ppp);
         for range in self.sculpt.take_dirty() {
@@ -284,6 +337,8 @@ impl App {
         FrameOutput {
             cursor: output.platform_output.cursor_icon,
             repaint_after,
+            quit: std::mem::take(&mut self.quit),
+            open_url,
         }
     }
 
@@ -322,7 +377,7 @@ impl App {
             .frame(
                 Frame::NONE
                     .fill(p.bg)
-                    .inner_margin(Margin::symmetric(20, 12)),
+                    .inner_margin(Margin::symmetric(20, 4)),
             )
             .show(ui, |ui| self.bar(ui));
         let panel_frame = Frame::NONE.fill(p.bg).inner_margin(Margin {
@@ -342,53 +397,303 @@ impl App {
             .frame(panel_frame)
             .show(ui, |ui| self.reference_panel(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| self.views_ui(ui));
+        self.windows(ui);
     }
 
     fn shortcuts(&mut self, ui: &egui::Ui) {
-        let (redo, undo, smaller, larger) = ui.input_mut(|i| {
-            let redo = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::Z)
-                || i.consume_key(egui::Modifiers::COMMAND, Key::Y);
-            let undo = i.consume_key(egui::Modifiers::COMMAND, Key::Z);
-            let smaller = i.consume_key(egui::Modifiers::NONE, Key::OpenBracket);
-            let larger = i.consume_key(egui::Modifiers::NONE, Key::CloseBracket);
-            (redo, undo, smaller, larger)
-        });
-        if redo {
+        use egui::Modifiers as M;
+        let pressed = |m: M, key: Key| ui.input_mut(|i| i.consume_key(m, key));
+        if pressed(M::COMMAND | M::SHIFT, Key::Z) || pressed(M::COMMAND, Key::Y) {
             self.sculpt.redo();
-        } else if undo {
+        } else if pressed(M::COMMAND, Key::Z) {
             self.sculpt.undo();
         }
-        if smaller {
+        if pressed(M::NONE, Key::OpenBracket) {
             self.tool.radius = (self.tool.radius / 1.2).max(4.0);
         }
-        if larger {
+        if pressed(M::NONE, Key::CloseBracket) {
             self.tool.radius = (self.tool.radius * 1.2).min(400.0);
+        }
+        for (_, key, yaw, pitch) in viewpoints(self.lang.tr()) {
+            if key.is_some_and(|key| pressed(M::NONE, key)) {
+                self.view_from(yaw, pitch);
+            }
+        }
+        if pressed(M::NONE, Key::F) {
+            self.frame_sculpt();
+        }
+        if pressed(M::NONE, Key::Home) {
+            self.reset_view();
+        }
+        if !WEB && pressed(M::COMMAND, Key::N) {
+            self.new_scene();
+        }
+        if !WEB && pressed(M::COMMAND, Key::Q) {
+            self.quit = true;
         }
         self.sculpt.refresh();
     }
 
+    /// A shortcut with the platform's command key, as menus show it.
+    fn keys(&self, key: &str) -> String {
+        format!("{}+{key}", if self.mac { "Cmd" } else { "Ctrl" })
+    }
+
     fn bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("splatstudy").font(fonts::regular(18.0)));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let tr = self.lang.tr();
-                let other = self.theme.toggled();
-                let label = match other {
-                    ThemeMode::Light => tr.theme_light,
-                    ThemeMode::Dark => tr.theme_dark,
-                };
-                if ui::choice(ui, label, false).clicked() {
-                    self.theme = other;
-                    ui::theme::apply(ui.ctx(), other);
+        let tr = self.lang.tr();
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button(tr.menu_file, |ui| self.file_menu(ui));
+            ui.menu_button(tr.menu_edit, |ui| self.edit_menu(ui));
+            ui.menu_button(tr.menu_view, |ui| self.view_menu(ui));
+            ui.menu_button(tr.navigation, |ui| self.navigation_menu(ui));
+            ui.menu_button(tr.menu_language, |ui| self.language_menu(ui));
+            ui.menu_button(tr.menu_help, |ui| self.help_menu(ui));
+        });
+    }
+
+    // Items that do nothing yet are listed disabled, so the menus keep their
+    // shape while the features land. They get a shortcut when they work.
+
+    fn file_menu(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        ui.set_min_width(menu::MIN_WIDTH);
+        // Browsers keep Ctrl+N for a new window.
+        let new_keys = if WEB { String::new() } else { self.keys("N") };
+        if menu::action(ui, true, tr.new_scene, &new_keys) {
+            self.new_scene();
+        }
+        menu::action(ui, false, tr.open_scene, "");
+        if !WEB {
+            menu::action(ui, false, tr.open_recent, "");
+        }
+        menu::action(ui, false, tr.save_scene, "");
+        menu::action(ui, false, tr.save_scene_as, "");
+        menu::action(ui, false, tr.revert, "");
+        ui.separator();
+        menu::action(ui, false, tr.import_reference, "");
+        menu::action(ui, false, tr.import_sculpt, "");
+        ui.separator();
+        menu::submenu(ui, tr.export, |ui| {
+            ui.set_min_width(120.0);
+            menu::action(ui, false, "OBJ…", "");
+            menu::action(ui, false, "STL…", "");
+        });
+        if !WEB {
+            ui.separator();
+            if menu::action(ui, true, tr.exit, &self.keys("Q")) {
+                self.quit = true;
+            }
+        }
+    }
+
+    fn edit_menu(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        ui.set_min_width(menu::MIN_WIDTH);
+        if menu::action(ui, self.sculpt.can_undo(), tr.undo, &self.keys("Z")) {
+            self.sculpt.undo();
+        }
+        if menu::action(ui, self.sculpt.can_redo(), tr.redo, &self.keys("Shift+Z")) {
+            self.sculpt.redo();
+        }
+        ui.separator();
+        menu::action(ui, false, tr.mirror_sculpt, "");
+        menu::action(ui, false, tr.remove_reference, "");
+        ui.separator();
+        menu::action(ui, false, tr.preferences, "");
+    }
+
+    fn view_menu(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        ui.set_min_width(menu::MIN_WIDTH);
+        menu::action(ui, false, tr.link_cameras, "");
+        menu::submenu(ui, tr.viewpoints, |ui| {
+            ui.set_min_width(160.0);
+            for (label, key, yaw, pitch) in viewpoints(tr) {
+                if menu::action(ui, true, label, key.map_or("", Key::name)) {
+                    self.view_from(yaw, pitch);
                 }
-                ui.add_space(8.0);
-                for lang in Lang::ALL.into_iter().rev() {
-                    if ui::choice(ui, lang.native_name(), lang == self.lang).clicked() {
-                        self.lang = lang;
+            }
+        });
+        if menu::action(ui, true, tr.frame_sculpt, "F") {
+            self.frame_sculpt();
+        }
+        if menu::action(ui, true, tr.reset_view, "Home") {
+            self.reset_view();
+        }
+        ui.separator();
+        for label in [
+            tr.silhouette,
+            tr.ghost,
+            tr.mirror_view,
+            tr.plumb_line,
+            tr.grid,
+        ] {
+            menu::action(ui, false, label, "");
+        }
+        ui.separator();
+        if menu::action(ui, true, tr.switch_theme, "") {
+            self.theme = self.theme.toggled();
+            ui::theme::apply(ui.ctx(), self.theme);
+        }
+    }
+
+    fn navigation_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(menu::MIN_WIDTH);
+        for style in NavStyle::ALL {
+            if menu::item(ui, style.name(), "", self.nav == style).clicked() {
+                self.nav = style;
+            }
+        }
+        ui.separator();
+        menu::note(ui, self.nav_hint());
+    }
+
+    fn language_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(menu::MIN_WIDTH);
+        for lang in Lang::ALL {
+            if menu::item(ui, lang.native_name(), "", self.lang == lang).clicked() {
+                self.lang = lang;
+            }
+        }
+    }
+
+    fn help_menu(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        ui.set_min_width(menu::MIN_WIDTH);
+        if menu::action(ui, true, tr.shortcuts, "") {
+            self.show_shortcuts = true;
+        }
+        menu::action(ui, false, tr.getting_started, "");
+        if menu::action(ui, true, tr.report_issue, "") {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(ISSUES_URL));
+        }
+        if menu::action(ui, true, tr.licences, "") {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(LICENCES_URL));
+        }
+        ui.separator();
+        if menu::action(ui, true, tr.about, "") {
+            self.show_about = true;
+        }
+    }
+
+    /// The keyboard shortcuts and about windows, opened from the help menu.
+    fn windows(&mut self, ui: &egui::Ui) {
+        let tr = self.lang.tr();
+        // Wide enough that the centred title isn't cut short.
+        let window = |title: &'static str, width: f32| {
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .min_width(width)
+                .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        };
+
+        let mut open = self.show_shortcuts;
+        window(tr.shortcuts, 420.0)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+                let mut rows = vec![
+                    (tr.undo, self.keys("Z")),
+                    (tr.redo, self.keys("Shift+Z")),
+                    (tr.size, "[  ]".to_owned()),
+                ];
+                for (label, key, _, _) in viewpoints(tr) {
+                    if let Some(key) = key {
+                        rows.push((label, key.name().to_owned()));
+                    }
+                }
+                rows.push((tr.frame_sculpt, "F".to_owned()));
+                rows.push((tr.reset_view, "Home".to_owned()));
+                if !WEB {
+                    rows.push((tr.new_scene, self.keys("N")));
+                    rows.push((tr.exit, self.keys("Q")));
+                }
+                egui::Grid::new("shortcuts")
+                    .num_columns(2)
+                    .spacing([32.0, 6.0])
+                    .show(ui, |ui| {
+                        for (label, keys) in rows {
+                            ui.label(label);
+                            ui.label(RichText::new(keys).color(muted));
+                            ui.end_row();
+                        }
+                    });
+                ui::section(ui, tr.navigation);
+                ui.label(RichText::new(self.nav_hint()).color(muted));
+            });
+        self.show_shortcuts = open;
+
+        let mut open = self.show_about;
+        window(tr.about, 340.0)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.set_max_width(320.0);
+                let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+                ui.label(tr.about_text);
+                ui.label(
+                    RichText::new(format!(
+                        "splatstudy {} · GPL-3.0-or-later",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .color(muted),
+                );
+                for (text, url) in [
+                    ("splatstudy.com", SITE_URL),
+                    ("github.com/luigihonorat/splatstudy", REPO_URL),
+                ] {
+                    if ui::choice(ui, text, false).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                     }
                 }
             });
-        });
+        self.show_about = open;
+    }
+
+    fn nav_hint(&self) -> &'static str {
+        let tr = self.lang.tr();
+        match self.nav {
+            NavStyle::ZBrush => tr.hint_zbrush,
+            NavStyle::Blender => tr.hint_blender,
+            NavStyle::Maya => tr.hint_maya,
+        }
+    }
+
+    /// A fresh sphere seen from the default view.
+    fn new_scene(&mut self) {
+        self.sculpt = Sculpt::new(Mesh::icosphere(DEFAULT_LEVEL));
+        self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
+        self.reset_view();
+    }
+
+    /// Turns both views to the same direction, so they can be compared.
+    fn view_from(&mut self, yaw: f32, pitch: f32) {
+        for camera in &mut self.cameras {
+            camera.look_from(yaw, pitch);
+        }
+    }
+
+    fn reset_view(&mut self) {
+        self.cameras = [OrbitCamera::default(); 2];
+    }
+
+    /// Fits the sculpt view to the clay's bounding sphere.
+    fn frame_sculpt(&mut self) {
+        let positions = &self.sculpt.mesh.positions;
+        if positions.is_empty() {
+            return;
+        }
+        let (min, max) = positions
+            .iter()
+            .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &p| {
+                (lo.min(p), hi.max(p))
+            });
+        let centre = (min + max) / 2.0;
+        let radius = positions
+            .iter()
+            .map(|p| p.distance(centre))
+            .fold(0.0, f32::max);
+        self.cameras[SCULPT].frame(centre, radius);
     }
 
     fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
@@ -433,27 +738,9 @@ impl App {
             self.sculpt.redo();
         }
         if ui::choice(ui, tr.new_sphere, false).clicked() {
-            self.sculpt = Sculpt::new(Mesh::icosphere(DEFAULT_LEVEL));
-            self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
+            self.new_scene();
         }
         self.sculpt.refresh();
-
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            let muted = ui.visuals().widgets.inactive.fg_stroke.color;
-            let hint = match self.nav {
-                NavStyle::ZBrush => tr.hint_zbrush,
-                NavStyle::Blender => tr.hint_blender,
-                NavStyle::Maya => tr.hint_maya,
-            };
-            ui.label(RichText::new(hint).font(fonts::regular(11.0)).color(muted));
-            ui.add_space(4.0);
-            for style in NavStyle::ALL.into_iter().rev() {
-                if ui::choice(ui, style.name(), self.nav == style).clicked() {
-                    self.nav = style;
-                }
-            }
-            ui::section(ui, tr.navigation);
-        });
     }
 
     fn reference_panel(&mut self, ui: &mut egui::Ui) {

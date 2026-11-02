@@ -60,6 +60,19 @@ impl OrbitCamera {
         self.pitch = (self.pitch + dy * SPEED).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
+    /// Looks at the target from a fixed direction, keeping the distance.
+    pub fn look_from(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw;
+        self.pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+
+    /// Centres a sphere of `radius` around `centre` so it fills the view's
+    /// height with a margin, keeping the direction.
+    pub fn frame(&mut self, centre: Vec3, radius: f32) {
+        self.target = centre;
+        self.distance = 1.25 * radius.max(1e-3) / (self.fov_y / 2.0).sin();
+    }
+
     /// Slides the target so the surface follows the pointer; `view_height`
     /// is the viewport height in points.
     pub fn pan(&mut self, dx: f32, dy: f32, view_height: f32) {
@@ -127,6 +140,25 @@ mod tests {
         let (origin, dir) = cam.ray(glam::Vec2::ZERO, 1.5);
         let to_target = (cam.target - origin).normalize();
         assert!(dir.dot(to_target) > 0.9999);
+    }
+
+    #[test]
+    fn viewpoints_and_framing() {
+        let mut cam = OrbitCamera::default();
+        cam.look_from(std::f32::consts::FRAC_PI_2, 0.0);
+        assert!(
+            cam.eye().x > 0.0 && cam.eye().z.abs() < 1e-4,
+            "right view from +X"
+        );
+        cam.look_from(0.0, 10.0);
+        assert!(cam.pitch <= PITCH_LIMIT);
+
+        let centre = Vec3::new(0.5, 1.0, -0.3);
+        cam.frame(centre, 2.0);
+        assert_eq!(cam.target, centre);
+        // The sphere's silhouette fits inside the vertical field of view.
+        let half_angle = (2.0 / cam.distance).asin();
+        assert!(half_angle < cam.fov_y / 2.0);
     }
 
     #[test]

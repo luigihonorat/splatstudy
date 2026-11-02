@@ -102,6 +102,7 @@ async fn run() -> Result<(), JsValue> {
         .unwrap_or_default();
     let mut app = App::new(device.clone(), queue.clone(), format, lang);
     app.set_debug(query_value(&search, "debug").is_some());
+    app.set_mac(is_mac());
 
     let shell = Rc::new(RefCell::new(Shell {
         app,
@@ -352,6 +353,11 @@ impl Shell {
                 .canvas
                 .style()
                 .set_property("cursor", css_cursor(out.cursor));
+        }
+        if let Some(url) = out.open_url
+            && let Some(window) = web_sys::window()
+        {
+            let _ = window.open_with_url_and_target(&url, "_blank");
         }
     }
 }

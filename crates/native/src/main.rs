@@ -159,6 +159,14 @@ fn run() -> Result<(), String> {
             .repaint_after
             .map(|s| Instant::now() + Duration::from_secs_f64(s));
         cursors.set(out.cursor);
+        if let Some(url) = out.open_url
+            && let Err(e) = sdl3::url::open_url(&url)
+        {
+            eprintln!("could not open {url}: {e}");
+        }
+        if out.quit {
+            return Ok(());
+        }
     }
 }
 
