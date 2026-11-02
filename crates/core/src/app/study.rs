@@ -7,6 +7,7 @@ use egui::{CursorIcon, Key, Rect, Sense, Stroke, pos2};
 
 use super::views::shown;
 use super::{App, SCULPT};
+use crate::render::clay::Look;
 use crate::ui::{menu, theme};
 
 /// Which views show.
@@ -37,6 +38,10 @@ pub(super) struct StudyState {
     pub(super) grid: bool,
     /// Rows of the grid; its cells are square.
     pub(super) grid_divisions: u32,
+    /// The clay, and the reference, filled flat: only the outline counts.
+    pub(super) silhouette: bool,
+    /// The reference laid over the sculpt view, see-through.
+    pub(super) ghost: bool,
 }
 
 impl Default for StudyState {
@@ -50,11 +55,69 @@ impl Default for StudyState {
             plumb_x: [0.5; 2],
             grid: false,
             grid_divisions: 4,
+            silhouette: false,
+            ghost: false,
         }
     }
 }
 
+/// How the reference part should draw the reference into a pass: the
+/// study aids decide, the reference part knows how (splats, mesh).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)] // read by the reference part's drawing, once it lands
+pub(super) struct ReferenceLook {
+    /// Filled flat with `theme::SILHOUETTE_INK`: no light, no own colours.
+    pub(super) flat: bool,
+    /// 0..1.
+    pub(super) opacity: f32,
+    /// Laid over everything the pass has drawn as one see-through layer,
+    /// rather than hidden by what is in front of it: the ghost. Meshes do
+    /// this with `ClayPass::prepare_ghost` and `draw_ghost`; splats skip
+    /// the depth test.
+    pub(super) over: bool,
+}
+
 impl App {
+    /// The clay's look in the sculpt view.
+    pub(super) fn sculpt_look(&self) -> Look {
+        if self.study.silhouette {
+            Look::flat(theme::SILHOUETTE_INK)
+        } else {
+            Look::lit(theme::CLAY)
+        }
+    }
+
+    /// The reference's look in its own view.
+    #[allow(dead_code)] // called by the reference part's drawing, once it lands
+    pub(super) fn reference_look(&self) -> ReferenceLook {
+        ReferenceLook {
+            flat: self.study.silhouette,
+            opacity: 1.0,
+            over: false,
+        }
+    }
+
+    /// The reference's look as a ghost over the sculpt view, when that is on.
+    pub(super) fn ghost_look(&self) -> Option<ReferenceLook> {
+        self.study.ghost.then_some(ReferenceLook {
+            flat: self.study.silhouette,
+            opacity: theme::GHOST_OPACITY,
+            over: true,
+        })
+    }
+
+    /// Lays the reference over the sculpt view, seen with the sculpt's
+    /// camera, when the ghost is on. Called last in the sculpt view's pass.
+    pub(super) fn draw_ghost(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(look) = self.ghost_look() else {
+            return;
+        };
+        // The reference part's drawing plugs in here, once it lands:
+        // self.draw_reference_as(pass, Slot::SculptView, &self.cameras[SCULPT],
+        //     self.views[SCULPT].aspect(), &look);
+        let _ = (pass, look);
+    }
+
     /// The camera link, at the top of the view menu.
     pub(super) fn link_item(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
@@ -91,8 +154,11 @@ impl App {
         if menu::item(ui, tr.mirror_view, "R", self.study.mirror).clicked() {
             self.study.mirror = !self.study.mirror;
         }
-        for label in [tr.silhouette, tr.ghost] {
-            menu::action(ui, false, label, "");
+        if menu::item(ui, tr.silhouette, "K", self.study.silhouette).clicked() {
+            self.study.silhouette = !self.study.silhouette;
+        }
+        if menu::item(ui, tr.ghost, "O", self.study.ghost).clicked() {
+            self.study.ghost = !self.study.ghost;
         }
         if menu::item(ui, tr.plumb_line, "V", self.study.plumb).clicked() {
             self.study.plumb = !self.study.plumb;
@@ -163,6 +229,12 @@ impl App {
         }
         if pressed(Key::R) {
             self.study.mirror = !self.study.mirror;
+        }
+        if pressed(Key::K) {
+            self.study.silhouette = !self.study.silhouette;
+        }
+        if pressed(Key::O) {
+            self.study.ghost = !self.study.ghost;
         }
         if pressed(Key::V) {
             self.study.plumb = !self.study.plumb;
