@@ -16,19 +16,23 @@ impl App {
     pub(super) fn shortcuts(&mut self, ui: &egui::Ui) {
         use egui::Modifiers as M;
         let pressed = |m: M, key: Key| ui.input_mut(|i| i.consume_key(m, key));
-        self.sculpt_shortcuts(ui);
-        for (_, key, yaw, pitch) in viewpoints(self.lang.tr()) {
-            if key.is_some_and(|key| pressed(M::NONE, key)) {
-                self.view_from(yaw, pitch);
+        // Typing in a text field (a credit, a title): its letters, Ctrl+Z
+        // and Home belong to the field, not to the tools and views.
+        if !ui.ctx().text_edit_focused() {
+            self.sculpt_shortcuts(ui);
+            for (_, key, yaw, pitch) in viewpoints(self.lang.tr()) {
+                if key.is_some_and(|key| pressed(M::NONE, key)) {
+                    self.view_from(yaw, pitch);
+                }
             }
+            if pressed(M::NONE, Key::F) {
+                self.frame_sculpt();
+            }
+            if pressed(M::NONE, Key::Home) {
+                self.reset_view();
+            }
+            self.study_shortcuts(ui);
         }
-        if pressed(M::NONE, Key::F) {
-            self.frame_sculpt();
-        }
-        if pressed(M::NONE, Key::Home) {
-            self.reset_view();
-        }
-        self.study_shortcuts(ui);
         self.file_shortcuts(ui);
         if !WEB && pressed(M::COMMAND, Key::Q) {
             self.quit = true;
