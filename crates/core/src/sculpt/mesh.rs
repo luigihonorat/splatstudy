@@ -46,8 +46,16 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    /// A mesh from any source. Vertices and triangles are reordered so that
+    /// neighbours sit close in memory, which keeps sculpting and uploads fast.
     pub fn new(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> Mesh {
         let (positions, triangles) = spatial_order(positions, triangles);
+        Self::from_ordered(positions, triangles)
+    }
+
+    /// A mesh kept in the given order, for one saved by [`Mesh::new`]
+    /// earlier: a recorded session replays exactly only on the same order.
+    pub fn from_ordered(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> Mesh {
         let mut mesh = Mesh {
             normals: vec![Vec3::ZERO; positions.len()],
             vertex_faces: vertex_faces(positions.len(), &triangles),

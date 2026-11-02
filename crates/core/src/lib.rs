@@ -10,6 +10,7 @@
 mod app;
 pub mod camera;
 pub mod input;
+pub mod io;
 pub mod navigation;
 pub mod reference;
 pub mod render;

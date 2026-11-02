@@ -51,3 +51,69 @@ pub fn definitions() -> FontDefinitions {
     );
     defs
 }
+
+#[cfg(test)]
+mod tests {
+    use egui::epaint::text::{Fonts, TextOptions};
+
+    use super::*;
+
+    /// The language tables, as subset.py reads them.
+    const TABLES: [&str; 6] = [
+        include_str!("i18n.rs"),
+        include_str!("i18n/export.rs"),
+        include_str!("i18n/files.rs"),
+        include_str!("i18n/mesh.rs"),
+        include_str!("i18n/refs.rs"),
+        include_str!("i18n/study.rs"),
+    ];
+
+    /// The contents of every string literal outside comments.
+    fn literals(source: &str) -> String {
+        let mut out = String::new();
+        for line in source.lines() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            let mut inside = false;
+            let mut chars = code.chars();
+            while let Some(c) = chars.next() {
+                match (inside, c) {
+                    (_, '"') => inside = !inside,
+                    (true, '\\') => {
+                        chars.next();
+                    }
+                    (true, c) => out.push(c),
+                    (false, _) => {}
+                }
+            }
+            // Multi-line strings continue on the next line.
+            if inside {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_embedded_fonts_cover_every_ui_string() {
+        let mut fonts = Fonts::new(TextOptions::default(), definitions());
+        let text: String = TABLES.iter().map(|t| literals(t)).collect();
+        assert!(
+            text.contains("塑像") && text.contains("sculpter"),
+            "strings read"
+        );
+        let mut missing: Vec<char> = text
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .filter(|&c| !(fonts.has_glyph(&regular(14.0), c) && fonts.has_glyph(&light(14.0), c)))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "no glyph for {missing:?}: run assets/fonts/subset.py"
+        );
+    }
+}
