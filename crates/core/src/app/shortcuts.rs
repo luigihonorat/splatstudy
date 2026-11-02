@@ -45,6 +45,15 @@ impl App {
         }
     }
 
+    pub(super) fn nav_name(&self, style: NavStyle) -> &'static str {
+        let tr = self.lang.tr();
+        match style {
+            NavStyle::ZBrush => tr.nav_zbrush,
+            NavStyle::Blender => tr.nav_blender,
+            NavStyle::Maya => tr.nav_maya,
+        }
+    }
+
     /// The windows: keyboard shortcuts and about, opened from the help menu,
     /// then each part's own.
     pub(super) fn windows(&mut self, ui: &egui::Ui) {
@@ -120,6 +129,7 @@ impl App {
                     ))
                     .color(muted),
                 );
+                ui.label(RichText::new(tr.trademarks).color(muted).small());
                 for (text, url) in [
                     ("splatstudy.com", SITE_URL),
                     ("github.com/luigihonorat/splatstudy", REPO_URL),

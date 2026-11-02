@@ -25,14 +25,6 @@ pub enum NavAction {
 impl NavStyle {
     pub const ALL: [NavStyle; 3] = [NavStyle::ZBrush, NavStyle::Blender, NavStyle::Maya];
 
-    pub fn name(self) -> &'static str {
-        match self {
-            NavStyle::ZBrush => "ZBrush",
-            NavStyle::Blender => "Blender",
-            NavStyle::Maya => "Maya",
-        }
-    }
-
     /// What a press of `button` starts. `on_clay` is true when the press
     /// landed on the sculpt, where the left button sculpts unless the
     /// preset uses it for navigation with these modifiers.

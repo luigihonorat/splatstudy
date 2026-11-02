@@ -103,7 +103,7 @@ impl App {
     fn navigation_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(menu::MIN_WIDTH);
         for style in NavStyle::ALL {
-            if menu::item(ui, style.name(), "", self.nav == style).clicked() {
+            if menu::item(ui, self.nav_name(style), "", self.nav == style).clicked() {
                 self.nav = style;
             }
         }
