@@ -55,14 +55,20 @@ pub const LOG: u32 = tag(b"LOG_");
 pub const REFERENCE: u32 = tag(b"REF_");
 pub const VIEW: u32 = tag(b"VIEW");
 pub const REFERENCE_BY_KEY: u32 = tag(b"REFH");
+/// The chunks this version reads; others are skipped without inflating.
+const KNOWN: [u32; 6] = [MESH, CHECKPOINTS, LOG, REFERENCE, VIEW, REFERENCE_BY_KEY];
 
 const DEFLATED: u32 = 1;
 /// Deflate effort: the clay is mostly floats, which barely compress past
 /// the fastest level, and saving shouldn't stall the browser.
 const DEFLATE_LEVEL: u8 = 1;
-/// A deflated chunk may not grow past this when inflated, so a corrupt or
-/// hostile file can't ask for all the memory.
+/// All deflated chunks of a file together may not grow past this when
+/// inflated, so a corrupt or hostile file can't ask for all the memory.
 const MAX_INFLATED: usize = 1 << 30;
+/// The most clay a scene may hold. Far beyond what sculpting makes, and
+/// small enough that the copies made of it and its GPU buffers fit.
+const MAX_VERTICES: usize = 4 << 20;
+const MAX_TRIANGLES: usize = 8 << 20;
 
 /// A scene as read from a file.
 pub struct Scene {
@@ -216,8 +222,15 @@ pub struct Chunk {
     pub payload: Vec<u8>,
 }
 
-/// Splits a file into its chunks, after checking the header.
+/// Splits a file into the chunks this version reads, after checking the
+/// header. Other chunks are skipped without inflating them.
 pub fn chunks(data: &[u8]) -> Result<Vec<Chunk>, ReadError> {
+    chunks_of(data, &KNOWN, MAX_INFLATED)
+}
+
+/// The chunks with one of the `wanted` tags, inflated; the rest are only
+/// stepped over.
+fn chunks_of(data: &[u8], wanted: &[u32], max: usize) -> Result<Vec<Chunk>, ReadError> {
     let mut r = Reader::new(data);
     if r.take(MAGIC.len()).ok() != Some(&MAGIC[..]) {
         return Err(ReadError::Invalid {
@@ -230,18 +243,27 @@ pub fn chunks(data: &[u8]) -> Result<Vec<Chunk>, ReadError> {
         return Err(r.invalid("a scene from a newer SplatStudy"));
     }
     let mut chunks = Vec::new();
+    let mut inflated = 0;
     while !r.is_empty() {
         let tag = r.u32()?;
         let flags = r.u32()?;
         let start = r.position();
         let payload = r.bytes()?;
+        if !wanted.contains(&tag) {
+            continue;
+        }
         let payload = if flags & DEFLATED != 0 {
-            miniz_oxide::inflate::decompress_to_vec_with_limit(payload, MAX_INFLATED).map_err(
-                |_| ReadError::Invalid {
+            let limit = max - inflated;
+            let payload = miniz_oxide::inflate::decompress_to_vec_with_limit(payload, limit)
+                .map_err(|e| ReadError::Invalid {
                     offset: start,
-                    what: "damaged compressed data",
-                },
-            )?
+                    what: match e.status {
+                        miniz_oxide::inflate::TINFLStatus::HasMoreOutput => "a scene too big",
+                        _ => "damaged compressed data",
+                    },
+                })?;
+            inflated += payload.len();
+            payload
         } else {
             payload.to_vec()
         };
@@ -254,7 +276,7 @@ pub fn chunks(data: &[u8]) -> Result<Vec<Chunk>, ReadError> {
 /// autosave's `REFH` chunk), so the file can be fetched before reading.
 pub fn reference_key(data: &[u8]) -> Result<Option<BlobKey>, ReadError> {
     let mut key = None;
-    for chunk in chunks(data)? {
+    for chunk in chunks_of(data, &[REFERENCE, REFERENCE_BY_KEY], MAX_INFLATED)? {
         match chunk.tag {
             REFERENCE_BY_KEY => key = Some(reference::key_in(&chunk.payload)?),
             REFERENCE => key = None,
@@ -325,6 +347,9 @@ fn write_mesh(w: &mut Writer, mesh: &Mesh) {
 /// would panic later) and empty meshes (nothing to sculpt).
 fn read_mesh(r: &mut Reader) -> Result<Mesh, ReadError> {
     let n = r.len(12)?;
+    if n > MAX_VERTICES {
+        return Err(r.invalid("clay with too many vertices"));
+    }
     let mut positions = Vec::with_capacity(n);
     for _ in 0..n {
         let p = r.vec3()?;
@@ -334,6 +359,9 @@ fn read_mesh(r: &mut Reader) -> Result<Mesh, ReadError> {
         positions.push(p);
     }
     let m = r.len(12)?;
+    if m > MAX_TRIANGLES {
+        return Err(r.invalid("clay with too many triangles"));
+    }
     let mut triangles = Vec::with_capacity(m);
     for _ in 0..m {
         let t = [r.u32()?, r.u32()?, r.u32()?];
@@ -618,6 +646,27 @@ mod tests {
         assert_eq!(scene.mesh.positions.len(), live.mesh.positions.len());
         assert!(scene.log.is_empty());
         assert!(scene.view.is_none());
+    }
+
+    #[test]
+    fn unknown_chunks_are_never_inflated() {
+        // Marked deflated but not deflate data: reading it would fail.
+        let mut w = SceneWriter::new();
+        w.mesh(&Mesh::icosphere(1));
+        w.out.u32(tag(b"XXXX")).u32(DEFLATED).len(4).raw(&[0xff; 4]);
+        assert!(Scene::read(&w.finish()).is_ok());
+    }
+
+    #[test]
+    fn inflating_stops_at_a_total_for_the_whole_file() {
+        let mut w = SceneWriter::new();
+        w.chunk(LOG, true, &[0; 600]).chunk(VIEW, true, &[0; 600]);
+        let data = w.finish();
+        assert_eq!(chunks_of(&data, &KNOWN, 2000).map(|c| c.len()), Ok(2));
+        // Each chunk alone fits; both together don't.
+        assert!(chunks_of(&data, &KNOWN, 1000).is_err());
+        // Chunks left out don't count.
+        assert!(chunks_of(&data, &[LOG], 1000).is_ok());
     }
 
     #[test]
