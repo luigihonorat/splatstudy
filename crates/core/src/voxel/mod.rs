@@ -273,12 +273,17 @@ mod tests {
             let t_smooth = lap();
             let mesh = Mesh::new(positions, triangles);
             let t_mesh = lap();
+            let count = mesh.positions.len();
             let total = start.elapsed().as_secs_f64() * 1e3;
+            // Then in place of the clay: hierarchy, undo, checkpoint.
+            let mut sculpt = crate::sculpt::Sculpt::new(sphere.clone());
+            let start = std::time::Instant::now();
+            sculpt.replace_mesh(mesh);
+            let t_replace = start.elapsed().as_secs_f64() * 1e3;
             println!(
                 "{resolution}: total {total:.0} ms = distance {t_sdf} + untangle {t_untangle} \
                  + nets {t_nets} + largest {t_keep} + smooth {t_smooth} + mesh {t_mesh}; \
-                 {} vertices",
-                mesh.positions.len()
+                 {count} vertices; then replace_mesh {t_replace:.0} ms"
             );
         }
     }
