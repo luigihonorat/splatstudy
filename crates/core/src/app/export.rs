@@ -75,8 +75,12 @@ pub(super) struct ExportState {
     /// The title was typed, so it no longer follows the scene's name.
     title_typed: bool,
     format: Format,
-    /// The playback length of the session, worked out when the window opens.
+    /// The playback length of the session, worked out when the window
+    /// opens, again whenever the log has changed while it is open, and
+    /// when the export starts.
     duration: f64,
+    /// The log's length and last time when `duration` was worked out.
+    duration_for: Option<(usize, u64)>,
     /// Lent by the shell; `None` where there is no video encoder.
     encoder: Option<Box<dyn VideoEncoder>>,
     job: Option<Job>,
@@ -112,6 +116,7 @@ impl Default for ExportState {
             title_typed: false,
             format: Format::Video,
             duration: 0.0,
+            duration_for: None,
             encoder: None,
             job: None,
             looks: None,
@@ -214,7 +219,15 @@ impl App {
         settings
     }
 
-    fn open_export(&mut self) {
+    /// Works the session's playback length out again if the log changed
+    /// since the last time, or always with `force`. The window isn't
+    /// modal: the user can sculpt on while it is open.
+    fn refresh_duration(&mut self, force: bool) {
+        let log = self.sculpt.log();
+        let key = Some((log.len(), log.last().map_or(0, |e| e.time.to_bits())));
+        if !force && key == self.export.duration_for {
+            return;
+        }
         // Only the times matter here, so a tiny start mesh will do.
         let tiny = Mesh::icosphere(0);
         let start = Checkpoint {
@@ -223,7 +236,12 @@ impl App {
             positions: tiny.positions.as_slice().into(),
             triangles: Some(tiny.triangles.as_slice().into()),
         };
-        self.export.duration = Replay::new(vec![start], self.sculpt.log().to_vec()).duration();
+        self.export.duration = Replay::new(vec![start], log.to_vec()).duration();
+        self.export.duration_for = key;
+    }
+
+    fn open_export(&mut self) {
+        self.refresh_duration(true);
         // Without a reference its half would stay black. A layout the user
         // picked stays.
         if !self.export.layout_picked {
@@ -267,6 +285,7 @@ impl App {
 
     /// Starts exporting with the window's settings.
     fn begin_export(&mut self) {
+        self.refresh_duration(false);
         match (self.export_format(), WEB) {
             (Format::Video, _) => {
                 let size = self.export.shape.size(VIDEO_SHORT_SIDE);
@@ -320,6 +339,8 @@ impl App {
     }
 
     fn start_export(&mut self, sink: Sink, short_side: u32, fps: u32) {
+        // The fitted speed is worked out from the session as it is now.
+        self.refresh_duration(true);
         let tr = self.lang.tr();
         let settings = self.export_settings(short_side, fps);
         self.export.shown = self.scene_reference().map(Shown::of);
@@ -498,6 +519,9 @@ impl App {
         }
         let tr = self.lang.tr();
         let running = self.export.job.is_some() || self.export.waiting_for_folder;
+        if !running {
+            self.refresh_duration(false);
+        }
         let mut open = true;
         let mut window = egui::Window::new(tr.video.title)
             .collapsible(false)
@@ -742,5 +766,80 @@ mod tests {
         };
         assert_eq!(credit_line(&credit).as_deref(), Some("Bust · CC0"));
         assert_eq!(credit_line(&Credit::default()), None);
+    }
+
+    /// The whole app offscreen, and a frame of it. `None` without a GPU.
+    fn app() -> Option<(App, wgpu::TextureView)> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).ok()?;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("frame"),
+            size: wgpu::Extent3d {
+                width: 1280,
+                height: 720,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let app = App::new(device, queue, format, crate::Lang::En);
+        Some((app, target.create_view(&Default::default())))
+    }
+
+    /// A stroke of two dabs, `seconds` apart on the sculpt's clock.
+    fn stroke(app: &mut App, from: f64, seconds: f64) {
+        use crate::sculpt::{Brush, Dab};
+        let dab = Dab {
+            brush: Brush::Clay,
+            centre: glam::Vec3::Z,
+            radius: 0.4,
+            strength: 0.5,
+            invert: false,
+            symmetry: false,
+            direction: glam::Vec3::ZERO,
+        };
+        app.sculpt.set_clock(from);
+        app.sculpt.begin_stroke();
+        app.sculpt.dab(dab);
+        app.sculpt.set_clock(from + seconds);
+        app.sculpt.dab(dab);
+        app.sculpt.end_stroke();
+    }
+
+    #[test]
+    fn the_session_length_follows_sculpting_while_the_window_is_open() {
+        let Some((mut app, view)) = app() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let mut time = 0.0;
+        let mut frame = |app: &mut App| {
+            time += 1.0 / 60.0;
+            app.frame(time, &view, [1280, 720], 1.0);
+        };
+        stroke(&mut app, 1.0, 1.5);
+        app.open_export();
+        let first = app.export.duration;
+        assert!(first > 1.0, "{first}");
+
+        // Sculpting on with the window open: the shown length follows.
+        stroke(&mut app, 10.0, 1.0);
+        frame(&mut app);
+        let second = app.export.duration;
+        assert!(second > first + 0.9, "{second} after {first}");
+
+        // And the export starts from the session as it is then.
+        app.export.open = false;
+        stroke(&mut app, 20.0, 1.0);
+        app.start_export(Sink::Zip(Zip::new()), ZIP_SHORT_SIDE, ZIP_FPS);
+        assert!(app.export.duration > second + 0.9);
+        app.cancel_export();
     }
 }
