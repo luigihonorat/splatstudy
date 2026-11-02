@@ -80,8 +80,12 @@ export class SplatstudyVideo {
         format: 'RGBA', codedWidth: this.width, codedHeight: this.height,
         timestamp: Math.round(index * step), duration: Math.round(step),
       });
-      this.encoder.encode(frame, { keyFrame: key });
-      frame.close();
+      // The encoder keeps its own reference; ours goes even if it throws.
+      try {
+        this.encoder.encode(frame, { keyFrame: key });
+      } finally {
+        frame.close();
+      }
       return '';
     } catch (e) {
       return message(e);
@@ -92,7 +96,16 @@ export class SplatstudyVideo {
       this.done = true;
       return;
     }
-    this.encoder.flush().then(() => { this.done = true; }, e => { this.error = message(e); });
+    // Every chunk has come out by the time the flush resolves; closing then
+    // lets a hardware encoder go.
+    // (Unless a new video has started meanwhile.)
+    const encoder = this.encoder;
+    const settle = (ok, e) => {
+      if (this.encoder !== encoder) return;
+      this.cancel();
+      if (ok) this.done = true; else this.error = message(e) || 'the encoder failed';
+    };
+    encoder.flush().then(() => settle(true), e => settle(false, e));
   }
   next() {
     this.current = this.chunks.shift() || null;
