@@ -262,8 +262,10 @@ impl App {
         let tr = self.lang.tr();
         match voxel::remesh(&self.sculpt.mesh, self.tool.resolution.round() as u32) {
             Some(mesh) => {
+                let count = mesh.positions.len();
                 self.replace_clay(mesh);
-                self.notify(tr.mesh.remeshed);
+                let m = tr.mesh;
+                self.notify(format!("{} ({count} {})", m.remeshed, m.vertices));
             }
             None => self.notify(tr.mesh.nothing_left),
         }

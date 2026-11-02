@@ -9,6 +9,8 @@ pub struct MeshTr {
     pub remesh: &'static str,
     /// Notice after a remesh.
     pub remeshed: &'static str,
+    /// After a number, in the remesh notice.
+    pub vertices: &'static str,
     /// Notice when a remesh or a reference left nothing.
     pub nothing_left: &'static str,
     /// After the file name: the clay was replaced by an imported mesh.
@@ -31,6 +33,7 @@ pub const JA: MeshTr = MeshTr {
     resolution: "解像度",
     remesh: "リメッシュ",
     remeshed: "リメッシュしました。元に戻すと前のメッシュに戻ります",
+    vertices: "頂点",
     nothing_left: "形が残りませんでした",
     imported: "塑像として読み込みました。元に戻すと前の塑像に戻ります",
     imported_remeshed: "塑像として読み込み、彫りやすいようにリメッシュしました",
@@ -45,6 +48,7 @@ pub const EN: MeshTr = MeshTr {
     resolution: "resolution",
     remesh: "remesh",
     remeshed: "remeshed; undo brings the previous mesh back",
+    vertices: "vertices",
     nothing_left: "no shape was left",
     imported: "imported as the sculpt; undo brings the previous one back",
     imported_remeshed: "imported as the sculpt, and remeshed to sculpt on",
@@ -59,6 +63,7 @@ pub const FR: MeshTr = MeshTr {
     resolution: "résolution",
     remesh: "remailler",
     remeshed: "remaillé ; annuler rétablit le maillage précédent",
+    vertices: "sommets",
     nothing_left: "aucune forme ne reste",
     imported: "importé comme sculpture ; annuler rétablit la précédente",
     imported_remeshed: "importé comme sculpture et remaillé pour être sculpté",
