@@ -16,13 +16,21 @@
 //! - `LOG_`: every recorded call (see [`Entry`]).
 //! - `REF_`: the reference file, kept whole, with its placement and credit.
 //! - `VIEW`: the cameras, the divider and the study aids that were on.
+//! - `REFH`: in autosaves only, the reference as in `REF_` but with its
+//!   file named by a [`BlobKey`] and stored apart, so the file is written
+//!   once rather than with every save. Readers from before it skip it and
+//!   open the scene without its reference.
 //!
 //! The log and checkpoints use the encodings next to their types, in
 //! `sculpt::record`, so whoever adds an event also adds how it is saved.
 //!
 //! Reading returns a [`ReadError`] for anything malformed; it never panics.
 
+pub mod autosave;
+pub mod blob;
 pub mod reference;
+
+use std::sync::Arc;
 
 use crate::camera::OrbitCamera;
 use crate::io::{ReadError, Reader, Writer};
@@ -30,6 +38,7 @@ use crate::reference::Reference;
 use crate::sculpt::record::{read_checkpoints, read_log, write_checkpoints, write_log};
 use crate::sculpt::{Checkpoint, Entry, Mesh};
 
+pub use blob::BlobKey;
 pub use reference::SavedReference;
 
 const MAGIC: &[u8; 11] = b"SPLATSTUDY\0";
@@ -45,6 +54,7 @@ pub const CHECKPOINTS: u32 = tag(b"CKPT");
 pub const LOG: u32 = tag(b"LOG_");
 pub const REFERENCE: u32 = tag(b"REF_");
 pub const VIEW: u32 = tag(b"VIEW");
+pub const REFERENCE_BY_KEY: u32 = tag(b"REFH");
 
 const DEFLATED: u32 = 1;
 /// Deflate effort: the clay is mostly floats, which barely compress past
@@ -155,6 +165,14 @@ impl SceneWriter {
         self.chunk(REFERENCE, false, &w.finish())
     }
 
+    /// The reference with its file left out, named by `key`; whoever reads
+    /// the scene has to find the file under that key.
+    pub fn reference_by_key(&mut self, reference: &Reference, key: BlobKey) -> &mut Self {
+        let mut w = Writer::new();
+        reference::write_reference_by_key(&mut w, reference, key);
+        self.chunk(REFERENCE_BY_KEY, false, &w.finish())
+    }
+
     pub fn view(&mut self, view: &View) -> &mut Self {
         let mut w = Writer::new();
         for camera in &view.cameras {
@@ -232,9 +250,33 @@ pub fn chunks(data: &[u8]) -> Result<Vec<Chunk>, ReadError> {
     Ok(chunks)
 }
 
+/// The key of the reference file a scene names but doesn't hold (an
+/// autosave's `REFH` chunk), so the file can be fetched before reading.
+pub fn reference_key(data: &[u8]) -> Result<Option<BlobKey>, ReadError> {
+    let mut key = None;
+    for chunk in chunks(data)? {
+        match chunk.tag {
+            REFERENCE_BY_KEY => key = Some(reference::key_in(&chunk.payload)?),
+            REFERENCE => key = None,
+            _ => {}
+        }
+    }
+    Ok(key)
+}
+
 impl Scene {
     /// Reads a whole scene file.
     pub fn read(data: &[u8]) -> Result<Scene, ReadError> {
+        Self::read_with(data, |_| None)
+    }
+
+    /// Reads a scene whose reference file may be stored apart: `find`
+    /// gives the file for a key, or `None`, and then the scene opens
+    /// without its reference.
+    pub fn read_with(
+        data: &[u8],
+        mut find: impl FnMut(BlobKey) -> Option<Arc<[u8]>>,
+    ) -> Result<Scene, ReadError> {
         let mut mesh = None;
         let mut checkpoints = Vec::new();
         let mut log = Vec::new();
@@ -247,6 +289,9 @@ impl Scene {
                 CHECKPOINTS => checkpoints = read_checkpoints(&mut r)?,
                 LOG => log = read_log(&mut r)?,
                 REFERENCE => reference = Some(reference::read_reference(&mut r)?),
+                REFERENCE_BY_KEY => {
+                    reference = reference::read_reference_by_key(&mut r, &mut find)?;
+                }
                 VIEW => view = Some(read_view(&mut r)?),
                 _ => {}
             }
@@ -496,6 +541,60 @@ mod tests {
         );
         let resumed = Sculpt::with_history(scene.mesh, scene.log, scene.checkpoints);
         assert_eq!(save(&resumed, &view()), data);
+    }
+
+    #[test]
+    fn an_autosave_names_its_reference_file_and_finds_it_again() {
+        use crate::reference::{Content, RefImage, Source};
+
+        let live = session();
+        let file: Arc<[u8]> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let mut original = Reference::new(
+            Source {
+                name: "cast.png".into(),
+                bytes: file.clone(),
+            },
+            Content::Image(RefImage::default()),
+        );
+        original.align.yaw = 0.5;
+        let key = BlobKey::of(&file);
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh)
+            .checkpoints(live.checkpoints())
+            .log(live.log())
+            .reference_by_key(&original, key)
+            .view(&view());
+        let data = w.finish();
+        assert!(
+            !data.windows(file.len()).any(|w| w == &file[..]),
+            "the file isn't in the scene"
+        );
+        assert_eq!(reference_key(&data), Ok(Some(key)));
+
+        let mut asked = Vec::new();
+        let scene = Scene::read_with(&data, |k| {
+            asked.push(k);
+            Some(file.clone())
+        })
+        .expect("reads");
+        assert_eq!(asked, [key]);
+        let reference = scene.reference.expect("the reference came back");
+        assert_eq!(reference.source.bytes, file);
+        assert_eq!(reference.source.name, "cast.png");
+        assert_eq!(reference.align, original.align);
+        assert_eq!(scene.log, live.log());
+
+        // Without the file the clay still opens.
+        let scene = Scene::read(&data).expect("reads");
+        assert!(scene.reference.is_none());
+        assert_eq!(scene.log, live.log());
+
+        // A scene with its file inside names no key.
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh).reference(&original);
+        assert_eq!(reference_key(&w.finish()), Ok(None));
+        assert_eq!(reference_key(&save(&live, &view())), Ok(None));
+        assert!(reference_key(b"junk").is_err());
     }
 
     #[test]

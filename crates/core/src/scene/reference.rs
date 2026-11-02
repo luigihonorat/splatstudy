@@ -8,9 +8,14 @@
 //! Fields: name, bytes, up axis (`u8`), yaw, centre, scale, crop (`u8`
 //! present, then min and max), then the credit's title, author, licence and
 //! link.
+//!
+//! An autosave keeps the file apart, by its content (see [`super::blob`]):
+//! its `REFH` chunk has the same fields with a [`BlobKey`] in place of the
+//! bytes.
 
 use std::sync::Arc;
 
+use super::blob::BlobKey;
 use crate::io::{ReadError, Reader, Writer};
 use crate::reference::{Aabb, Alignment, Content, Credit, Reference, Source, UpAxis};
 
@@ -46,14 +51,26 @@ fn up_code(up: UpAxis) -> u8 {
 }
 
 pub fn write_reference(w: &mut Writer, reference: &Reference) {
+    w.str(&reference.source.name).bytes(&reference.source.bytes);
+    write_placement(w, reference);
+}
+
+/// The reference with its file named by `key` instead of included.
+pub fn write_reference_by_key(w: &mut Writer, reference: &Reference, key: BlobKey) {
+    w.str(&reference.source.name);
+    key.write(w);
+    write_placement(w, reference);
+}
+
+/// What follows the file: placement, crop and credit.
+fn write_placement(w: &mut Writer, reference: &Reference) {
     let Reference {
-        source,
         align,
         crop,
         credit,
+        source: _,
         content: _,
     } = reference;
-    w.str(&source.name).bytes(&source.bytes);
     w.u8(up_code(align.up))
         .f32(align.yaw)
         .vec3(align.centre)
@@ -78,6 +95,44 @@ pub fn encode_reference(reference: &Reference) -> Vec<u8> {
 pub fn read_reference(r: &mut Reader) -> Result<SavedReference, ReadError> {
     let name = r.str()?;
     let bytes: Arc<[u8]> = Arc::from(r.bytes()?);
+    read_placement(r, Source { name, bytes })
+}
+
+/// Reads a `REFH` payload; `find` gives the file stored under its key.
+/// `Ok(None)` when there is none, or one of another length: the scene
+/// still opens, without its reference.
+pub fn read_reference_by_key(
+    r: &mut Reader,
+    find: impl FnOnce(BlobKey) -> Option<Arc<[u8]>>,
+) -> Result<Option<SavedReference>, ReadError> {
+    let name = r.str()?;
+    let key = BlobKey::read(r)?;
+    // The rest is read before looking, so a damaged chunk is an error
+    // whether or not the file is there.
+    let empty = Source {
+        name,
+        bytes: Arc::from(&[][..]),
+    };
+    let saved = read_placement(r, empty)?;
+    Ok(find(key)
+        .filter(|bytes| bytes.len() as u64 == key.len)
+        .map(|bytes| SavedReference {
+            source: Source {
+                bytes,
+                ..saved.source
+            },
+            ..saved
+        }))
+}
+
+/// The key of the file a `REFH` payload names.
+pub fn key_in(payload: &[u8]) -> Result<BlobKey, ReadError> {
+    let mut r = Reader::new(payload);
+    r.str()?;
+    BlobKey::read(&mut r)
+}
+
+fn read_placement(r: &mut Reader, source: Source) -> Result<SavedReference, ReadError> {
     let up = match r.u8()? {
         0 => UpAxis::Y,
         1 => UpAxis::Z,
@@ -108,7 +163,7 @@ pub fn read_reference(r: &mut Reader) -> Result<SavedReference, ReadError> {
         url: r.str()?,
     };
     Ok(SavedReference {
-        source: Source { name, bytes },
+        source,
         align: Alignment {
             up,
             yaw,
@@ -189,6 +244,46 @@ mod tests {
         uncropped.crop = None;
         let saved = read_reference(&mut Reader::new(&encode_reference(&uncropped))).unwrap();
         assert_eq!(saved.crop, None);
+    }
+
+    #[test]
+    fn a_reference_by_key_finds_its_file_or_goes_without() {
+        let original = reference();
+        let key = BlobKey::of(&original.source.bytes);
+        let mut w = Writer::new();
+        write_reference_by_key(&mut w, &original, key);
+        let payload = w.finish();
+        // The file isn't in it, only its key.
+        assert!(payload.len() < encode_reference(&original).len());
+        assert_eq!(key_in(&payload), Ok(key));
+
+        let found = read_reference_by_key(&mut Reader::new(&payload), |k| {
+            assert_eq!(k, key);
+            Some(original.source.bytes.clone())
+        })
+        .expect("reads")
+        .expect("found");
+        assert_eq!(found.source.name, original.source.name);
+        assert_eq!(found.source.bytes, original.source.bytes);
+        assert_eq!(found.align, original.align);
+        assert_eq!(found.crop, original.crop);
+        assert_eq!(found.credit, original.credit);
+
+        // Missing, or another file under the key: no reference, no error.
+        let read = |find: Option<Arc<[u8]>>| {
+            read_reference_by_key(&mut Reader::new(&payload), |_| find)
+                .expect("reads")
+                .is_none()
+        };
+        assert!(read(None));
+        assert!(read(Some(Arc::from(&b"short"[..]))));
+        // Damage is an error even when the file would be found.
+        for end in 0..payload.len() {
+            let mut r = Reader::new(&payload[..end]);
+            assert!(
+                read_reference_by_key(&mut r, |_| Some(original.source.bytes.clone())).is_err()
+            );
+        }
     }
 
     #[test]
