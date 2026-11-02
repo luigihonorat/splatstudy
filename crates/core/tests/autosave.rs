@@ -242,6 +242,31 @@ fn a_scene_without_its_start_gets_a_new_history_from_its_clay() {
 }
 
 #[test]
+fn a_first_checkpoint_with_no_triangles_starts_a_new_history_too() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping autosave test");
+        return;
+    };
+    let mut first = Shell::new(&gpu);
+    first.stroke();
+    let full = first.app.autosave_bytes().expect("a session").scene;
+    let mut clay = scene::Scene::read(&full).unwrap();
+    clay.checkpoints[0].triangles = Some(Vec::new().into());
+    let mut w = scene::SceneWriter::new();
+    w.mesh(&clay.mesh)
+        .checkpoints(&clay.checkpoints)
+        .log(&clay.log);
+    let mut second = Shell::new(&gpu);
+    second.open("empty-start.splatstudy", &w.finish());
+    let scene = scene::Scene::read(&second.app.autosave_bytes().unwrap().scene).unwrap();
+    assert!(scene.log.is_empty());
+    assert_eq!(
+        scene.checkpoints[0].triangles.as_deref(),
+        Some(&clay.mesh.triangles[..])
+    );
+}
+
+#[test]
 fn a_scene_file_restores_too_and_a_new_scene_clears() {
     let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter; skipping autosave test");

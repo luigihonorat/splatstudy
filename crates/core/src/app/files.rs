@@ -20,6 +20,7 @@ use crate::scene::blob::content_hash;
 use crate::scene::reference::write_reference_by_key;
 use crate::scene::{BlobKey, SavedReference, Scene, SceneWriter, StudyView, View};
 use crate::sculpt::Sculpt;
+use crate::sculpt::record::starts_with_mesh;
 use crate::ui::menu;
 
 /// Scene files' extension.
@@ -158,10 +159,9 @@ impl App {
         // The timelapse needs the clay the log starts from. Without it the
         // replay would start from the default sphere, and number the
         // checkpoints after it one too low: start a new history from the
-        // clay as it is instead.
-        let usable = checkpoints
-            .first()
-            .is_some_and(|c| c.log_index == 0 && c.triangles.is_some());
+        // clay as it is instead. (As the replay decides: a first checkpoint
+        // with no triangles, or triangles that don't fit, isn't usable.)
+        let usable = starts_with_mesh(&checkpoints);
         let complete = (usable || log.is_empty()) && !history_damaged;
 
         self.cancel_export();

@@ -77,7 +77,7 @@ impl Checkpoint {
     }
 
     /// True if it holds a whole mesh, with triangles that all fit.
-    fn has_mesh(&self) -> bool {
+    pub fn has_mesh(&self) -> bool {
         let n = self.positions.len();
         self.triangles.as_ref().is_some_and(|triangles| {
             !triangles.is_empty() && triangles.iter().flatten().all(|&v| (v as usize) < n)
@@ -307,6 +307,15 @@ pub fn read_checkpoints(r: &mut Reader) -> Result<Vec<Checkpoint>, ReadError> {
     (0..n).map(|_| Checkpoint::read(r)).collect()
 }
 
+/// True if a replay can start from these checkpoints: the first holds a
+/// whole mesh at the start of the log. Otherwise a replay starts from the
+/// default sphere, and a log made on other clay can't be played.
+pub fn starts_with_mesh(checkpoints: &[Checkpoint]) -> bool {
+    checkpoints
+        .first()
+        .is_some_and(|c| c.log_index == 0 && c.has_mesh())
+}
+
 impl Sculpt {
     /// A sculpt that keeps no log of its own, for playing one back.
     fn replaying(mesh: Mesh) -> Sculpt {
@@ -405,10 +414,7 @@ impl Replay {
             times.push(t);
         }
         let usable = |c: &Checkpoint| c.log_index <= entries.len() && c.has_mesh();
-        if !checkpoints
-            .first()
-            .is_some_and(|c| c.log_index == 0 && usable(c))
-        {
+        if !starts_with_mesh(&checkpoints) {
             let sphere = Mesh::icosphere(DEFAULT_LEVEL);
             checkpoints.insert(0, Checkpoint::of(&sphere, 0, 0.0, true));
         }
@@ -756,6 +762,18 @@ mod tests {
         let mut replay = Replay::of(&again);
         assert!(replay.seek(f64::INFINITY, usize::MAX));
         assert_same(&replay, &again);
+    }
+
+    #[test]
+    fn a_first_checkpoint_without_triangles_is_no_start() {
+        let sphere = Mesh::icosphere(1);
+        let mut start = Checkpoint::of(&sphere, 0, 0.0, true);
+        assert!(starts_with_mesh(std::slice::from_ref(&start)));
+        start.triangles = Some(Vec::new().into());
+        assert!(!starts_with_mesh(std::slice::from_ref(&start)));
+        start.triangles = None;
+        assert!(!starts_with_mesh(std::slice::from_ref(&start)));
+        assert!(!starts_with_mesh(&[]));
     }
 
     #[test]
