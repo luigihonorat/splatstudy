@@ -741,8 +741,10 @@ impl App {
     fn match_key(&self, rects: [Rect; 2]) -> Option<MatchKey> {
         let rect = rects[SCULPT];
         let reference = self.reference.current.as_ref()?;
+        // Both views shown: the score compares what the two show.
         if !self.study.link
             || !shown(rect)
+            || !shown(rects[REFERENCE])
             || self.playback.is_some()
             || matches!(reference.content, Content::Image(_))
         {
