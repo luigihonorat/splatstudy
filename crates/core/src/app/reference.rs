@@ -3,7 +3,7 @@
 //! The reference: what is loaded in the right view, its panel and drawing.
 //!
 //! Splats and meshes are drawn into the reference view's texture with the
-//! reference camera (and, through [`App::draw_reference_from`], into any
+//! reference camera (and, through [`App::draw_reference_as`], into any
 //! other slot: a ghost over the sculpt, an export). Pictures are flat, so
 //! they are shown by egui over the view with their own pan and zoom. The
 //! crop box and the credit line are drawn over the view too.
@@ -15,7 +15,8 @@ use egui::{Align2, Color32, Id, Order, Pos2, Rect, RichText, Sense, Stroke, Vec2
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-use super::{App, REFERENCE, Request};
+use super::study::ReferenceLook;
+use super::{App, REFERENCE, Request, SCULPT};
 use crate::camera::OrbitCamera;
 use crate::input::FilePurpose;
 use crate::reference::load;
@@ -23,7 +24,7 @@ use crate::reference::samples::Sample;
 use crate::reference::{Aabb, Alignment, Content, Reference, Source, UpAxis};
 use crate::render::Slot;
 use crate::render::clay::{ClayPass, GpuMesh, Look};
-use crate::render::splat::SplatPass;
+use crate::render::splat::{SplatLook, SplatPass};
 use crate::sculpt::Vertex;
 use crate::ui::{self, fonts, menu, theme};
 
@@ -489,7 +490,12 @@ impl App {
                     let fit = (rect.width() / size.x).min(rect.height() / size.y) * 0.95;
                     let shown =
                         Rect::from_center_size(rect.center() + view.offset, size * fit * view.zoom);
-                    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                    // The mirror view shows the picture flipped left to right.
+                    let uv = if self.study.mirror {
+                        Rect::from_min_max(Pos2::new(1.0, 0.0), Pos2::new(0.0, 1.0))
+                    } else {
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+                    };
                     painter.image(texture, shown, uv, Color32::WHITE);
                 }
                 if let Some(r) = &self.reference.current {
@@ -518,38 +524,67 @@ impl App {
     }
 
     /// Draws the reference into a pass already cleared to the view's
-    /// background, from the reference camera.
+    /// background, from the reference camera, with the study aids' look
+    /// (the silhouette).
     pub(super) fn draw_reference(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let view = &self.views[REFERENCE];
-        self.draw_reference_from(
+        let aspect = self.views[REFERENCE].aspect();
+        let look = self.reference_look();
+        self.draw_reference_as(
             pass,
             Slot::ReferenceView,
             &self.cameras[REFERENCE],
-            view.size,
-            1.0,
-            false,
+            aspect,
+            &look,
         );
     }
 
-    /// Draws the reference into any slot's pass from any camera: `size` is
-    /// the target's size in pixels, `opacity` fades it (a ghost) and `flat`
-    /// fills it with the silhouette colour. Pictures draw nothing here.
-    pub(super) fn draw_reference_from(
+    /// A reference is loaded.
+    pub(super) fn has_reference(&self) -> bool {
+        self.reference.current.is_some()
+    }
+
+    /// The pixel size of the target a slot draws into, which splats need
+    /// for their screen-space footprint: the views' own sizes, and a
+    /// 1080-pixel-high frame of `aspect` for exports.
+    fn slot_size(&self, slot: Slot, aspect: f32) -> [u32; 2] {
+        match slot {
+            Slot::SculptView => self.views[SCULPT].size,
+            Slot::ReferenceView => self.views[REFERENCE].size,
+            Slot::ExportSculpt | Slot::ExportReference => {
+                [(1080.0 * aspect).round().max(1.0) as u32, 1080]
+            }
+        }
+    }
+
+    /// Draws the reference into any slot's pass from any camera, with
+    /// `look`, preparing and drawing in one call. A look `over` the pass is
+    /// the ghost, drawn last. Pictures draw nothing here.
+    pub(super) fn draw_reference_as(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         slot: Slot,
         camera: &OrbitCamera,
-        size: [u32; 2],
-        opacity: f32,
-        flat: bool,
+        aspect: f32,
+        look: &ReferenceLook,
     ) {
+        let ReferenceLook {
+            flat,
+            opacity,
+            over,
+        } = *look;
         let (Some(r), Some(drawn)) = (&self.reference.current, &self.reference.drawn) else {
             return;
         };
         match drawn {
             Drawn::Splats(splats) => {
                 splats.set_placement(r.align.matrix(), r.crop);
-                splats.prepare(&self.queue, slot, camera, size, opacity, flat);
+                let look = SplatLook {
+                    opacity,
+                    flat,
+                    over,
+                };
+                let size = self.slot_size(slot, aspect);
+                splats.prepare(&self.queue, slot, camera, size, &look);
                 splats.draw(pass, slot);
             }
             Drawn::Mesh {
@@ -560,7 +595,7 @@ impl App {
                 let Some(clay) = &self.reference.mesh_pass else {
                     return;
                 };
-                let colour = match (flat, coloured) {
+                let colour = match (flat, *coloured) {
                     (true, _) => theme::SILHOUETTE_INK,
                     (false, true) => Color32::WHITE,
                     (false, false) => theme::CLAY,
@@ -571,9 +606,13 @@ impl App {
                     opacity,
                     vertex_colours: *coloured && !flat,
                 };
-                let aspect = size[0] as f32 / size[1].max(1) as f32;
-                clay.prepare(&self.queue, slot, camera, aspect, &look);
-                clay.draw(pass, slot, mesh);
+                if over {
+                    clay.prepare_ghost(&self.queue, slot, camera, aspect, &look);
+                    clay.draw_ghost(pass, slot, mesh);
+                } else {
+                    clay.prepare(&self.queue, slot, camera, aspect, &look);
+                    clay.draw(pass, slot, mesh);
+                }
             }
             Drawn::Mesh { mesh: None, .. } | Drawn::Image(_) => {}
         }

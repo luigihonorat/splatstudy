@@ -14,8 +14,8 @@
 //! sculpt and an export can all draw the same splats in one submit.
 //!
 //! Use: [`SplatPass::set_placement`] when the alignment or crop changes,
-//! then per frame and slot [`SplatPass::prepare`] before the submit and
-//! [`SplatPass::draw`] inside the pass.
+//! then per frame and slot [`SplatPass::prepare`] with a [`SplatLook`]
+//! before the submit and [`SplatPass::draw`] inside the pass.
 
 use std::cell::{Cell, RefCell};
 
@@ -50,12 +50,38 @@ struct SlotState {
     order: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     sorted_for: Option<Vec3>,
+    over: bool,
+}
+
+/// How splats are drawn into a slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplatLook {
+    /// 0..1, fading every splat (a ghost).
+    pub opacity: f32,
+    /// Filled with the silhouette colour, [`SILHOUETTE_INK`].
+    pub flat: bool,
+    /// Drawn over everything already in the pass instead of being hidden by
+    /// the clay in front: the ghost over the sculpt.
+    pub over: bool,
+}
+
+impl Default for SplatLook {
+    fn default() -> Self {
+        Self {
+            opacity: 1.0,
+            flat: false,
+            over: false,
+        }
+    }
 }
 
 /// Gaussian splats on the GPU, ready to draw from any slot.
 pub struct SplatPass {
     device: wgpu::Device,
+    /// Hidden by the clay in front.
     pipeline: wgpu::RenderPipeline,
+    /// Over everything drawn before: the ghost.
+    over: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     positions: wgpu::Buffer,
     covariances: wgpu::Buffer,
@@ -143,47 +169,50 @@ impl SplatPass {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("splats"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: VIEW_FORMAT,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: SAMPLES,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = |compare| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("splats"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: VIEW_FORMAT,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(compare),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: SAMPLES,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         Some(Self {
             device: device.clone(),
-            pipeline,
+            pipeline: pipeline(wgpu::CompareFunction::Less),
+            over: pipeline(wgpu::CompareFunction::Always),
             layout,
             positions,
             covariances,
@@ -220,16 +249,14 @@ impl SplatPass {
 
     /// Sets the camera and look for the slot's next draw, and re-sorts the
     /// slot's splats if the view has turned. `size` is the target's size
-    /// in pixels; `opacity` fades every splat (a ghost); `flat` fills them
-    /// with the silhouette colour, [`SILHOUETTE_INK`].
+    /// in pixels.
     pub fn prepare(
         &self,
         queue: &wgpu::Queue,
         slot: Slot,
         camera: &OrbitCamera,
         size: [u32; 2],
-        opacity: f32,
-        flat: bool,
+        look: &SplatLook,
     ) {
         let (model, crop) = self.placement.get();
         let size = [size[0].max(1) as f32, size[1].max(1) as f32];
@@ -250,8 +277,8 @@ impl SplatPass {
             crop_max: crop_max.extend(0.0).to_array(),
             flat_colour: [r, g, b, 1.0],
             params: [
-                opacity.clamp(0.0, 1.0),
-                if flat { 1.0 } else { 0.0 },
+                look.opacity.clamp(0.0, 1.0),
+                if look.flat { 1.0 } else { 0.0 },
                 0.0,
                 0.0,
             ],
@@ -260,6 +287,7 @@ impl SplatPass {
         let mut cell = self.slots[slot.index()].borrow_mut();
         let state = cell.get_or_insert_with(|| self.slot_state());
         queue.write_buffer(&state.uniforms, 0, bytemuck::bytes_of(&uniforms));
+        state.over = look.over;
 
         // View depth is one row of view · model; only its direction
         // changes the order.
@@ -281,7 +309,11 @@ impl SplatPass {
         let Some(state) = cell.as_ref() else {
             return;
         };
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(if state.over {
+            &self.over
+        } else {
+            &self.pipeline
+        });
         pass.set_bind_group(0, &state.bind_group, &[]);
         pass.draw(0..4, 0..self.centres.len() as u32);
     }
@@ -330,6 +362,7 @@ impl SplatPass {
             order,
             bind_group,
             sorted_for: None,
+            over: false,
         }
     }
 }

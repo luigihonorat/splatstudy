@@ -7,7 +7,7 @@ use glam::{Mat4, Quat, Vec3};
 use splatstudy_core::camera::OrbitCamera;
 use splatstudy_core::reference::{Aabb, Splats};
 use splatstudy_core::render::clay::{ClayPass, GpuMesh, Look};
-use splatstudy_core::render::splat::SplatPass;
+use splatstudy_core::render::splat::{SplatLook, SplatPass};
 use splatstudy_core::render::{Slot, ViewTarget, readback::Readback};
 use splatstudy_core::sculpt::Mesh;
 use splatstudy_core::ui::theme::{CLAY, SILHOUETTE_INK, VIEW_BG};
@@ -35,6 +35,7 @@ struct Scene<'a> {
     clay: Option<(Vec3, f32)>,
     opacity: f32,
     flat: bool,
+    over: bool,
 }
 
 impl<'a> Scene<'a> {
@@ -46,6 +47,7 @@ impl<'a> Scene<'a> {
             clay: None,
             opacity: 1.0,
             flat: false,
+            over: false,
         }
     }
 }
@@ -65,8 +67,11 @@ fn render(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> Vec<u8> 
         Slot::ReferenceView,
         &camera,
         target.size,
-        scene.opacity,
-        scene.flat,
+        &SplatLook {
+            opacity: scene.opacity,
+            flat: scene.flat,
+            over: scene.over,
+        },
     );
     let clay = ClayPass::new(device);
     let mesh = scene.clay.map(|(centre, radius)| {
@@ -264,4 +269,39 @@ fn a_long_splat_is_drawn_along_its_axis() {
     let data = render(&device, &queue, &Scene::new(&turned));
     assert!(pixel(&data, c, c + 15)[0] > 100);
     assert_eq!(pixel(&data, c + 15, c), VIEW_BG.to_array());
+}
+
+#[test]
+fn a_ghost_shows_over_clay_in_front() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping render test");
+        return;
+    };
+    let s = splats(&[(Vec3::ZERO, 0.4, RED)]);
+    let c = SIZE / 2;
+    let clay_only = render(
+        &device,
+        &queue,
+        &Scene {
+            clay: Some((Vec3::new(0.0, 0.0, 1.5), 0.3)),
+            opacity: 0.0,
+            ..Scene::new(&s)
+        },
+    );
+    let ghost = render(
+        &device,
+        &queue,
+        &Scene {
+            clay: Some((Vec3::new(0.0, 0.0, 1.5), 0.3)),
+            opacity: 0.5,
+            over: true,
+            ..Scene::new(&s)
+        },
+    );
+    let (clay, mixed) = (pixel(&clay_only, c, c), pixel(&ghost, c, c));
+    // Half red over the grey clay: redder, and less blue.
+    assert!(
+        mixed[0] > clay[0] && mixed[2] < clay[2],
+        "{clay:?} → {mixed:?}"
+    );
 }
