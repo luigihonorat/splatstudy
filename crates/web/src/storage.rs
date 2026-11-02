@@ -383,6 +383,9 @@ struct State {
     heard: u64,
     /// A save, or a restore, is being written or read.
     writing: bool,
+    /// Counts the saves started; a slow one that finds a newer one started
+    /// as the page left doesn't put its older scene.
+    issued: u64,
     /// The blob key that is stored.
     stored_blob: Option<String>,
     /// A reference that didn't fit; it isn't tried again.
@@ -446,6 +449,7 @@ impl Autosave {
                 overwritten_at: None,
                 heard: 0,
                 writing: false,
+                issued: 0,
                 stored_blob: RESTORED_BLOB.take(),
                 too_big: None,
                 asked_persist: false,
@@ -528,18 +532,29 @@ impl Autosave {
             return;
         }
         if st.writing {
+            // A slow write (a big reference) is under way, with an older
+            // scene: put this one alone before the page goes.
+            if leaving && let Some(save) = app.autosave_bytes() {
+                st.issued += 1;
+                let (keep, heard) = (st.stored_blob.clone(), st.heard);
+                drop(st);
+                self.put_leaving(save, keep, revision, heard);
+            }
             return;
         }
         let bytes = app.autosave_bytes();
         st.writing = true;
-        let heard = st.heard;
+        st.issued += 1;
+        let (issued, heard) = (st.issued, st.heard);
         drop(st);
         let this = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = this.write(bytes.as_ref(), leaving).await;
+            let result = this.write(bytes.as_ref(), leaving, issued).await;
             let mut st = this.state.borrow_mut();
             st.writing = false;
             match result {
+                // A newer save, as the page left, took its place.
+                Ok(()) if st.issued != issued => {}
                 Ok(()) => {
                     st.saved(revision, heard);
                     drop(st);
@@ -550,6 +565,20 @@ impl Autosave {
                     st.on = false;
                     st.trouble = Some(trouble);
                 }
+            }
+        });
+    }
+
+    /// Puts the scene alone, committed at once, as the page goes.
+    fn put_leaving(&self, save: Bytes, keep: Option<String>, revision: u64, heard: u64) {
+        let this = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match idb_put_scene(&save.scene, keep, true).await {
+                Ok(_) => {
+                    this.state.borrow_mut().saved(revision, heard);
+                    tabs_tell();
+                }
+                Err(e) => log::warn!("autosave as the page left: {}", error_name(&e)),
             }
         });
     }
@@ -582,7 +611,7 @@ impl Autosave {
     }
 
     /// Stores a save, or clears the stores when there is nothing to keep.
-    async fn write(&self, save: Option<&Bytes>, leaving: bool) -> Result<(), Trouble> {
+    async fn write(&self, save: Option<&Bytes>, leaving: bool, issued: u64) -> Result<(), Trouble> {
         let Some(save) = save else {
             idb_clear().await.map_err(trouble)?;
             self.state.borrow_mut().stored_blob = None;
@@ -594,6 +623,9 @@ impl Autosave {
         }
         let start = now();
         let mut keep = self.keep(save).await?;
+        if self.state.borrow().issued != issued {
+            return Ok(());
+        }
         let mut put = idb_put_scene(&save.scene, keep.clone(), leaving).await;
         if put
             .as_ref()
