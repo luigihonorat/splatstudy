@@ -112,6 +112,8 @@ fn side_by_side_frame_has_both_views_the_rule_and_the_credit() {
         &mut compositor,
         &Overlay::Views {
             credit: Some(credit),
+            clock: None,
+            title: None,
         },
     );
     frame.save("side-by-side.png");
@@ -153,6 +155,8 @@ fn every_shape_and_layout_composes() {
                 &mut compositor,
                 &Overlay::Views {
                     credit: Some("credit"),
+                    clock: Some("1:23"),
+                    title: Some(("title", 1.0)),
                 },
             );
             assert_eq!(frame.pixels.len(), (size[0] * size[1] * 4) as usize);
@@ -212,7 +216,11 @@ fn a_picture_fills_the_reference_half_keeping_its_proportions() {
         &device,
         &queue,
         &mut compositor,
-        &Overlay::Views { credit: None },
+        &Overlay::Views {
+            credit: None,
+            clock: None,
+            title: None,
+        },
     );
     frame.save("picture.png");
     let [w, h] = size;
@@ -226,11 +234,56 @@ fn a_picture_fills_the_reference_half_keeping_its_proportions() {
     assert_eq!(frame.at(centre, h - 40), VIEW_BG.to_array());
 }
 
+#[test]
+fn the_clock_and_the_title_go_in_their_corners() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping export test");
+        return;
+    };
+    let size = Shape::Wide.size(540);
+    let mut compositor = Compositor::new(&device, size, Layout::SideBySide);
+    let mut frame = |clock, title| {
+        let overlay = Overlay::Views {
+            credit: None,
+            clock,
+            title,
+        };
+        compose(&device, &queue, &mut compositor, &overlay)
+    };
+    let plain = frame(None, None);
+    let marked = frame(Some("12:34"), Some(("Brutus の塑像", 1.0)));
+    let faded = frame(None, Some(("Brutus の塑像", 0.3)));
+    marked.save("clock-and-title.png");
+    let [w, h] = size;
+    // The brightest red in a box: the text is grey, so any channel will do.
+    let brightest = |f: &Frame, x: std::ops::Range<u32>, y: std::ops::Range<u32>| {
+        y.flat_map(|y| x.clone().map(move |x| (x, y)))
+            .map(|(x, y)| f.at(x, y)[0])
+            .max()
+            .unwrap()
+    };
+    // The clock in the sculpt's bottom left corner, across from where the
+    // credit goes; nothing there without it.
+    let (clock_x, clock_y) = (8..90, h - 34..h - 6);
+    assert_eq!(plain.inked(clock_x.clone(), clock_y.clone()), 0);
+    assert!(marked.inked(clock_x, clock_y) > 30);
+    assert_eq!(marked.inked(w / 2 + 8..w / 2 + 90, h - 34..h - 6), 0);
+    // The title in the frame's top left corner, dimmer as it fades.
+    let (title_x, title_y) = (16..260, 12..60);
+    assert_eq!(plain.inked(title_x.clone(), title_y.clone()), 0);
+    assert!(marked.inked(title_x.clone(), title_y.clone()) > 100);
+    let (full, dim) = (
+        brightest(&marked, title_x.clone(), title_y.clone()),
+        brightest(&faded, title_x, title_y),
+    );
+    assert!(dim > 0 && dim < full / 2, "{dim} vs {full}");
+}
+
 mod job {
     use glam::Vec3;
     use splatstudy_core::export::{
-        EncodedFrame, Gpu, Job, Progress, Settings, Sink, Support, VideoConfig, VideoEncoder,
-        mp4::Mp4, zip::Zip,
+        CameraMotion, Captions, EncodedFrame, Gpu, Job, Moment, Progress, Settings, Sink, Support,
+        VideoConfig, VideoEncoder, mp4::Mp4, zip::Zip,
     };
     use splatstudy_core::sculpt::{Brush, Dab, Replay, Sculpt};
 
@@ -322,6 +375,14 @@ mod job {
             fps: 10,
             speed: 1.0,
             look: Look::lit(CLAY),
+            ..Settings::default()
+        }
+    }
+
+    fn captions(credit: Option<&str>) -> Captions {
+        Captions {
+            credit: credit.map(str::to_owned),
+            ..Captions::default()
         }
     }
 
@@ -329,10 +390,27 @@ mod job {
     fn run(
         job: &mut Job,
         gpu: &Gpu,
-        mut encoder: Option<&mut FakeEncoder>,
+        encoder: Option<&mut FakeEncoder>,
     ) -> (Progress, Vec<(String, Vec<u8>)>) {
+        let (progress, writes, draws) = run_drawing(job, gpu, encoder);
+        assert!(
+            draws.iter().any(|d| d.0 == Slot::ExportReference),
+            "the reference half was drawn"
+        );
+        (progress, writes)
+    }
+
+    /// Each time the reference was drawn: the slot and the camera's yaw.
+    type Draws = Vec<(Slot, f32)>;
+
+    /// [`run`], also giving every draw of the reference in order.
+    fn run_drawing(
+        job: &mut Job,
+        gpu: &Gpu,
+        mut encoder: Option<&mut FakeEncoder>,
+    ) -> (Progress, Vec<(String, Vec<u8>)>, Draws) {
         let mut writes = Vec::new();
-        let mut reference_draws = 0;
+        let mut draws = Vec::new();
         // Steps don't wait for the GPU, so this spins; give it time when
         // other tests share the GPU.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -341,15 +419,14 @@ mod job {
             let progress = job.step(
                 gpu,
                 encoder,
-                &mut |_, _, size| {
+                &mut |_, slot, camera, size| {
                     assert!(size[0] > 0 && size[1] > 0);
-                    reference_draws += 1;
+                    draws.push((slot, camera.yaw));
                 },
                 &mut writes,
             );
             if !matches!(progress, Progress::Working { .. }) {
-                assert!(reference_draws > 0, "the reference half was drawn");
-                return (progress, writes);
+                return (progress, writes, draws);
             }
         }
         panic!("the export never finished");
@@ -380,8 +457,7 @@ mod job {
             settings,
             replay,
             [OrbitCamera::default(); 2],
-            Some("credit".into()),
-            EndCard::default(),
+            captions(Some("credit")),
             "study".into(),
             Sink::Video(Mp4::new(160, 90, 10)),
             Some(&mut encoder),
@@ -430,8 +506,7 @@ mod job {
                 settings(),
                 replay(),
                 [OrbitCamera::default(); 2],
-                None,
-                EndCard::default(),
+                captions(None),
                 "study".into(),
                 sink,
                 None,
@@ -460,5 +535,121 @@ mod job {
         let first = std::path::Path::new(&writes[0].0);
         assert_eq!(first, std::path::Path::new("out").join("study_00000.png"));
         assert_eq!(&writes[0].1[1..4], b"PNG");
+    }
+
+    #[test]
+    fn the_ghost_and_the_turn_at_the_end_reach_both_halves() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipping export test");
+            return;
+        };
+        let clay = ClayPass::new(&device);
+        let gpu = Gpu {
+            device: &device,
+            queue: &queue,
+            clay: &clay,
+        };
+        let settings = Settings {
+            ghost: true,
+            turntable: true,
+            turn_reference: true,
+            clock: true,
+            ..settings()
+        };
+        let replay = replay();
+        let timeline = settings.timeline(replay.duration());
+        let mut job = Job::new(
+            &device,
+            settings,
+            replay,
+            [OrbitCamera::default(); 2],
+            Captions {
+                title: Some("study".into()),
+                ..captions(Some("credit"))
+            },
+            "study".into(),
+            Sink::Folder("out".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(job.timeline(), timeline);
+        assert_eq!(job.total(), timeline.total());
+        let (progress, writes, draws) = run_drawing(&mut job, &gpu, None);
+        assert!(matches!(progress, Progress::Written { .. }), "{progress:?}");
+
+        // Every frame but the card's lays the ghost over the clay, then
+        // draws the reference half, both from the same turned camera.
+        let shown = (timeline.total() - timeline.card) as usize;
+        assert_eq!(draws.len(), 2 * shown);
+        for (i, pair) in draws.chunks(2).enumerate() {
+            assert_eq!(
+                [pair[0].0, pair[1].0],
+                [Slot::ExportSculpt, Slot::ExportReference]
+            );
+            assert_eq!(pair[0].1, pair[1].1, "the halves turn together");
+            let turn = settings.turn_at(&timeline, i as u64);
+            assert!((pair[0].1 - turn).abs() < 1e-6, "frame {i}");
+        }
+        // Still through the timelapse and the hold, round in the turn.
+        let hold = timeline.timelapse as usize;
+        let middle = hold + timeline.hold as usize + timeline.turn as usize / 2;
+        assert_eq!(timeline.at(middle as u64), Moment::Turn(0.5));
+        assert!(draws[..2 * (hold + 1)].iter().all(|d| d.1 == 0.0));
+        assert!((draws[2 * middle].1 - std::f32::consts::PI).abs() < 1e-5);
+
+        // The frames show it: the hold doesn't change, the turn does.
+        let pixels = |i: usize| {
+            let mut reader = png::Decoder::new(std::io::Cursor::new(&writes[i].1))
+                .read_info()
+                .unwrap();
+            let mut out = vec![0; reader.output_buffer_size().unwrap()];
+            reader.next_frame(&mut out).unwrap();
+            out
+        };
+        assert_eq!(pixels(hold), pixels(hold + 1));
+        assert_ne!(pixels(hold), pixels(middle));
+    }
+
+    #[test]
+    fn unlinked_the_reference_keeps_still_while_the_clay_turns() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipping export test");
+            return;
+        };
+        let clay = ClayPass::new(&device);
+        let gpu = Gpu {
+            device: &device,
+            queue: &queue,
+            clay: &clay,
+        };
+        let settings = Settings {
+            camera: CameraMotion::Turntable,
+            ..settings()
+        };
+        let replay = replay();
+        let timeline = settings.timeline(replay.duration());
+        let mut job = Job::new(
+            &device,
+            settings,
+            replay,
+            [OrbitCamera::default(); 2],
+            captions(None),
+            "study".into(),
+            Sink::Zip(Zip::new()),
+            None,
+        )
+        .unwrap();
+        let (_, _, draws) = run_drawing(&mut job, &gpu, None);
+        // No ghost: only the reference half is drawn, and never turned.
+        let shown = (timeline.total() - timeline.card) as usize;
+        assert_eq!(draws.len(), shown);
+        assert!(
+            draws
+                .iter()
+                .all(|d| d.0 == Slot::ExportReference && d.1 == 0.0)
+        );
+        // The clay turned during the timelapse all the same.
+        let middle = timeline.timelapse / 2;
+        assert!(settings.turn_at(&timeline, middle) > 1.0);
     }
 }

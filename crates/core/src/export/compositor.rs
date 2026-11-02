@@ -23,11 +23,23 @@ const SHORT_SIDE_POINTS: f32 = 540.0;
 /// as in the app.
 const CREDIT_MARGIN: egui::Vec2 = vec2(14.0, 12.0);
 const CREDIT_SIZE: f32 = 11.0;
+/// The session clock, in the sculpt view's bottom left corner, across
+/// from the credit.
+const CLOCK_SIZE: f32 = 12.0;
+/// The title, in the frame's top left corner.
+const TITLE_MARGIN: egui::Vec2 = vec2(24.0, 20.0);
+const TITLE_SIZE: f32 = 26.0;
 
 /// What goes over the views in a frame.
 pub enum Overlay<'a> {
-    /// The views, with the reference's credit along the bottom of its view.
-    Views { credit: Option<&'a str> },
+    /// The views, with the reference's credit along the bottom of its view,
+    /// the session's elapsed time in the sculpt's bottom left corner, and a
+    /// title with its opacity (0..1) in the frame's top left corner.
+    Views {
+        credit: Option<&'a str>,
+        clock: Option<&'a str>,
+        title: Option<(&'a str, f32)>,
+    },
     /// The closing card, without the views.
     EndCard(&'a EndCard),
 }
@@ -178,7 +190,11 @@ impl Compositor {
             let painter = ui.painter();
             painter.rect_filled(screen, 0.0, theme::VIEW_BG);
             match overlay {
-                Overlay::Views { credit } => {
+                Overlay::Views {
+                    credit,
+                    clock,
+                    title,
+                } => {
                     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
                     painter.image(textures.0, to_points(placement.sculpt), uv, Color32::WHITE);
                     if let (Some(rect), Some(texture)) = (placement.reference, textures.1) {
@@ -198,6 +214,27 @@ impl Compositor {
                     }
                     if let Some(divider) = placement.divider {
                         painter.rect_filled(to_points(divider), 0.0, theme::DARK.border);
+                    }
+                    if let Some(clock) = clock {
+                        let rect = to_points(placement.sculpt);
+                        painter.with_clip_rect(rect).text(
+                            rect.left_bottom() + vec2(CREDIT_MARGIN.x, -CREDIT_MARGIN.y),
+                            Align2::LEFT_BOTTOM,
+                            clock,
+                            fonts::regular(CLOCK_SIZE),
+                            theme::VIEW_TEXT,
+                        );
+                    }
+                    if let Some((title, opacity)) = title.filter(|(t, _)| !t.trim().is_empty()) {
+                        let colour = theme::VIEW_INK.gamma_multiply(opacity.clamp(0.0, 1.0));
+                        let wrap = screen.width() - 2.0 * TITLE_MARGIN.x;
+                        let galley = painter.layout(
+                            title.trim().to_owned(),
+                            fonts::light(TITLE_SIZE),
+                            colour,
+                            wrap.max(10.0),
+                        );
+                        painter.galley(screen.min + TITLE_MARGIN, galley, colour);
                     }
                 }
                 Overlay::EndCard(card) => end_card(painter, screen, card),

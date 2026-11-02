@@ -11,7 +11,10 @@ pub mod video;
 pub mod zip;
 
 pub use compositor::{Compositor, EndCard, Overlay};
-pub use job::{Gpu, Job, Progress, Settings, Sink};
+pub use job::{
+    CameraMotion, Captions, DrawReference, Gpu, Job, Moment, Progress, Settings, Sink, Timeline,
+    clock,
+};
 pub use layout::{Layout, Placement, PxRect, Shape, place};
 pub use video::{EncodedFrame, Support, VideoConfig, VideoEncoder};
 

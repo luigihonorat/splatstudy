@@ -9,7 +9,8 @@
 //! [`IN_FLIGHT`] on their way back and the encoder's queue short.
 //!
 //! The video is the timelapse at the chosen speed, a second on the
-//! finished clay, then the end card.
+//! finished clay, optionally one turn around it, then the end card (see
+//! [`Timeline`]).
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -34,6 +35,16 @@ const STARTS_PER_STEP: usize = 2;
 /// Seconds on the finished clay, then on the end card.
 const HOLD_SECONDS: u32 = 1;
 const CARD_SECONDS: u32 = 3;
+/// The turn around the finished clay, in seconds.
+const TURN_SECONDS: u32 = 5;
+/// A slow turntable during the timelapse takes about this long per turn,
+/// in whole turns, so it ends where it began.
+const SLOW_TURN_SECONDS: f64 = 30.0;
+/// A length fitted to a target leaves the timelapse at least this long.
+const MIN_TIMELAPSE_SECONDS: f64 = 2.0;
+/// The title is shown this long at the start, then fades out.
+const TITLE_SECONDS: f64 = 3.0;
+const TITLE_FADE_SECONDS: f64 = 0.75;
 /// A key frame every this many seconds, for seeking.
 const KEY_SECONDS: u32 = 2;
 
@@ -45,6 +56,17 @@ pub enum Sink {
     Zip(Zip),
     /// PNG images written one by one into a folder (desktop).
     Folder(String),
+}
+
+/// How the camera moves while the clay is at work. The session's own
+/// camera moves aren't recorded, so they can't be replayed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CameraMotion {
+    /// The view as it is now, all along.
+    #[default]
+    Fixed,
+    /// Slow whole turns around the clay, easing in and out.
+    Turntable,
 }
 
 /// What to export.
@@ -59,6 +81,35 @@ pub struct Settings {
     pub speed: f64,
     /// How the clay is shaded (lit, or the silhouette).
     pub look: Look,
+    /// The reference is laid over the sculpt as a ghost.
+    pub ghost: bool,
+    /// How the camera moves during the timelapse.
+    pub camera: CameraMotion,
+    /// One turn around the finished clay before the end card.
+    pub turntable: bool,
+    /// The reference's camera turns with the sculpt's (the cameras are
+    /// linked); otherwise it keeps still.
+    pub turn_reference: bool,
+    /// The session's elapsed time in a corner of the sculpt.
+    pub clock: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            layout: Layout::default(),
+            shape: Shape::default(),
+            short_side: 1080,
+            fps: 30,
+            speed: 60.0,
+            look: Look::lit(theme::CLAY),
+            ghost: false,
+            camera: CameraMotion::default(),
+            turntable: false,
+            turn_reference: false,
+            clock: false,
+        }
+    }
 }
 
 impl Settings {
@@ -68,11 +119,117 @@ impl Settings {
         (duration.max(0.0) / self.speed * f64::from(self.fps)).floor() as u64 + 1
     }
 
+    /// The parts of the video, in frames.
+    pub fn timeline(&self, duration: f64) -> Timeline {
+        let frames = |seconds: u32| u64::from(seconds * self.fps);
+        Timeline {
+            timelapse: self.timelapse_frames(duration),
+            hold: frames(HOLD_SECONDS),
+            turn: if self.turntable {
+                frames(TURN_SECONDS)
+            } else {
+                0
+            },
+            card: frames(CARD_SECONDS),
+        }
+    }
+
     /// The whole video's length in seconds, end card included.
     pub fn seconds(&self, duration: f64) -> f64 {
-        self.timelapse_frames(duration) as f64 / f64::from(self.fps)
-            + f64::from(HOLD_SECONDS + CARD_SECONDS)
+        self.timeline(duration).total() as f64 / f64::from(self.fps)
     }
+
+    /// Seconds of video after the timelapse.
+    fn closing_seconds(&self) -> f64 {
+        let turn = if self.turntable { TURN_SECONDS } else { 0 };
+        f64::from(HOLD_SECONDS + turn + CARD_SECONDS)
+    }
+
+    /// The speed that makes the whole video about `target` seconds long
+    /// for a session of `duration`. Never slower than the session itself,
+    /// so a short session makes a shorter video.
+    pub fn fit_speed(&self, duration: f64, target: f64) -> f64 {
+        let timelapse = (target - self.closing_seconds()).max(MIN_TIMELAPSE_SECONDS);
+        (duration / timelapse).max(1.0)
+    }
+
+    /// How far the sculpt's camera has turned at frame `index`, in
+    /// radians.
+    pub fn turn_at(&self, timeline: &Timeline, index: u64) -> f32 {
+        use std::f64::consts::TAU;
+        let angle = match timeline.at(index) {
+            Moment::Timelapse(i) if self.camera == CameraMotion::Turntable => {
+                let span = timeline.timelapse.saturating_sub(1).max(1);
+                let seconds = span as f64 / f64::from(self.fps);
+                let turns = (seconds / SLOW_TURN_SECONDS).round().max(1.0);
+                TAU * turns * ease(i as f64 / span as f64)
+            }
+            Moment::Turn(t) => TAU * ease(t),
+            _ => 0.0,
+        };
+        angle as f32
+    }
+}
+
+/// Eases in and out: 0 at 0, 1 at 1, still at both ends.
+pub fn ease(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    (1.0 - (std::f64::consts::PI * t).cos()) / 2.0
+}
+
+/// The parts of an exported video, in frames, one after the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timeline {
+    /// The clay at work.
+    pub timelapse: u64,
+    /// Still, on the finished clay.
+    pub hold: u64,
+    /// Turning once around the finished clay.
+    pub turn: u64,
+    pub card: u64,
+}
+
+/// What a frame shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Moment {
+    /// Frame `n` of the timelapse.
+    Timelapse(u64),
+    Hold,
+    /// The turn, from 0 to just under 1.
+    Turn(f64),
+    Card,
+}
+
+impl Timeline {
+    pub fn total(&self) -> u64 {
+        self.timelapse + self.hold + self.turn + self.card
+    }
+
+    pub fn at(&self, index: u64) -> Moment {
+        let mut i = index;
+        if i < self.timelapse {
+            return Moment::Timelapse(i);
+        }
+        i -= self.timelapse;
+        if i < self.hold {
+            return Moment::Hold;
+        }
+        i -= self.hold;
+        if i < self.turn {
+            return Moment::Turn(i as f64 / self.turn as f64);
+        }
+        Moment::Card
+    }
+}
+
+/// What a job writes over the frames.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Captions {
+    /// Along the bottom of the reference view.
+    pub credit: Option<String>,
+    /// Over the views at the start.
+    pub title: Option<String>,
+    pub card: EndCard,
 }
 
 /// How far a job is.
@@ -95,6 +252,12 @@ pub enum Progress {
     Failed(String),
 }
 
+/// "m:ss", for the session's elapsed time and the video's length.
+pub fn clock(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
 /// The camera for a view `aspect` wide: in a view taller than wide, the
 /// field of view is widened so the camera's view still fits across, as
 /// it does up and down in the app's wide views.
@@ -113,6 +276,10 @@ pub struct Gpu<'a> {
     pub clay: &'a ClayPass,
 }
 
+/// Draws the reference into an export pass; see [`Job::step`].
+pub type DrawReference<'a> =
+    dyn FnMut(&mut wgpu::RenderPass<'_>, Slot, &OrbitCamera, [u32; 2]) + 'a;
+
 pub struct Job {
     settings: Settings,
     compositor: Compositor,
@@ -120,12 +287,13 @@ pub struct Job {
     gpu_mesh: GpuMesh,
     /// Sculpt view, then reference view.
     cameras: [OrbitCamera; 2],
-    credit: Option<String>,
-    card: EndCard,
+    captions: Captions,
     /// The file name without its extension.
     name: String,
     sink: Sink,
-    timelapse: u64,
+    /// The session's playback length, in seconds.
+    duration: f64,
+    timeline: Timeline,
     total: u64,
     /// The next frame to render.
     next: u64,
@@ -145,8 +313,7 @@ impl Job {
         settings: Settings,
         replay: Replay,
         cameras: [OrbitCamera; 2],
-        credit: Option<String>,
-        card: EndCard,
+        captions: Captions,
         name: String,
         sink: Sink,
         encoder: Option<&mut (dyn VideoEncoder + 'e)>,
@@ -156,20 +323,20 @@ impl Job {
             let encoder = encoder.ok_or("no video encoder")?;
             encoder.start(&VideoConfig::new(size[0], size[1], settings.fps))?;
         }
-        let timelapse = settings.timelapse_frames(replay.duration());
-        let total = timelapse + u64::from((HOLD_SECONDS + CARD_SECONDS) * settings.fps);
+        let duration = replay.duration();
+        let timeline = settings.timeline(duration);
         Ok(Job {
             compositor: Compositor::new(device, size, settings.layout),
             gpu_mesh: GpuMesh::new(device, &replay.sculpt.mesh),
             settings,
             replay,
             cameras,
-            credit,
-            card,
+            captions,
             name,
             sink,
-            timelapse,
-            total,
+            duration,
+            timeline,
+            total: timeline.total(),
             next: 0,
             done: 0,
             in_flight: VecDeque::new(),
@@ -179,6 +346,10 @@ impl Job {
 
     pub fn total(&self) -> u64 {
         self.total
+    }
+
+    pub fn timeline(&self) -> Timeline {
+        self.timeline
     }
 
     /// The last composed frame, for a preview.
@@ -198,12 +369,15 @@ impl Job {
 
     /// Does what can be done now without waiting. `draw_reference` draws
     /// the reference into an export pass, seen from the camera given, into
-    /// a target of the size given in pixels. `writes` gets the images for a folder sink.
+    /// a target of the size given in pixels: into the reference half
+    /// ([`Slot::ExportReference`]), or over the clay as the ghost
+    /// ([`Slot::ExportSculpt`], last in the pass). `writes` gets the images
+    /// for a folder sink.
     pub fn step<'e>(
         &mut self,
         gpu: &Gpu,
         mut encoder: Option<&mut (dyn VideoEncoder + 'e)>,
-        draw_reference: &mut dyn FnMut(&mut wgpu::RenderPass<'_>, &OrbitCamera, [u32; 2]),
+        draw_reference: &mut DrawReference<'_>,
         writes: &mut Vec<(String, Vec<u8>)>,
     ) -> Progress {
         // Frames back from the GPU, in order.
@@ -258,16 +432,14 @@ impl Job {
     }
 
     /// Plays the timelapse up to frame `self.next` and starts drawing it.
-    fn render(
-        &mut self,
-        gpu: &Gpu,
-        draw_reference: &mut dyn FnMut(&mut wgpu::RenderPass<'_>, &OrbitCamera, [u32; 2]),
-    ) -> Readback {
+    fn render(&mut self, gpu: &Gpu, draw_reference: &mut DrawReference<'_>) -> Readback {
         let index = self.next;
-        let time = if index < self.timelapse {
-            index as f64 * self.settings.speed / f64::from(self.settings.fps)
-        } else {
-            f64::INFINITY
+        let settings = self.settings;
+        let fps = f64::from(settings.fps);
+        let moment = self.timeline.at(index);
+        let time = match moment {
+            Moment::Timelapse(i) => i as f64 * settings.speed / fps,
+            _ => f64::INFINITY,
         };
         self.replay.seek(time, usize::MAX);
         let sculpt = &mut self.replay.sculpt;
@@ -283,32 +455,51 @@ impl Job {
         }
 
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let card_from = self.total - u64::from(CARD_SECONDS * self.settings.fps);
-        let overlay = if index >= card_from {
-            Overlay::EndCard(&self.card)
+        let elapsed;
+        let overlay = if moment == Moment::Card {
+            Overlay::EndCard(&self.captions.card)
         } else {
+            let turn = settings.turn_at(&self.timeline, index);
+            let mut cameras = self.cameras;
+            cameras[0].yaw += turn;
+            if settings.turn_reference {
+                cameras[1].yaw += turn;
+            }
             let view = self.compositor.sculpt_view();
+            let camera = fit_camera(&cameras[0], view.aspect());
             gpu.clay.prepare(
                 gpu.queue,
                 Slot::ExportSculpt,
-                &fit_camera(&self.cameras[0], view.aspect()),
+                &camera,
                 view.aspect(),
-                &self.settings.look,
+                &settings.look,
             );
             {
                 let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
                 gpu.clay.draw(&mut pass, Slot::ExportSculpt, &self.gpu_mesh);
+                if settings.ghost {
+                    draw_reference(&mut pass, Slot::ExportSculpt, &camera, view.size);
+                }
             }
             if let Some(view) = self.compositor.reference_view() {
                 let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
                 draw_reference(
                     &mut pass,
-                    &fit_camera(&self.cameras[1], view.aspect()),
+                    Slot::ExportReference,
+                    &fit_camera(&cameras[1], view.aspect()),
                     view.size,
                 );
             }
+            elapsed = settings.clock.then(|| clock(time.min(self.duration)));
+            let seconds = index as f64 / fps;
+            let title = self.captions.title.as_deref().and_then(|title| {
+                let left = 1.0 - (seconds - TITLE_SECONDS) / TITLE_FADE_SECONDS;
+                (left > 0.0).then_some((title, left.min(1.0) as f32))
+            });
             Overlay::Views {
-                credit: self.credit.as_deref(),
+                credit: self.captions.credit.as_deref(),
+                clock: elapsed.as_deref(),
+                title,
             }
         };
         let mut buffers = self
@@ -405,6 +596,7 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::TAU;
 
     #[test]
     fn tall_views_see_as_far_across_as_wide_ones_see_up() {
@@ -414,5 +606,110 @@ mod tests {
         // Half the width seen across equals what the original sees up.
         let across = (tall.fov_y / 2.0).tan() * 9.0 / 16.0;
         assert!((across - (camera.fov_y / 2.0).tan()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_timeline_runs_timelapse_hold_turn_then_card() {
+        let settings = Settings {
+            fps: 10,
+            speed: 10.0,
+            turntable: true,
+            ..Settings::default()
+        };
+        // 60 s at ×10: 6 s, plus the first frame.
+        let t = settings.timeline(60.0);
+        assert_eq!((t.timelapse, t.hold, t.turn, t.card), (61, 10, 50, 30));
+        assert_eq!(t.total(), 151);
+        assert_eq!(t.at(0), Moment::Timelapse(0));
+        assert_eq!(t.at(60), Moment::Timelapse(60));
+        assert_eq!(t.at(61), Moment::Hold);
+        assert_eq!(t.at(71), Moment::Turn(0.0));
+        assert_eq!(t.at(96), Moment::Turn(0.5));
+        assert_eq!(t.at(121), Moment::Card);
+        assert_eq!(t.at(10_000), Moment::Card);
+        assert!((settings.seconds(60.0) - 15.1).abs() < 1e-9);
+        // Without the turn, the hold goes straight to the card.
+        let plain = Settings {
+            turntable: false,
+            ..settings
+        };
+        assert_eq!(plain.timeline(60.0).at(71), Moment::Card);
+    }
+
+    #[test]
+    fn fitted_speeds_give_the_target_length() {
+        for turntable in [false, true] {
+            let mut settings = Settings {
+                turntable,
+                ..Settings::default()
+            };
+            // A 20-minute session.
+            for target in [15.0, 30.0, 60.0] {
+                settings.speed = settings.fit_speed(1200.0, target);
+                let seconds = settings.seconds(1200.0);
+                assert!((seconds - target).abs() < 0.1, "{target} gave {seconds}");
+            }
+        }
+        // A one-minute session isn't slowed down to fill a minute.
+        let settings = Settings::default();
+        assert_eq!(settings.fit_speed(30.0, 60.0), 1.0);
+        // A target shorter than the ending keeps a little timelapse.
+        let settings = Settings {
+            turntable: true,
+            ..Settings::default()
+        };
+        assert_eq!(settings.fit_speed(100.0, 5.0), 50.0);
+    }
+
+    #[test]
+    fn the_turntable_eases_once_around_and_comes_back() {
+        let settings = Settings {
+            fps: 10,
+            speed: 10.0,
+            turntable: true,
+            ..Settings::default()
+        };
+        let t = settings.timeline(60.0);
+        // A fixed camera stays still through the timelapse and the hold.
+        for i in 0..71 {
+            assert_eq!(settings.turn_at(&t, i), 0.0);
+        }
+        // The turn starts still, is half way round in the middle and
+        // nearly back at the end, and the card doesn't turn.
+        let first = settings.turn_at(&t, 71);
+        let second = settings.turn_at(&t, 72);
+        let middle = settings.turn_at(&t, 96);
+        let last = settings.turn_at(&t, 120);
+        assert_eq!(first, 0.0);
+        assert!(second < 0.01, "eases in: {second}");
+        assert!((middle - TAU / 2.0).abs() < 1e-5);
+        assert!(TAU - last < 0.01, "eases out: {last}");
+        assert_eq!(settings.turn_at(&t, 121), 0.0);
+        // Turning all the way: always onward.
+        let angles: Vec<f32> = (71..121).map(|i| settings.turn_at(&t, i)).collect();
+        assert!(angles.windows(2).all(|w| w[1] > w[0]));
+
+        // A slow turntable through a 6 s timelapse: one whole turn, from
+        // the view as it is back to it.
+        let slow = Settings {
+            camera: CameraMotion::Turntable,
+            ..settings
+        };
+        assert_eq!(slow.turn_at(&t, 0), 0.0);
+        assert!((slow.turn_at(&t, 30) - TAU / 2.0).abs() < 1e-5);
+        assert!((slow.turn_at(&t, 60) - TAU).abs() < 1e-5);
+        assert_eq!(slow.turn_at(&t, 61), 0.0, "the hold is where it began");
+        // A long one turns about every 30 s.
+        let long = slow.timeline(3600.0);
+        let end = long.timelapse - 1;
+        assert!((slow.turn_at(&long, end) - 12.0 * TAU).abs() < 1e-3);
+    }
+
+    #[test]
+    fn clocks_read_minutes_and_seconds() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(62.4), "1:02");
+        assert_eq!(clock(-3.0), "0:00");
+        assert_eq!(clock(3599.6), "60:00");
     }
 }

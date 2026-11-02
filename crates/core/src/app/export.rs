@@ -9,19 +9,22 @@
 
 use egui::{Align2, RichText, Stroke, TextureId};
 
+use super::study::ReferenceLook;
 use super::{App, Request, WEB};
 use crate::camera::OrbitCamera;
 use crate::export::{
-    EndCard, Gpu, Job, Layout, Progress, Settings, Shape, Sink, Support, VideoEncoder, mp4::Mp4,
-    zip::Zip,
+    CameraMotion, Captions, EndCard, Gpu, Job, Layout, Progress, Settings, Shape, Sink, Support,
+    VideoEncoder, clock, mp4::Mp4, zip::Zip,
 };
 use crate::reference::{Content, Credit};
 use crate::render::Slot;
 use crate::sculpt::{Checkpoint, Mesh, Replay};
-use crate::ui::{self, menu};
+use crate::ui::{self, menu, theme};
 
 /// Session seconds per video second, as in the timelapse panel.
 const SPEEDS: [f64; 3] = [10.0, 60.0, 300.0];
+/// Lengths the whole video can be fitted to, in seconds.
+const FITS: [f64; 3] = [15.0, 30.0, 60.0];
 const VIDEO_SHORT_SIDE: u32 = 1080;
 const VIDEO_FPS: u32 = 30;
 /// Images in a zip are held in memory until the download: smaller and
@@ -37,6 +40,15 @@ enum Format {
     Images,
 }
 
+/// How fast the timelapse plays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pace {
+    /// Session seconds per video second.
+    Speed(f64),
+    /// As fast as makes the whole video about this many seconds long.
+    Fit(f64),
+}
+
 /// The export being set up or running.
 pub(super) struct ExportState {
     open: bool,
@@ -44,13 +56,29 @@ pub(super) struct ExportState {
     /// The user chose the layout, rather than it following the reference.
     layout_picked: bool,
     shape: Shape,
-    speed: f64,
+    pace: Pace,
+    camera: CameraMotion,
+    /// One turn around the finished clay before the end card.
+    turntable: bool,
+    /// The reference over the sculpt; follows the view's ghost each time
+    /// the window opens.
+    ghost: bool,
+    /// The session's elapsed time in a corner.
+    clock: bool,
+    /// A title at the start.
+    titled: bool,
+    title: String,
+    /// The title was typed, so it no longer follows the scene's name.
+    title_typed: bool,
     format: Format,
     /// The playback length of the session, worked out when the window opens.
     duration: f64,
     /// Lent by the shell; `None` where there is no video encoder.
     encoder: Option<Box<dyn VideoEncoder>>,
     job: Option<Job>,
+    /// How the reference is drawn in its half and as the ghost, fixed when
+    /// the export starts.
+    looks: Option<[ReferenceLook; 2]>,
     /// Frames done and in all, as of the last step.
     progress: (u64, u64),
     /// The job's composed frame, shown in the window.
@@ -68,23 +96,25 @@ impl Default for ExportState {
             layout: Layout::default(),
             layout_picked: false,
             shape: Shape::default(),
-            speed: SPEEDS[1],
+            pace: Pace::Speed(SPEEDS[1]),
+            camera: CameraMotion::Fixed,
+            turntable: true,
+            ghost: false,
+            clock: true,
+            titled: false,
+            title: String::new(),
+            title_typed: false,
             format: Format::Video,
             duration: 0.0,
             encoder: None,
             job: None,
+            looks: None,
             progress: (0, 0),
             preview: None,
             retired: None,
             waiting_for_folder: false,
         }
     }
-}
-
-/// "m:ss".
-fn clock(seconds: f64) -> String {
-    let s = seconds.max(0.0).round() as u64;
-    format!("{}:{:02}", s / 60, s % 60)
 }
 
 /// The credit as one line: title, author and licence.
@@ -118,6 +148,36 @@ impl App {
         }
     }
 
+    /// The reference can be laid over the sculpt: it is 3D.
+    fn can_ghost(&self) -> bool {
+        self.scene_reference()
+            .is_some_and(|r| !matches!(r.content, Content::Image(_)))
+    }
+
+    /// The window's settings, for frames `short_side` pixels high (or
+    /// wide) at `fps`.
+    fn export_settings(&self, short_side: u32, fps: u32) -> Settings {
+        let e = &self.export;
+        let mut settings = Settings {
+            layout: e.layout,
+            shape: e.shape,
+            short_side,
+            fps,
+            speed: 1.0,
+            look: self.sculpt_look(),
+            ghost: e.ghost && self.can_ghost(),
+            camera: e.camera,
+            turntable: e.turntable,
+            turn_reference: self.study.link,
+            clock: e.clock,
+        };
+        settings.speed = match e.pace {
+            Pace::Speed(speed) => speed,
+            Pace::Fit(seconds) => settings.fit_speed(e.duration, seconds),
+        };
+        settings
+    }
+
     fn open_export(&mut self) {
         // Only the times matter here, so a tiny start mesh will do.
         let tiny = Mesh::icosphere(0);
@@ -136,6 +196,10 @@ impl App {
             } else {
                 self.export.shape.natural_layout()
             };
+        }
+        self.export.ghost = self.study.ghost;
+        if !self.export.title_typed {
+            self.export.title = self.scene_stem();
         }
         self.export.open = true;
     }
@@ -183,17 +247,16 @@ impl App {
 
     fn start_export(&mut self, sink: Sink, short_side: u32, fps: u32) {
         let tr = self.lang.tr();
-        let settings = Settings {
-            layout: self.export.layout,
-            shape: self.export.shape,
-            short_side,
-            fps,
-            speed: self.export.speed,
-            look: self.sculpt_look(),
-        };
+        let settings = self.export_settings(short_side, fps);
+        let reference_look = self.reference_look();
+        let ghost_look = self.ghost_look().unwrap_or(ReferenceLook {
+            opacity: theme::GHOST_OPACITY,
+            over: true,
+            ..reference_look
+        });
+        self.export.looks = Some([reference_look, ghost_look]);
         let replay = Replay::of(&self.sculpt);
         let reference = self.scene_reference();
-        let credit = reference.and_then(|r| credit_line(&r.credit));
         let card = EndCard {
             title: reference.map_or_else(String::new, |r| {
                 if r.credit.title.is_empty() {
@@ -211,14 +274,19 @@ impl App {
             }),
             footer: format!("{} · splatstudy.com", tr.video.made_with),
         };
+        let title = self.export.title.trim();
+        let captions = Captions {
+            credit: reference.and_then(|r| credit_line(&r.credit)),
+            title: (self.export.titled && !title.is_empty()).then(|| title.to_owned()),
+            card,
+        };
         let name = format!("{}-timelapse", self.scene_stem());
         let job = Job::new(
             &self.device,
             settings,
             replay,
             self.cameras,
-            credit,
-            card,
+            captions,
             name,
             sink,
             self.export.encoder.as_deref_mut(),
@@ -257,7 +325,9 @@ impl App {
             job.step(
                 &gpu,
                 encoder.as_deref_mut(),
-                &mut |pass, camera, size| self.draw_export_reference(pass, camera, size),
+                &mut |pass, slot, camera, size| {
+                    self.draw_export_reference(pass, slot, camera, size);
+                },
                 &mut writes,
             )
         };
@@ -292,17 +362,33 @@ impl App {
         self.export.encoder = encoder;
     }
 
-    /// Draws the reference into an exported frame's reference half, seen
-    /// from `camera`, as the reference view shows it (the silhouette
-    /// included). Pictures draw nothing here: the compositor shows them.
+    /// Draws the reference into an exported frame, seen from `camera`: in
+    /// its own half as the reference view shows it (the silhouette
+    /// included), or over the sculpt as the ghost. Pictures draw nothing
+    /// here: the compositor shows them.
     fn draw_export_reference(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
+        slot: Slot,
         camera: &OrbitCamera,
         size: [u32; 2],
     ) {
-        let look = self.reference_look();
-        self.draw_reference_sized(pass, Slot::ExportReference, camera, size, &look);
+        let [reference, ghost] = self.export.looks.unwrap_or_else(|| {
+            let look = self.reference_look();
+            [
+                look,
+                ReferenceLook {
+                    opacity: theme::GHOST_OPACITY,
+                    over: true,
+                    ..look
+                },
+            ]
+        });
+        let look = match slot {
+            Slot::ExportSculpt => ghost,
+            _ => reference,
+        };
+        self.draw_reference_sized(pass, slot, camera, size, &look);
     }
 
     /// Video items in the file → export menu, after the mesh formats.
@@ -376,6 +462,7 @@ impl App {
                 add(ui);
             });
         };
+        let can_ghost = self.can_ghost();
         let e = &mut self.export;
 
         ui::section(ui, v.layout);
@@ -406,33 +493,77 @@ impl App {
                 }
             }
         });
+
         ui::section(ui, v.speed);
         row(ui, &mut |ui| {
             for speed in SPEEDS {
-                if ui::choice(ui, format!("×{speed}"), e.speed == speed).clicked() {
-                    e.speed = speed;
+                if ui::choice(ui, format!("×{speed}"), e.pace == Pace::Speed(speed)).clicked() {
+                    e.pace = Pace::Speed(speed);
                 }
             }
         });
+        row(ui, &mut |ui| {
+            note(ui, v.fit_to);
+            for seconds in FITS {
+                let label = format!("{seconds}{}", v.seconds);
+                if ui::choice(ui, label, e.pace == Pace::Fit(seconds)).clicked() {
+                    e.pace = Pace::Fit(seconds);
+                }
+            }
+        });
+
+        ui::section(ui, v.camera);
+        row(ui, &mut |ui| {
+            for (camera, label) in [
+                (CameraMotion::Fixed, v.fixed),
+                (CameraMotion::Turntable, v.turntable),
+            ] {
+                if ui::choice(ui, label, e.camera == camera).clicked() {
+                    e.camera = camera;
+                }
+            }
+        });
+        row(ui, &mut |ui| {
+            if ui::choice(ui, v.turn_at_end, e.turntable).clicked() {
+                e.turntable = !e.turntable;
+            }
+        });
+
+        ui::section(ui, v.show);
+        row(ui, &mut |ui| {
+            if can_ghost && ui::choice(ui, v.ghost, e.ghost).clicked() {
+                e.ghost = !e.ghost;
+            }
+            if ui::choice(ui, v.elapsed, e.clock).clicked() {
+                e.clock = !e.clock;
+            }
+            if ui::choice(ui, v.title_item, e.titled).clicked() {
+                e.titled = !e.titled;
+            }
+        });
+        if e.titled {
+            let field = egui::TextEdit::singleline(&mut e.title).desired_width(f32::INFINITY);
+            if ui.add(field).changed() {
+                e.title_typed = true;
+            }
+        }
+
         let fps = if self.export_format() == Format::Images && WEB {
             ZIP_FPS
         } else {
             VIDEO_FPS
         };
-        let look = self.sculpt_look();
-        let e = &mut self.export;
-        let settings = Settings {
-            layout: e.layout,
-            shape: e.shape,
-            short_side: VIDEO_SHORT_SIDE,
-            fps,
-            speed: e.speed,
-            look,
-        };
-        note(
-            ui,
-            &format!("{} {}", v.length, clock(settings.seconds(e.duration))),
+        let settings = self.export_settings(VIDEO_SHORT_SIDE, fps);
+        let mut length = format!(
+            "{} {}",
+            v.length,
+            clock(settings.seconds(self.export.duration))
         );
+        if let Pace::Fit(_) = self.export.pace {
+            length += &format!(" · ×{}", settings.speed.round());
+        }
+        ui.add_space(4.0);
+        note(ui, &length);
 
         ui::section(ui, v.file);
         let support = self.video_support();
@@ -532,6 +663,5 @@ mod tests {
         };
         assert_eq!(credit_line(&credit).as_deref(), Some("Bust · CC0"));
         assert_eq!(credit_line(&Credit::default()), None);
-        assert_eq!(clock(62.4), "1:02");
     }
 }
