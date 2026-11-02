@@ -556,7 +556,7 @@ impl App {
                 Sense::hover(),
             )
             .on_hover_ui(|ui| {
-                ui.set_max_width(rect.width().max(240.0).min(480.0));
+                ui.set_max_width(rect.width().clamp(240.0, 480.0));
                 for (label, text) in [
                     (tr.refs.title, &c.title),
                     (tr.refs.author, &c.author),
@@ -798,6 +798,39 @@ fn crop_box(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_credit_goes_on_two_lines_keeping_the_licence_whole() {
+        let credit = Credit {
+            title: " Head of David ".into(),
+            author: "SMK".into(),
+            licence: "CC0 1.0".into(),
+            url: "https://example.org".into(),
+        };
+        let wide = credit_lines(&credit, |_| true);
+        assert_eq!(
+            wide,
+            [["Head of David — SMK — CC0 1.0".to_owned(), String::new()]]
+        );
+        let narrow = credit_lines(&credit, |_| false);
+        assert_eq!(
+            narrow,
+            [
+                ["Head of David".to_owned(), String::new()],
+                ["SMK".to_owned(), " — CC0 1.0".to_owned()],
+            ]
+        );
+        // Missing parts are left out, never shown as empty lines or dashes.
+        let licence_only = Credit {
+            licence: "CC BY 4.0".into(),
+            ..Credit::default()
+        };
+        assert_eq!(
+            credit_lines(&licence_only, |_| false),
+            [[String::new(), "CC BY 4.0".to_owned()]]
+        );
+        assert!(credit_lines(&Credit::default(), |_| true).is_empty());
+    }
 
     #[test]
     fn meshes_must_fit_the_largest_buffer() {

@@ -388,9 +388,10 @@ fn the_gpu_sorts_like_the_cpu() {
             ..Scene::new(&s)
         },
     );
-    let differ = gpu
-        .chunks_exact(4)
-        .zip(cpu.chunks_exact(4))
+    let (gpu_px, cpu_px) = (gpu.as_chunks::<4>().0, cpu.as_chunks::<4>().0);
+    let differ = gpu_px
+        .iter()
+        .zip(cpu_px)
         .filter(|(a, b)| a.iter().zip(*b).any(|(x, y)| x.abs_diff(*y) > 2))
         .count();
     // The same but where two splats share a depth step, if any do.
@@ -400,7 +401,7 @@ fn the_gpu_sorts_like_the_cpu() {
     );
     // Not an empty picture: most of it is covered.
     let bg = VIEW_BG.to_array();
-    let covered = gpu.chunks_exact(4).filter(|p| p[..3] != bg[..3]).count();
+    let covered = gpu_px.iter().filter(|p| p[..3] != bg[..3]).count();
     assert!(covered > (SIZE * SIZE / 4) as usize, "{covered}");
 }
 
@@ -415,9 +416,11 @@ fn capture(n: usize) -> Splats {
         seed as f32 / u32::MAX as f32
     };
     let mut s = Splats::default();
-    for i in 0..n {
+    for _ in 0..n {
         let dir = Vec3::new(next() - 0.5, next() - 0.5, next() - 0.5).normalize_or(Vec3::Y);
-        let r = if i % 100 == 0 {
+        // One in a hundred floats away, at random rather than every
+        // hundredth, which the fitting's even sampling could alias with.
+        let r = if next() < 0.01 {
             3.0 + next() * 20.0
         } else {
             0.9 + next() * 0.2
@@ -437,13 +440,14 @@ fn capture(n: usize) -> Splats {
     s
 }
 
-/// A binary 3DGS PLY of `n` splats with the 45 higher spherical harmonics
-/// such files carry: 62 floats, 248 bytes a splat.
-fn capture_ply(n: usize) -> Vec<u8> {
+/// A binary 3DGS PLY of `n` splats, with the 45 higher spherical harmonics
+/// such files carry (62 floats, 248 bytes a splat) when `higher`.
+fn capture_ply(n: usize, higher: bool) -> Vec<u8> {
+    let rest = if higher { 45 } else { 0 };
     let mut header = format!("ply\nformat binary_little_endian 1.0\nelement vertex {n}\n");
     let mut names: Vec<String> = ["x", "y", "z", "nx", "ny", "nz"].map(String::from).to_vec();
     names.extend((0..3).map(|i| format!("f_dc_{i}")));
-    names.extend((0..45).map(|i| format!("f_rest_{i}")));
+    names.extend((0..rest).map(|i| format!("f_rest_{i}")));
     names.push("opacity".into());
     names.extend((0..3).map(|i| format!("scale_{i}")));
     names.extend((0..4).map(|i| format!("rot_{i}")));
@@ -463,7 +467,7 @@ fn capture_ply(n: usize) -> Vec<u8> {
                 .iter()
                 .map(|&c| (f32::from(c) / 255.0 - 0.5) / 0.282),
         );
-        row.extend([0.01; 45]);
+        row.extend(std::iter::repeat_n(0.01, rest));
         row.push(0.5);
         row.extend(s.scales[i].to_array().map(f32::ln));
         row.extend([q.w, q.x, q.y, q.z]);
@@ -488,10 +492,14 @@ fn timings_of_large_captures() {
 
     // Loading a 200 MB file.
     let n = 200 * 1000 * 1000 / 248;
-    let bytes = capture_ply(n);
-    // For timing the browser too: SPLAT_TIMING_PLY=<path> keeps the file.
+    let bytes = capture_ply(n, true);
+    // For timing the browser too: SPLAT_TIMING_PLY=<path> keeps the file,
+    // and <path>.2m.ply gets 2M splats without the higher harmonics.
     if let Some(path) = std::env::var_os("SPLAT_TIMING_PLY") {
-        std::fs::write(path, &bytes).expect("writes the file");
+        std::fs::write(&path, &bytes).expect("writes the file");
+        let mut two = path;
+        two.push(".2m.ply");
+        std::fs::write(two, capture_ply(2_000_000, false)).expect("writes the file");
     }
     let t = Instant::now();
     let content = load_ply(&bytes).expect("loads");
