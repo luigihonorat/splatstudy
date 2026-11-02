@@ -476,7 +476,14 @@ impl App {
             .exact_size(PANEL_WIDTH)
             .resizable(false)
             .frame(panel_frame)
-            .show(ui, |ui| self.sculpt_panel(ui));
+            .show(ui, |ui| {
+                // Taller than a laptop screen once every tool is there.
+                ui.spacing_mut().scroll = reference::thin_scroll_bar();
+                egui::ScrollArea::vertical()
+                    .id_salt("sculpt panel")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| self.sculpt_panel(ui));
+            });
         egui::Panel::right("reference tools")
             .exact_size(PANEL_WIDTH)
             .resizable(false)

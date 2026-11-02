@@ -167,7 +167,7 @@ fn wrap_angle(a: f32) -> f32 {
 
 /// A scroll bar in the app's manner: a square line in the margin, faint
 /// until the pointer is over the panel, never a box.
-fn thin_scroll_bar() -> egui::style::ScrollStyle {
+pub(super) fn thin_scroll_bar() -> egui::style::ScrollStyle {
     egui::style::ScrollStyle {
         content_margin: egui::Margin {
             right: 10,
