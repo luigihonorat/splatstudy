@@ -8,11 +8,12 @@ use egui::{Key, Pos2, Rect, Stroke};
 use glam::{Vec2, Vec3};
 
 use super::{App, Drag, Request, SCULPT};
-use crate::input::PointerKind;
-use crate::meshio;
+use crate::input::{FilePurpose, PointerKind};
+use crate::meshio::{self, Soup};
 use crate::render::clay::GpuMesh;
 use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh};
 use crate::ui::{self, i18n::Tr, menu, theme};
+use crate::voxel;
 
 /// Dabs are placed every this fraction of the tool radius along a stroke.
 const SPACING: f32 = 0.15;
@@ -50,6 +51,17 @@ pub(super) struct ToolSettings {
     pub(super) symmetry: bool,
     /// Pen pressure scales the size as well as the strength.
     pub(super) pressure_size: bool,
+    /// Remesh resolution: cells across the clay's longest side.
+    pub(super) resolution: f32,
+    /// Asked for in this frame, done at the start of the next, so the
+    /// notice saying so shows while it runs.
+    pending: Option<Pending>,
+}
+
+/// A slow mesh operation waiting for the next frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pending {
+    Remesh,
 }
 
 impl Default for ToolSettings {
@@ -60,8 +72,38 @@ impl Default for ToolSettings {
             strength: BRUSHES.map(|(_, _, strength)| strength),
             symmetry: true,
             pressure_size: false,
+            resolution: voxel::DEFAULT_RESOLUTION as f32,
+            pending: None,
         }
     }
+}
+
+/// Imported meshes with fewer vertices are too coarse to sculpt: remeshed.
+const MIN_IMPORT_VERTICES: usize = 5_000;
+/// Imported meshes with more are too heavy to sculpt smoothly: remeshed.
+const MAX_IMPORT_VERTICES: usize = 1_500_000;
+/// Long edges more than this many times the short ones: too uneven for
+/// the brushes, remeshed.
+const MAX_EDGE_SPREAD: f32 = 8.0;
+
+/// Whether an imported mesh should be remeshed before sculpting: open or
+/// non-manifold, too coarse or too fine, or with very uneven triangles.
+fn needs_remesh(soup: &Soup) -> bool {
+    let n = soup.positions.len();
+    if !soup.is_closed() || !(MIN_IMPORT_VERTICES..=MAX_IMPORT_VERTICES).contains(&n) {
+        return true;
+    }
+    let mut lengths: Vec<f32> = soup
+        .triangles
+        .iter()
+        .flat_map(|t| {
+            let [a, b, c] = t.map(|v| soup.positions[v as usize]);
+            [a.distance(b), b.distance(c), c.distance(a)]
+        })
+        .collect();
+    lengths.sort_by(f32::total_cmp);
+    let at = |q: f32| lengths[((lengths.len() - 1) as f32 * q) as usize];
+    at(0.95) > at(0.05) * MAX_EDGE_SPREAD
 }
 
 /// `Brush::ALL` lists the brushes in declaration order.
@@ -91,6 +133,9 @@ impl App {
                     self.tool.tool = brush;
                 }
             }
+            if pressed(M::SHIFT, Key::R) {
+                self.ask_remesh();
+            }
         }
         if pressed(M::NONE, Key::OpenBracket) {
             self.tool.radius = (self.tool.radius / 1.2).max(4.0);
@@ -100,9 +145,85 @@ impl App {
         }
     }
 
-    /// Replaces the clay with a mesh from a file. Not written yet.
-    pub(super) fn import_sculpt(&mut self, name: &str, _bytes: Arc<[u8]>) {
-        self.cannot_open(name);
+    /// Asks the shell for a mesh file to replace the clay with. For the
+    /// file menu's "import sculpt mesh" item.
+    #[allow(dead_code)] // until the file menu calls it
+    pub(super) fn ask_import_sculpt(&mut self) {
+        self.request(Request::OpenFile {
+            purpose: FilePurpose::Sculpt,
+            extensions: meshio::EXTENSIONS,
+        });
+    }
+
+    /// Replaces the clay with a mesh from an OBJ or STL file: welded, fitted
+    /// to the unit sphere, and remeshed if it can't be sculpted as it is.
+    /// Undo brings the previous clay back.
+    pub(super) fn import_sculpt(&mut self, name: &str, bytes: Arc<[u8]>) {
+        let Ok(soup) = meshio::read(name, &bytes) else {
+            return self.cannot_open(name);
+        };
+        let mut soup = soup.weld();
+        soup.normalise();
+        let remeshed = needs_remesh(&soup);
+        let mesh = if remeshed {
+            voxel::from_triangles(
+                &soup.positions,
+                &soup.triangles,
+                self.tool.resolution.round() as u32,
+                1,
+            )
+        } else {
+            Some(Mesh::new(soup.positions, soup.triangles))
+        };
+        let Some(mesh) = mesh else {
+            return self.cannot_open(name);
+        };
+        self.playback = None;
+        self.replace_clay(mesh);
+        self.frame_sculpt();
+        let tr = self.lang.tr();
+        let done = if remeshed {
+            tr.mesh.imported_remeshed
+        } else {
+            tr.mesh.imported
+        };
+        self.notify(format!("{name} — {done}"));
+    }
+
+    /// Puts a new mesh in place of the clay, as one undoable step, and
+    /// makes its GPU buffers.
+    pub(super) fn replace_clay(&mut self, mesh: Mesh) {
+        self.sculpt.replace_mesh(mesh);
+        self.sync_clay();
+    }
+
+    /// Remeshes the clay at the next frame, saying so first.
+    fn ask_remesh(&mut self) {
+        if self.playback.is_none() {
+            self.tool.pending = Some(Pending::Remesh);
+            let tr = self.lang.tr();
+            self.notify(format!("{}…", tr.mesh.remesh));
+        }
+    }
+
+    /// Does the operation asked for in the last frame.
+    fn run_pending(&mut self) {
+        match self.tool.pending.take() {
+            Some(Pending::Remesh) => self.remesh(),
+            None => {}
+        }
+    }
+
+    /// Rebuilds the clay as an even mesh at the chosen resolution.
+    pub(super) fn remesh(&mut self) {
+        let tr = self.lang.tr();
+        match voxel::remesh(&self.sculpt.mesh, self.tool.resolution.round() as u32) {
+            Some(mesh) => {
+                self.replace_clay(mesh);
+                self.notify(tr.mesh.remeshed);
+            }
+            None => self.notify(tr.mesh.nothing_left),
+        }
     }
 
     /// Mesh formats in the file → export menu. Always the live clay, even
@@ -129,7 +250,16 @@ impl App {
     /// Whole-mesh edits in the edit menu.
     pub(super) fn mesh_edit_items(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
-        menu::action(ui, false, tr.mirror_sculpt, "");
+        let live = self.playback.is_none();
+        if menu::action(ui, live, tr.mirror_sculpt, "") {
+            self.sculpt.mirror(true);
+        }
+        if menu::action(ui, live, tr.mesh.mirror_to_positive, "") {
+            self.sculpt.mirror(false);
+        }
+        if menu::action(ui, live, tr.mesh.remesh, "Shift+R") {
+            self.ask_remesh();
+        }
     }
 
     /// Makes the clay's GPU buffers again after its mesh was replaced (a
@@ -148,6 +278,7 @@ impl App {
     }
 
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
+        self.run_pending();
         self.sync_clay();
         if self.playback.is_some() {
             self.playback_panel(ui);
@@ -174,6 +305,19 @@ impl App {
         }
         if ui::choice(ui, tr.pressure_size, self.tool.pressure_size).clicked() {
             self.tool.pressure_size = !self.tool.pressure_size;
+        }
+        ui.add_space(10.0);
+        ui::section(ui, tr.mesh.mesh);
+        let range = voxel::MIN_RESOLUTION as f32..=voxel::MAX_RESOLUTION as f32;
+        ui::slider(
+            ui,
+            tr.mesh.resolution,
+            &mut self.tool.resolution,
+            range,
+            |v| format!("{v:.0}"),
+        );
+        if ui::choice(ui, tr.mesh.remesh, false).clicked() {
+            self.ask_remesh();
         }
         ui.add_space(10.0);
         ui::section(ui, tr.history);
