@@ -7,6 +7,7 @@ use egui::{Align2, CursorIcon, Key, Rect, Sense, Stroke, pos2};
 
 use super::views::shown;
 use super::{App, REFERENCE, SCULPT};
+use crate::render::Slot;
 use crate::render::clay::Look;
 use crate::ui::{fonts, menu, theme};
 
@@ -237,10 +238,13 @@ impl App {
         let Some(look) = self.ghost_look() else {
             return;
         };
-        // The reference part's drawing plugs in here, once it lands:
-        // self.draw_reference_as(pass, Slot::SculptView, &self.cameras[SCULPT],
-        //     self.views[SCULPT].aspect(), &look);
-        let _ = (pass, look);
+        self.draw_reference_as(
+            pass,
+            Slot::SculptView,
+            &self.cameras[SCULPT],
+            self.views[SCULPT].aspect(),
+            &look,
+        );
     }
 
     /// The camera link, at the top of the view menu.
