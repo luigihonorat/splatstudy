@@ -84,6 +84,10 @@ struct Layer {
     size: [u32; 2],
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
+    /// What the target holds: the uniforms (camera, placement, crop, look,
+    /// size) and the sort it was drawn with. While a stroke goes on these
+    /// stay the same, and the splats aren't drawn into it again.
+    drawn_for: Option<(Uniforms, u64)>,
 }
 
 /// One slot's camera, draw order and the direction it was sorted for.
@@ -95,6 +99,9 @@ struct SlotState {
     sort: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     layer: Option<Layer>,
     sorted_for: Option<Vec3>,
+    /// Counts this slot's sorts, so the ghost's target knows when the
+    /// order it was drawn with changed.
+    sorts: u64,
     over: bool,
 }
 
@@ -165,6 +172,8 @@ pub struct SplatPass {
     slots: [RefCell<Option<SlotState>>; Slot::COUNT],
     gpu_sort: Option<GpuSort>,
     scratch: RefCell<Sorter>,
+    /// How many times splats were drawn into a ghost's target, for tests.
+    layer_draws: Cell<u32>,
 }
 
 /// Whether `splat_sort.wgsl` can run: 256 invocations per workgroup, 1 KiB
@@ -353,6 +362,7 @@ impl SplatPass {
             slots: Default::default(),
             gpu_sort,
             scratch: RefCell::new(Sorter::default()),
+            layer_draws: Cell::new(0),
         })
     }
 
@@ -474,13 +484,21 @@ impl SplatPass {
                 }
             }
             state.sorted_for = Some(direction);
+            state.sorts += 1;
         }
 
         if look.over {
             if state.layer.as_ref().is_none_or(|l| l.size != pixels) {
                 state.layer = Some(self.layer(&state.uniforms, pixels));
             }
-            if let Some(layer) = &state.layer {
+            let drawn_for = Some((uniforms, state.sorts));
+            if let Some(layer) = state
+                .layer
+                .as_mut()
+                .filter(|l| !same(&l.drawn_for, &drawn_for))
+            {
+                layer.drawn_for = drawn_for;
+                self.layer_draws.set(self.layer_draws.get() + 1);
                 let encoder = encoder
                     .get_or_insert_with(|| self.device.create_command_encoder(&Default::default()));
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -557,6 +575,7 @@ impl SplatPass {
             size,
             view,
             bind_group,
+            drawn_for: None,
         }
     }
 
@@ -610,8 +629,17 @@ impl SplatPass {
             sort,
             layer: None,
             sorted_for: None,
+            sorts: 0,
             over: false,
         }
+    }
+}
+
+/// The same uniforms bit for bit, and the same sort.
+fn same(a: &Option<(Uniforms, u64)>, b: &Option<(Uniforms, u64)>) -> bool {
+    match (a, b) {
+        (Some((a, i)), Some((b, j))) => i == j && bytemuck::bytes_of(a) == bytemuck::bytes_of(b),
+        _ => false,
     }
 }
 
@@ -823,6 +851,58 @@ mod tests {
         // Turned around.
         assert_eq!(sorter.back_to_front(&points, -Vec3::Z), &[0, 4, 2, 3, 1]);
         assert!(sorter.back_to_front(&[], Vec3::Z).is_empty());
+    }
+
+    #[test]
+    fn the_ghost_is_drawn_again_only_when_its_inputs_change() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Some((device, queue)) =
+            pollster::block_on(instance.request_adapter(&Default::default()))
+                .ok()
+                .and_then(|a| pollster::block_on(a.request_device(&Default::default())).ok())
+        else {
+            eprintln!("no GPU adapter; skipping render test");
+            return;
+        };
+        let splats = Splats {
+            positions: vec![Vec3::ZERO, Vec3::new(0.3, 0.1, -0.2)],
+            scales: vec![Vec3::splat(0.2); 2],
+            rotations: vec![glam::Quat::IDENTITY; 2],
+            colors: vec![[200, 100, 50, 255]; 2],
+        };
+        let ghost = SplatLook {
+            opacity: 0.5,
+            flat: false,
+            over: true,
+        };
+        for sort in [SortOn::Gpu, SortOn::Cpu] {
+            let pass = SplatPass::sorting_on(&device, &splats, sort).expect("splats");
+            let mut camera = OrbitCamera::default();
+            let size = [64, 48];
+            let prepare = |camera: &OrbitCamera, size, look: &SplatLook| {
+                pass.prepare(&queue, Slot::SculptView, camera, size, look);
+                pass.layer_draws.get()
+            };
+            assert_eq!(prepare(&camera, size, &ghost), 1);
+            assert_eq!(prepare(&camera, size, &ghost), 1, "nothing changed");
+            camera.distance *= 1.1;
+            assert_eq!(prepare(&camera, size, &ghost), 2, "the camera moved");
+            assert_eq!(prepare(&camera, size, &ghost), 2);
+            camera.yaw += 0.3;
+            assert_eq!(prepare(&camera, size, &ghost), 3, "turned and re-sorted");
+            assert_eq!(prepare(&camera, [80, 48], &ghost), 4, "resized");
+            let flat = SplatLook {
+                flat: true,
+                ..ghost
+            };
+            assert_eq!(prepare(&camera, [80, 48], &flat), 5, "another look");
+            pass.set_placement(Mat4::from_translation(Vec3::X), None);
+            assert_eq!(prepare(&camera, [80, 48], &flat), 6, "moved");
+            let plain = SplatLook::default();
+            assert_eq!(prepare(&camera, [80, 48], &plain), 6, "not a ghost");
+            // The target was left alone and still holds that ghost.
+            assert_eq!(prepare(&camera, [80, 48], &flat), 6, "the same ghost again");
+        }
     }
 
     #[test]
