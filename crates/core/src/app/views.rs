@@ -159,6 +159,10 @@ impl App {
                 painter.image(id, rect, uv, Color32::WHITE);
             }
         }
+        // A picture, the crop box and the credit, in this frame's rectangle.
+        if shown(rects[REFERENCE]) {
+            self.reference_overlay(ui, rects[REFERENCE]);
+        }
         painter.hline(area.x_range(), area.top() + 0.5, Stroke::new(1.0, p.border));
         if let Some(x) = divider {
             painter.vline(x + 0.5, area.y_range(), Stroke::new(1.0, p.border));
