@@ -53,6 +53,13 @@ impl GpuMesh {
             index_count: mesh.indices().len() as u32,
         }
     }
+
+    /// Uploads the vertices in `range` after sculpting changed them.
+    pub fn write(&self, queue: &wgpu::Queue, mesh: &Mesh, range: std::ops::Range<usize>) {
+        let data: Vec<Vertex> = range.clone().map(|i| mesh.vertex(i)).collect();
+        let offset = (range.start * size_of::<Vertex>()) as u64;
+        queue.write_buffer(&self.vertices, offset, bytemuck::cast_slice(&data));
+    }
 }
 
 impl ClayPass {

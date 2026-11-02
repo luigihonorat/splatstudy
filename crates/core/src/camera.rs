@@ -70,6 +70,29 @@ impl OrbitCamera {
         self.target += (-dx * right + dy * up) * per_point;
     }
 
+    /// The ray through a point of the view, given in normalised device
+    /// coordinates (-1..1, Y up): origin on the near plane and unit direction.
+    pub fn ray(&self, ndc: glam::Vec2, aspect: f32) -> (Vec3, Vec3) {
+        let inverse = (self.projection(aspect) * self.view()).inverse();
+        let near = inverse.project_point3(ndc.extend(0.0));
+        let far = inverse.project_point3(ndc.extend(1.0));
+        (near, (far - near).normalize())
+    }
+
+    /// World units per screen point at `point`'s depth, in a view
+    /// `view_height` points tall.
+    pub fn world_per_point(&self, point: Vec3, view_height: f32) -> f32 {
+        let forward = (self.target - self.eye()).normalize();
+        let depth = (point - self.eye()).dot(forward).max(1e-4);
+        2.0 * depth * (self.fov_y / 2.0).tan() / view_height.max(1.0)
+    }
+
+    /// The camera's right and up directions in world space.
+    pub fn right_up(&self) -> (Vec3, Vec3) {
+        let view = self.view();
+        (view.row(0).truncate(), view.row(1).truncate())
+    }
+
     /// Moves closer (factor < 1) or further (factor > 1).
     pub fn dolly(&mut self, factor: f32) {
         self.distance = (self.distance * factor).clamp(0.05, 500.0);
@@ -96,6 +119,14 @@ mod tests {
         assert!(cam.pitch <= PITCH_LIMIT);
         cam.dolly(1e-9);
         assert!(cam.distance >= 0.05);
+    }
+
+    #[test]
+    fn the_centre_ray_points_at_the_target() {
+        let cam = OrbitCamera::default();
+        let (origin, dir) = cam.ray(glam::Vec2::ZERO, 1.5);
+        let to_target = (cam.target - origin).normalize();
+        assert!(dir.dot(to_target) > 0.9999);
     }
 
     #[test]
