@@ -220,9 +220,11 @@ impl App {
         self.export.retired = self.export.preview.take();
     }
 
-    /// The folder picked for an image sequence (desktop).
+    /// The folder picked for an image sequence (desktop). An empty path
+    /// means the picker was cancelled: the window goes back to its
+    /// settings.
     pub(super) fn on_folder(&mut self, path: String) {
-        if std::mem::take(&mut self.export.waiting_for_folder) {
+        if std::mem::take(&mut self.export.waiting_for_folder) && !path.is_empty() {
             self.start_export(Sink::Folder(path), VIDEO_SHORT_SIDE, VIDEO_FPS);
         }
     }
