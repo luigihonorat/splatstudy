@@ -118,6 +118,8 @@ pub struct StudyView {
 /// Writes a scene chunk by chunk.
 pub struct SceneWriter {
     out: Writer,
+    /// The clay, checkpoints and log are deflated.
+    pack: bool,
 }
 
 impl Default for SceneWriter {
@@ -127,10 +129,21 @@ impl Default for SceneWriter {
 }
 
 impl SceneWriter {
+    /// A scene file to keep or share: the clay and its history deflated.
     pub fn new() -> Self {
         let mut out = Writer::new();
         out.raw(MAGIC).u32(VERSION);
-        Self { out }
+        Self { out, pack: true }
+    }
+
+    /// A scene stored as it is, nothing deflated: for autosaves, which
+    /// are written every few seconds to storage that doesn't need them
+    /// small. Deflating a long history stalls the app for a moment.
+    pub fn stored() -> Self {
+        Self {
+            pack: false,
+            ..Self::new()
+        }
     }
 
     /// Appends a chunk, deflating the payload if asked.
@@ -152,20 +165,20 @@ impl SceneWriter {
     pub fn mesh(&mut self, mesh: &Mesh) -> &mut Self {
         let mut w = Writer::new();
         write_mesh(&mut w, mesh);
-        self.chunk(MESH, true, &w.finish())
+        self.chunk(MESH, self.pack, &w.finish())
     }
 
     /// The clay's checkpoints, the first being the start of the log.
     pub fn checkpoints(&mut self, checkpoints: &[Checkpoint]) -> &mut Self {
         let mut w = Writer::new();
         write_checkpoints(&mut w, checkpoints);
-        self.chunk(CHECKPOINTS, true, &w.finish())
+        self.chunk(CHECKPOINTS, self.pack, &w.finish())
     }
 
     pub fn log(&mut self, entries: &[Entry]) -> &mut Self {
         let mut w = Writer::new();
         write_log(&mut w, entries);
-        self.chunk(LOG, true, &w.finish())
+        self.chunk(LOG, self.pack, &w.finish())
     }
 
     /// The reference file is stored as it came: most formats are packed
@@ -669,6 +682,35 @@ mod tests {
         assert_eq!(reference_key(&w.finish()), Ok(None));
         assert_eq!(reference_key(&save(&live, &view())), Ok(None));
         assert!(reference_key(b"junk").is_err());
+    }
+
+    #[test]
+    fn an_autosave_is_stored_undeflated_and_reads_the_same() {
+        let live = session();
+        let mut w = SceneWriter::stored();
+        w.mesh(&live.mesh)
+            .checkpoints(live.checkpoints())
+            .log(live.log())
+            .view(&view());
+        let stored = w.finish();
+        let mut r = Reader::new(&stored[MAGIC.len() + 4..]);
+        while !r.is_empty() {
+            let _tag = r.u32().unwrap();
+            assert_eq!(r.u32().unwrap() & DEFLATED, 0, "nothing deflated");
+            r.bytes().unwrap();
+        }
+        let packed = save(&live, &view());
+        assert!(packed.len() < stored.len());
+        let (a, b) = (Scene::read(&stored).unwrap(), Scene::read(&packed).unwrap());
+        assert_eq!(
+            position_bits(&a.mesh.positions),
+            position_bits(&b.mesh.positions)
+        );
+        assert_eq!(a.mesh.triangles, b.mesh.triangles);
+        assert_eq!(
+            (a.checkpoints, a.log, a.view),
+            (b.checkpoints, b.log, b.view)
+        );
     }
 
     #[test]

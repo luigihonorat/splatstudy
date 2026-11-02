@@ -195,13 +195,12 @@ impl App {
     /// The scene as a file: the clay, its checkpoints (the first is where
     /// the session started), the session, the reference and the views.
     fn scene_bytes(&self) -> Vec<u8> {
-        self.write_scene(None)
+        self.write_scene(SceneWriter::new(), None)
     }
 
     /// The scene, with the reference file inside, or named by `key` and
     /// left out.
-    fn write_scene(&self, key: Option<BlobKey>) -> Vec<u8> {
-        let mut w = SceneWriter::new();
+    fn write_scene(&self, mut w: SceneWriter, key: Option<BlobKey>) -> Vec<u8> {
         w.mesh(&self.sculpt.mesh)
             .checkpoints(self.sculpt.checkpoints())
             .log(self.sculpt.log());
@@ -419,9 +418,10 @@ impl App {
     }
 
     /// The scene to autosave, with the reference file apart so the shell
-    /// stores it once (see [`crate::scene::autosave`]). `None` when there
-    /// is nothing worth keeping: a fresh sphere with no reference. The
-    /// first call after a new reference hashes its file.
+    /// stores it once (see [`crate::scene::autosave`]). Nothing in it is
+    /// deflated: it is written often, and kept only until the next one.
+    /// `None` when there is nothing worth keeping: a fresh sphere with no
+    /// reference. The first call after a new reference hashes its file.
     pub fn autosave_bytes(&mut self) -> Option<Autosave> {
         let sculpted = !self.sculpt.log().is_empty();
         if !sculpted && self.scene_reference().is_none() && self.files.name.is_none() {
@@ -430,7 +430,10 @@ impl App {
         let reference = self.scene_reference().map(|r| r.source.bytes.clone());
         let reference = reference.map(|bytes| (self.files.key_of(&bytes), bytes));
         Some(Autosave {
-            scene: self.write_scene(reference.as_ref().map(|(key, _)| *key)),
+            scene: self.write_scene(
+                SceneWriter::stored(),
+                reference.as_ref().map(|(key, _)| *key),
+            ),
             reference,
             sculpted,
         })
