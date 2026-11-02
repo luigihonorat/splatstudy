@@ -16,7 +16,7 @@ use crate::export::{
     CameraMotion, Captions, EndCard, Gpu, Job, Layout, Progress, Settings, Shape, Sink, Support,
     VideoEncoder, clock, mp4::Mp4, zip::Zip,
 };
-use crate::reference::{Content, Credit};
+use crate::reference::{Aabb, Alignment, Content, Credit, Reference};
 use crate::render::Slot;
 use crate::sculpt::{Checkpoint, Mesh, Replay};
 use crate::ui::{self, menu, theme};
@@ -79,6 +79,8 @@ pub(super) struct ExportState {
     /// How the reference is drawn in its half and as the ghost, fixed when
     /// the export starts.
     looks: Option<[ReferenceLook; 2]>,
+    /// The reference the running export shows and credits.
+    shown: Option<Shown>,
     /// Frames done and in all, as of the last step.
     progress: (u64, u64),
     /// The job's composed frame, shown in the window.
@@ -109,10 +111,35 @@ impl Default for ExportState {
             encoder: None,
             job: None,
             looks: None,
+            shown: None,
             progress: (0, 0),
             preview: None,
             retired: None,
             waiting_for_folder: false,
+        }
+    }
+}
+
+/// Which reference an export shows, and where: the file (the same bytes,
+/// not a copy) and its placement. The export draws the app's reference as
+/// it is, so if any of this changes, the frames to come would show
+/// something else under the credit taken at the start.
+#[derive(Clone, Debug, PartialEq)]
+struct Shown {
+    name: String,
+    bytes: (usize, usize),
+    align: Alignment,
+    crop: Option<Aabb>,
+}
+
+impl Shown {
+    fn of(reference: &Reference) -> Self {
+        let bytes = &reference.source.bytes;
+        Self {
+            name: reference.source.name.clone(),
+            bytes: (bytes.as_ptr() as usize, bytes.len()),
+            align: reference.align,
+            crop: reference.crop,
         }
     }
 }
@@ -247,9 +274,24 @@ impl App {
         }
     }
 
+    /// Stops a running export whose reference was changed or removed: the
+    /// rest of its frames would show something else under the credit it
+    /// started with.
+    fn check_export_reference(&mut self) {
+        if self.export.job.is_none() {
+            return;
+        }
+        let shown = self.scene_reference().map(Shown::of);
+        if shown != self.export.shown {
+            self.cancel_export();
+            self.notify(self.lang.tr().video.reference_changed);
+        }
+    }
+
     fn start_export(&mut self, sink: Sink, short_side: u32, fps: u32) {
         let tr = self.lang.tr();
         let settings = self.export_settings(short_side, fps);
+        self.export.shown = self.scene_reference().map(Shown::of);
         let reference_look = self.reference_look();
         let ghost_look = self.ghost_look().unwrap_or(ReferenceLook {
             opacity: theme::GHOST_OPACITY,
@@ -418,6 +460,7 @@ impl App {
         {
             self.renderer.free_texture(&id);
         }
+        self.check_export_reference();
         self.step_export(ui);
         if !self.export.open {
             return;

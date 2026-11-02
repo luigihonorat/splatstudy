@@ -58,6 +58,8 @@ pub struct ExportTr {
     pub images_written: &'static str,
     pub failed: &'static str,
     pub nothing_recorded: &'static str,
+    /// The reference was changed or removed while exporting.
+    pub reference_changed: &'static str,
     /// The end card's last line, before the site's address.
     pub made_with: &'static str,
 }
@@ -100,6 +102,7 @@ pub const JA: ExportTr = ExportTr {
     images_written: "画像を保存しました",
     failed: "書き出せませんでした",
     nothing_recorded: "まだ記録がありません",
+    reference_changed: "モチーフが変わったため、書き出しを止めました",
     made_with: "SplatStudy で制作",
 };
 
@@ -141,6 +144,7 @@ pub const EN: ExportTr = ExportTr {
     images_written: "images saved",
     failed: "the export failed",
     nothing_recorded: "nothing recorded yet",
+    reference_changed: "the reference changed, so the export stopped",
     made_with: "made with SplatStudy",
 };
 
@@ -182,5 +186,6 @@ pub const FR: ExportTr = ExportTr {
     images_written: "images enregistrées",
     failed: "l'export a échoué",
     nothing_recorded: "rien n'est encore enregistré",
+    reference_changed: "le modèle a changé : l'export est arrêté",
     made_with: "fait avec SplatStudy",
 };
