@@ -447,15 +447,7 @@ impl Replay {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Another mesh near `mesh`, with other triangles.
-    fn new_topology(mesh: &Mesh, level: u32) -> Mesh {
-        let scale =
-            mesh.positions.iter().map(|p| p.length()).sum::<f32>() / mesh.positions.len() as f32;
-        let mut other = Mesh::icosphere(level);
-        other.positions.iter_mut().for_each(|p| *p *= scale);
-        other
-    }
+    use crate::voxel;
 
     /// A session that uses every brush, Move, undo and redo, with refits at
     /// uneven moments as frames would make them. `at` shifts the strokes.
@@ -555,7 +547,7 @@ mod tests {
         let mut live = Sculpt::new(Mesh::icosphere(4));
         let clock = session_at(&mut live, 0.0, 0.0);
         live.set_clock(clock + 1.0);
-        live.replace_mesh(new_topology(&live.mesh, 3));
+        live.replace_mesh(voxel::remesh(&live.mesh, 48).expect("remesh"));
         let clock = session_at(&mut live, clock + 2.0, 0.1);
         // Undo goes back through the strokes to the mesh before the remesh.
         while live.can_undo() {
@@ -572,7 +564,7 @@ mod tests {
         live.grab(Vec3::Z, 0.3, false);
         live.drag(Vec3::Z * 0.1);
         live.set_clock(clock + 1.0);
-        live.replace_mesh(new_topology(&live.mesh, 2));
+        live.replace_mesh(voxel::remesh(&live.mesh, 40).expect("remesh"));
         live
     }
 
