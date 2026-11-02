@@ -567,6 +567,21 @@ impl App {
         aspect: f32,
         look: &ReferenceLook,
     ) {
+        let size = self.slot_size(slot, aspect);
+        self.draw_reference_sized(pass, slot, camera, size, look);
+    }
+
+    /// [`draw_reference_as`](Self::draw_reference_as) into a target of
+    /// `size` pixels, for exports, whose frames aren't always 1080 high.
+    pub(super) fn draw_reference_sized(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        slot: Slot,
+        camera: &OrbitCamera,
+        size: [u32; 2],
+        look: &ReferenceLook,
+    ) {
+        let aspect = size[0] as f32 / size[1].max(1) as f32;
         let ReferenceLook {
             flat,
             opacity,
@@ -583,7 +598,6 @@ impl App {
                     flat,
                     over,
                 };
-                let size = self.slot_size(slot, aspect);
                 splats.prepare(&self.queue, slot, camera, size, &look);
                 splats.draw(pass, slot);
             }
