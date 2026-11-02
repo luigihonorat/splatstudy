@@ -314,6 +314,30 @@ impl Sculpt {
         }
     }
 
+    /// Back to `positions` on the same triangles: the state
+    /// [`Sculpt::replaying`] would make of the checkpoint this sculpt was
+    /// built from, without building it again. The hierarchy's shape came
+    /// from those same positions, so a refit gives the boxes a new build
+    /// would. The GPU buffers keep their layout: every page is just dirty.
+    fn rewind(&mut self, positions: &[Vec3]) {
+        self.mesh.positions.copy_from_slice(positions);
+        self.mesh.recompute_normals();
+        self.bvh.refit(&self.mesh);
+        self.bvh_stale = false;
+        self.dirty_pages.fill(true);
+        self.stroke_open = false;
+        self.stroke_indices.clear();
+        self.stroke_before.clear();
+        self.grabbed.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.clock = 0.0;
+        self.last_checkpoint = 0.0;
+        self.falloff = Falloff::Smooth;
+        self.logged_falloff = Falloff::Smooth;
+        self.resumed = false;
+    }
+
     /// Does what a log entry recorded. Checkpoints need the checkpoint
     /// itself: [`Replay`] applies those.
     pub fn apply(&mut self, event: Event) {
@@ -351,6 +375,10 @@ pub struct Replay {
     times: Vec<f64>,
     /// How many entries have been applied.
     next: usize,
+    /// The checkpoint whose mesh the clay was last built from (at a
+    /// restart, or a snap to new triangles): going back to it only needs
+    /// its positions again.
+    built_from: usize,
 }
 
 impl Replay {
@@ -386,7 +414,8 @@ impl Replay {
             .filter(|&i| usable(&checkpoints[i]))
             .collect();
         starts.sort_by_key(|&i| checkpoints[i].log_index);
-        let start = checkpoints[starts[0]].mesh().expect("checked above");
+        let built_from = starts[0];
+        let start = checkpoints[built_from].mesh().expect("checked above");
         Replay {
             sculpt: Sculpt::replaying(start),
             checkpoints,
@@ -394,15 +423,23 @@ impl Replay {
             entries,
             times,
             next: 0,
+            built_from,
         }
     }
 
     /// Starts over from checkpoint `index`.
     fn restart(&mut self, index: usize) {
         let checkpoint = &self.checkpoints[index];
-        let mesh = checkpoint.mesh().expect("starts have triangles");
         self.next = checkpoint.log_index;
-        self.sculpt = Sculpt::replaying(mesh);
+        if index == self.built_from {
+            // Scrubbing back within the same mesh: no new adjacency,
+            // hierarchy or GPU buffers.
+            self.sculpt.rewind(&checkpoint.positions);
+        } else {
+            let mesh = checkpoint.mesh().expect("starts have triangles");
+            self.sculpt = Sculpt::replaying(mesh);
+            self.built_from = index;
+        }
     }
 
     /// Does what checkpoint `n` holds: becomes its mesh, or snaps to its
@@ -416,6 +453,7 @@ impl Replay {
         if checkpoint.triangles.is_none() {
             self.sculpt.snap_positions(&checkpoint.positions);
         } else if let Some(mesh) = checkpoint.mesh() {
+            self.built_from = n as usize;
             self.sculpt.swap_mesh(mesh);
             self.sculpt.undo.clear();
             self.sculpt.redo.clear();
@@ -743,5 +781,39 @@ mod tests {
         // No checkpoints at all: the default sphere.
         let replay = Replay::new(Vec::new(), Vec::new());
         assert_eq!(replay.sculpt.mesh.positions.len(), 163_842);
+    }
+
+    /// What dragging the timelapse's playhead backwards costs per frame, on
+    /// the default sphere: each seek goes back to the start checkpoint.
+    /// `cargo test --release -p splatstudy-core scrub_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn scrub_timing() {
+        let mut live = Sculpt::new(Mesh::icosphere(DEFAULT_LEVEL));
+        let mut clock = 0.0;
+        for k in 0..3 {
+            clock = session_at(&mut live, clock + 1.0, k as f32 * 0.05);
+        }
+        let mut replay = Replay::of(&live);
+        let tries = 10;
+        let (mut total, mut rebuilt) = (0.0, 0);
+        for k in 0..tries {
+            assert!(replay.seek(f64::INFINITY, usize::MAX));
+            replay.sculpt.take_topology_changed();
+            replay.sculpt.take_dirty();
+            // Back behind the clay: the restart alone, no entries played.
+            let time = replay.duration() * k as f64 / tries as f64;
+            let start = std::time::Instant::now();
+            replay.seek(time, 0);
+            if replay.sculpt.take_topology_changed() {
+                rebuilt += 1;
+            }
+            replay.sculpt.take_dirty();
+            total += start.elapsed().as_secs_f64() * 1e3;
+        }
+        println!(
+            "seeking back: restart {:.1} ms; {rebuilt} of {tries} rebuilt the GPU mesh",
+            total / tries as f64
+        );
     }
 }

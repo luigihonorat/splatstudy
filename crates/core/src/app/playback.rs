@@ -24,6 +24,9 @@ pub(super) struct Playback {
     head: f64,
     /// The app clock at the last frame.
     last: f64,
+    /// The playhead is being dragged: going back waits for the release,
+    /// since each step back replays from a checkpoint.
+    scrubbing: bool,
 }
 
 impl App {
@@ -42,6 +45,7 @@ impl App {
             speed: REPLAY_SPEEDS[1],
             head: 0.0,
             last: self.now,
+            scrubbing: false,
         });
     }
 
@@ -58,7 +62,9 @@ impl App {
             p.playing = p.head < duration;
         }
         p.last = self.now;
-        let caught_up = p.replay.seek(p.head, REPLAY_BUDGET);
+        // Dragged back: the clay waits for the release (forward is cheap).
+        let waiting = p.scrubbing && p.head < p.replay.position();
+        let caught_up = waiting || p.replay.seek(p.head, REPLAY_BUDGET);
         // Past a remesh, or back to the start: other triangles.
         let sculpt = &mut p.replay.sculpt;
         if sculpt.take_topology_changed() {
@@ -101,17 +107,17 @@ impl App {
             format!("{}:{:02}", s / 60, s % 60)
         };
         // The playhead on the left, the length on the right.
-        if ui::slider(
+        let slider = ui::slider(
             ui,
             &clock(head),
             &mut head,
             0.0..=duration.max(1e-3),
             |_| clock(duration),
-        )
-        .changed()
-        {
+        );
+        if slider.changed() {
             p.head = head as f64;
         }
+        p.scrubbing = slider.dragged();
         self.playback_export_items(ui);
         ui.add_space(10.0);
         if ui::choice(ui, tr.back_to_sculpt, false).clicked() {
