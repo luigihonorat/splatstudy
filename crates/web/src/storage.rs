@@ -13,6 +13,10 @@
 //! and says when it is ready (see `splatstudy_core::scene::autosave`); this
 //! decides when to save, and stores.
 //!
+//! Several tabs share the stores. The last one to save wins, but none
+//! loses its work quietly: each tells the others when it wrote, and they
+//! then save again at their next change, or as they close.
+//!
 //! A restore that crashes the tab would crash it again on every reload, so
 //! a flag in localStorage marks a restore under way until its first frame
 //! is drawn. Found at start, the restore is only offered.
@@ -127,24 +131,45 @@ export function idb_put_blob(key, bytes) {
     return finished(tx);
   });
 }
-// The scene and the blob it names in one go: other blobs are dropped, so
-// only the file the latest scene needs stays. When the page is leaving,
-// the write starts before this returns and is committed at once, leaving
-// the clean-up to the next save: a page being reloaded doesn't wait.
+// The scene and the blob it names in one go: the blob `keep` must still be
+// there (another tab may have dropped it), or nothing is written and this
+// fails with a NotFoundError; other blobs are dropped, so only the file the
+// latest scene needs stays. When the page is leaving, the scene is put
+// alone and committed at once, leaving the checks and the clean-up to the
+// next save: a page being reloaded doesn't wait.
 export function idb_put_scene(bytes, keep, leaving) {
   const copy = bytes.slice();
   const write = d => {
     const tx = d.transaction(['scene', 'blobs'], 'readwrite');
-    tx.objectStore('scene').put(copy, 'current');
+    const scene = tx.objectStore('scene');
+    const blobs = tx.objectStore('blobs');
+    let missing = false;
     if (leaving) {
+      scene.put(copy, 'current');
       if (tx.commit) tx.commit();
     } else {
-      const blobs = tx.objectStore('blobs');
-      blobs.getAllKeys().onsuccess = e => {
-        for (const k of e.target.result) if (k !== keep) blobs.delete(k);
+      const put = () => {
+        scene.put(copy, 'current');
+        blobs.getAllKeys().onsuccess = e => {
+          for (const k of e.target.result) if (k !== keep) blobs.delete(k);
+        };
       };
+      if (keep == null) {
+        put();
+      } else {
+        blobs.count(keep).onsuccess = e => {
+          if (e.target.result > 0) {
+            put();
+          } else {
+            missing = true;
+            tx.abort();
+          }
+        };
+      }
     }
-    return finished(tx);
+    return finished(tx).catch(err => {
+      throw missing ? new DOMException('the reference file is gone', 'NotFoundError') : err;
+    });
   };
   return openNow ? write(openNow) : db().then(write);
 }
@@ -170,6 +195,17 @@ export function storage_persist() {
       granted => console.info('persistent storage ' + (granted ? 'granted' : 'refused')),
       () => {});
   } catch (_) {}
+}
+// The other tabs of the page, told when this one wrote the stores.
+let channel = null;
+export function tabs_listen(heard) {
+  try {
+    channel = new BroadcastChannel('splatstudy.autosave');
+    channel.onmessage = () => heard();
+  } catch (_) {}
+}
+export function tabs_tell() {
+  try { if (channel) channel.postMessage('written'); } catch (_) {}
 }
 export function error_name(e) {
   return String((e && e.name) || e);
@@ -197,6 +233,8 @@ extern "C" {
     async fn idb_clear() -> Result<JsValue, JsValue>;
     async fn storage_room() -> JsValue;
     fn storage_persist();
+    fn tabs_listen(heard: &Closure<dyn FnMut()>);
+    fn tabs_tell();
     fn error_name(error: &JsValue) -> String;
     fn page_hidden() -> bool;
 }
@@ -335,8 +373,14 @@ struct State {
     /// The revision last seen, and when it changed (seconds).
     seen: u64,
     changed_at: f64,
-    /// The revision stored, or restored.
-    stored: u64,
+    /// The revision stored, or restored; `None` when another tab wrote
+    /// since.
+    stored: Option<u64>,
+    /// Our revision when another tab last wrote: saved again once it
+    /// changes, or as the page goes.
+    overwritten_at: Option<u64>,
+    /// Counts the other tabs' writes heard of.
+    heard: u64,
     /// A save, or a restore, is being written or read.
     writing: bool,
     /// The blob key that is stored.
@@ -347,6 +391,31 @@ struct State {
     asked_persist: bool,
     /// To tell the app, from the next poll.
     trouble: Option<Trouble>,
+}
+
+impl State {
+    /// True if `revision` isn't what the stores hold.
+    fn unsaved(&self, revision: u64, leaving: bool) -> bool {
+        match (self.stored, self.overwritten_at) {
+            (Some(stored), _) => revision != stored,
+            (None, Some(at)) => leaving || revision != at,
+            (None, None) => true,
+        }
+    }
+
+    /// A save of `revision` was written, while `heard` other writes had
+    /// been heard of.
+    fn saved(&mut self, revision: u64, heard: u64) {
+        if self.heard == heard {
+            self.stored = Some(revision);
+            self.overwritten_at = None;
+        } else {
+            // Another tab wrote meanwhile, maybe after us: save again as
+            // the page goes, or at the next change.
+            self.stored = None;
+            self.overwritten_at = Some(revision);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -373,7 +442,9 @@ impl Autosave {
                 on: true,
                 seen: revision,
                 changed_at: now(),
-                stored: revision,
+                stored: Some(revision),
+                overwritten_at: None,
+                heard: 0,
                 writing: false,
                 stored_blob: RESTORED_BLOB.take(),
                 too_big: None,
@@ -390,6 +461,17 @@ impl Autosave {
             POLL_MS,
         )?;
         tick.forget();
+        // Another tab wrote: what is stored is no longer ours.
+        let state = autosave.state.clone();
+        let heard = Closure::<dyn FnMut()>::new(move || {
+            let mut st = state.borrow_mut();
+            st.heard += 1;
+            st.stored = None;
+            st.overwritten_at = Some(st.seen);
+            st.stored_blob = None;
+        });
+        tabs_listen(&heard);
+        heard.forget();
         let hidden = autosave.clone();
         let document = window.document().ok_or("no document")?;
         crate::on(
@@ -439,14 +521,18 @@ impl Autosave {
             st.changed_at = t;
         }
         let quiet = leaving || t - st.changed_at >= QUIET;
-        if !st.on || st.writing || revision == st.stored || !quiet {
+        if !st.on || !st.unsaved(revision, leaving) || !quiet {
             return;
         }
         if !app.autosave_ready(leaving) {
             return;
         }
+        if st.writing {
+            return;
+        }
         let bytes = app.autosave_bytes();
         st.writing = true;
+        let heard = st.heard;
         drop(st);
         let this = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
@@ -455,9 +541,10 @@ impl Autosave {
             st.writing = false;
             match result {
                 Ok(()) => {
-                    st.stored = revision;
+                    st.saved(revision, heard);
                     drop(st);
                     remove(RESTORING);
+                    tabs_tell();
                 }
                 Err(trouble) => {
                     st.on = false;
@@ -487,7 +574,8 @@ impl Autosave {
             st.writing = false;
             if let (Some(blob), Some(revision)) = (restored, revision) {
                 st.seen = revision;
-                st.stored = revision;
+                st.stored = Some(revision);
+                st.overwritten_at = None;
                 st.stored_blob = blob;
             }
         });
@@ -504,14 +592,20 @@ impl Autosave {
         if save.sculpted && !std::mem::replace(&mut self.state.borrow_mut().asked_persist, true) {
             storage_persist();
         }
-        let keep = match &save.reference {
-            Some((key, file)) => self.store_blob(*key, file).await?,
-            None => None,
-        };
         let start = now();
-        idb_put_scene(&save.scene, keep.clone(), leaving)
-            .await
-            .map_err(trouble)?;
+        let mut keep = self.keep(save).await?;
+        let mut put = idb_put_scene(&save.scene, keep.clone(), leaving).await;
+        if put
+            .as_ref()
+            .is_err_and(|e| error_name(e) == "NotFoundError")
+        {
+            // Another tab dropped the reference: store it again.
+            log::info!("autosave: the reference was gone; storing it again");
+            self.state.borrow_mut().stored_blob = None;
+            keep = self.keep(save).await?;
+            put = idb_put_scene(&save.scene, keep.clone(), leaving).await;
+        }
+        put.map_err(trouble)?;
         log::info!(
             "autosaved {} bytes in {:.0} ms",
             save.scene.len(),
@@ -519,6 +613,14 @@ impl Autosave {
         );
         self.state.borrow_mut().stored_blob = keep;
         Ok(())
+    }
+
+    /// The blob key a save keeps, its reference stored first if need be.
+    async fn keep(&self, save: &Bytes) -> Result<Option<String>, Trouble> {
+        match &save.reference {
+            Some((key, file)) => self.store_blob(*key, file).await,
+            None => Ok(None),
+        }
     }
 
     /// Makes sure the reference file is stored under its key; the key to
@@ -532,6 +634,7 @@ impl Autosave {
                 st.too_big == Some(key),
             )
         };
+        // Taken on trust: the scene's put checks it is still there.
         if stored || idb_has_blob(&name).await.ok().and_then(|v| v.as_bool()) == Some(true) {
             return Ok(Some(name));
         }
