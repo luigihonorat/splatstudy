@@ -11,11 +11,13 @@ mod app;
 pub mod camera;
 pub mod input;
 pub mod io;
+pub mod meshio;
 pub mod navigation;
 pub mod reference;
 pub mod render;
 pub mod sculpt;
 pub mod ui;
+pub mod voxel;
 
 pub use app::{App, FrameOutput, Request};
 pub use egui::{CursorIcon, Key};
