@@ -172,6 +172,8 @@ pub struct Sculpt {
     /// The falloff a replay of the log would have reached: a change is
     /// logged before the next dab or grab that differs from it.
     logged_falloff: Falloff,
+    /// Reopened with a log, and not changed since (see `with_history`).
+    resumed: bool,
 }
 
 fn mirror(v: Vec3) -> Vec3 {
@@ -221,29 +223,33 @@ impl Sculpt {
             topology_changed: false,
             falloff: Falloff::Smooth,
             logged_falloff: Falloff::Smooth,
+            resumed: false,
             mesh,
         }
     }
 
     /// A saved sculpt: its current mesh (in the saved vertex order, see
     /// [`Mesh::from_ordered`]), its log and checkpoints. Undo starts empty.
+    ///
+    /// The reopened sculpt builds its hierarchy afresh from `mesh`, while a
+    /// replay of the log would still have the one built at the last
+    /// topology change, which finds vertices in another order. So the
+    /// first change after reopening logs a checkpoint of `mesh` first, and
+    /// a replay rebuilds from the same mesh. (Not before: a scene reopened
+    /// and saved untouched saves the same bytes.)
     pub fn with_history(mesh: Mesh, log: Vec<Entry>, checkpoints: Vec<Checkpoint>) -> Sculpt {
-        // What a replay of the log has at its end: the last falloff logged
-        // since the last checkpoint.
-        let logged_falloff = log
-            .iter()
-            .rev()
-            .find_map(|e| match e.event {
-                Event::Falloff(f) => Some(f),
-                Event::Checkpoint(_) => Some(Falloff::Smooth),
-                _ => None,
-            })
-            .unwrap_or_default();
         Sculpt {
+            resumed: !log.is_empty(),
             log,
             checkpoints,
-            logged_falloff,
             ..Sculpt::bare(mesh)
+        }
+    }
+
+    /// Logs the checkpoint a reopened sculpt owes, before its first change.
+    fn settle_resume(&mut self) {
+        if std::mem::take(&mut self.resumed) {
+            self.checkpoint(true);
         }
     }
 
@@ -258,6 +264,7 @@ impl Sculpt {
 
     /// Logs the falloff if a replay would not have it yet.
     fn log_falloff(&mut self) {
+        self.settle_resume();
         if self.recording && self.falloff != self.logged_falloff {
             self.record(Event::Falloff(self.falloff));
             self.logged_falloff = self.falloff;
@@ -286,6 +293,8 @@ impl Sculpt {
     /// Strokes made before can no longer be undone, but this can: undo
     /// brings the previous mesh back.
     pub fn replace_mesh(&mut self, mesh: Mesh) {
+        // Its own checkpoint follows.
+        self.resumed = false;
         let old = self.swap_mesh(mesh);
         self.undo.clear();
         self.redo.clear();
@@ -354,6 +363,7 @@ impl Sculpt {
     }
 
     fn record(&mut self, event: Event) {
+        self.settle_resume();
         if self.recording {
             self.log.push(Entry {
                 time: self.clock,

@@ -663,6 +663,42 @@ mod tests {
     }
 
     #[test]
+    fn a_reopened_scene_sculpted_on_still_replays_bit_for_bit() {
+        let mut live = Sculpt::new(Mesh::icosphere(4));
+        let clock = session_at(&mut live, 0.0, 0.0);
+        // Saved with a falloff other than the default in force.
+        live.set_falloff(Falloff::Sharp);
+        let mut w = Writer::new();
+        write_log(&mut w, live.log());
+        write_checkpoints(&mut w, live.checkpoints());
+        let bytes = w.finish();
+        let mut r = Reader::new(&bytes);
+        let (log, checkpoints) = (read_log(&mut r).unwrap(), read_checkpoints(&mut r).unwrap());
+        let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
+        let mut reopened = Sculpt::with_history(current, log, checkpoints);
+        // Untouched, it saves what it read.
+        assert_eq!(reopened.log(), live.log());
+        assert_eq!(reopened.checkpoints(), live.checkpoints());
+
+        reopened.set_falloff(Falloff::Sharp);
+        let clock = session_at(&mut reopened, clock + 5.0, 0.05);
+        // Twice: a reopened scene reopened again.
+        let current = Mesh::from_ordered(
+            reopened.mesh.positions.clone(),
+            reopened.mesh.triangles.clone(),
+        );
+        let mut again = Sculpt::with_history(
+            current,
+            reopened.log().to_vec(),
+            reopened.checkpoints().to_vec(),
+        );
+        session_at(&mut again, clock + 5.0, -0.05);
+        let mut replay = Replay::of(&again);
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_same(&replay, &again);
+    }
+
+    #[test]
     fn damaged_history_is_an_error_or_replays_without_panicking() {
         let mut live = Sculpt::new(Mesh::icosphere(1));
         session(&mut live);
