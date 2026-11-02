@@ -224,7 +224,7 @@ impl App {
             if pressed(M::SHIFT, Key::R) {
                 self.ask_remesh();
             }
-            if pressed(M::SHIFT, Key::D) {
+            if pressed(M::SHIFT, Key::U) {
                 self.ask_subdivide();
             }
         }
@@ -412,7 +412,7 @@ impl App {
         if menu::action(ui, live, tr.mesh.remesh, "Shift+R") {
             self.ask_remesh();
         }
-        if menu::action(ui, live, tr.mesh.subdivide, "Shift+D") {
+        if menu::action(ui, live, tr.mesh.subdivide, "Shift+U") {
             self.ask_subdivide();
         }
     }
