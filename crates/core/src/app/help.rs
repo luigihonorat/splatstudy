@@ -229,12 +229,12 @@ impl App {
     }
 
     /// A quiet link under the sculpt view on the first visit, until it is
-    /// followed or the first stroke is made.
+    /// followed, the first stroke is made or a reference is loaded.
     fn first_run_hint(&mut self, ui: &egui::Ui) {
         if !self.help.first_run_hint || self.help.show_getting_started {
             return;
         }
-        if self.sculpt.can_undo() {
+        if self.sculpt.can_undo() || self.reference.current.is_some() {
             self.help.first_run_hint = false;
             return;
         }
