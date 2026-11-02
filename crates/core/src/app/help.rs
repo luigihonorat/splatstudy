@@ -9,7 +9,7 @@ use egui::{Align2, RichText};
 use super::sculpting::{BRUSHES, brush_name};
 use super::{App, Request, SCULPT};
 use crate::input::FilePurpose;
-use crate::ui::{self, menu};
+use crate::ui::{self, menu, theme};
 
 /// The getting started window and what the URL asked for.
 #[derive(Default)]
@@ -169,7 +169,31 @@ impl App {
         let clicked = egui::Area::new(egui::Id::unique("first run hint"))
             .fixed_pos(view.center_bottom() - egui::vec2(0.0, 24.0))
             .pivot(Align2::CENTER_BOTTOM)
-            .show(ui.ctx(), |ui| ui::choice(ui, text, false).clicked())
+            .show(ui.ctx(), |ui| {
+                // The views' own muted text, like the drop hint, with a 1px
+                // underline that marks it as a link.
+                let galley = ui.painter().layout_no_wrap(
+                    text.to_owned(),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    theme::VIEW_TEXT,
+                );
+                let size = galley.size() + egui::vec2(0.0, 4.0);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let colour = if response.hovered() {
+                    theme::VIEW_INK
+                } else {
+                    theme::VIEW_TEXT
+                };
+                ui.painter().galley(rect.min, galley, colour);
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.bottom() - 0.5,
+                    egui::Stroke::new(1.0, colour),
+                );
+                response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+            })
             .inner;
         if clicked {
             self.open_getting_started();
