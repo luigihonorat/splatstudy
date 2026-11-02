@@ -9,10 +9,18 @@ use super::fonts;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeMode {
-    #[default]
     Light,
+    #[default]
     Dark,
 }
+
+/// The 3D views stay black in both themes, so the clay reads the same.
+pub const VIEW_BG: Color32 = Color32::BLACK;
+/// The clay's colour, before lighting.
+pub const CLAY: Color32 = hex(0xC4C4C4);
+/// Text and outlines drawn over the black views.
+pub const VIEW_TEXT: Color32 = hex(0x8A8A8A);
+pub const VIEW_INK: Color32 = hex(0xF2F2F2);
 
 /// The site's CSS custom properties, one set per mode.
 #[derive(Clone, Copy, Debug)]

@@ -6,7 +6,7 @@
 use splatstudy_core::camera::OrbitCamera;
 use splatstudy_core::render::{ViewTarget, clay::ClayPass, clay::GpuMesh};
 use splatstudy_core::sculpt::Mesh;
-use splatstudy_core::ui::theme::LIGHT;
+use splatstudy_core::ui::theme::{CLAY, VIEW_BG};
 
 const SIZE: u32 = 128; // 128 * 4 bytes per row is a multiple of 256, as copies require
 
@@ -70,16 +70,16 @@ fn default_sphere_renders_lit_clay_on_the_background() {
     let mesh = GpuMesh::new(&device, &Mesh::icosphere(3));
     let camera = OrbitCamera::default();
 
-    clay.prepare(&queue, &camera, target.aspect(), LIGHT.vp_geo);
+    clay.prepare(&queue, &camera, target.aspect(), CLAY);
     let mut encoder = device.create_command_encoder(&Default::default());
     {
-        let mut pass = target.begin_pass(&mut encoder, LIGHT.vp_bg);
+        let mut pass = target.begin_pass(&mut encoder, VIEW_BG);
         clay.draw(&mut pass, &mesh);
     }
     queue.submit([encoder.finish()]);
     let data = read_back(&device, &queue, &target);
 
-    let bg = LIGHT.vp_bg.to_array();
+    let bg = VIEW_BG.to_array();
     assert_eq!(pixel(&data, 2, 2), bg, "corner shows the background");
     let centre = pixel(&data, SIZE / 2, SIZE / 2);
     assert_ne!(centre, bg, "the sphere covers the centre");

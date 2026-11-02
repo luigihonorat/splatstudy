@@ -56,21 +56,22 @@ pub struct Tr {
     pub drop_hint: &'static str,
     pub theme_light: &'static str,
     pub theme_dark: &'static str,
-    pub brush: &'static str,
+    pub tools: &'static str,
     pub clay: &'static str,
     pub smooth: &'static str,
     pub move_: &'static str,
     pub size: &'static str,
     pub strength: &'static str,
     pub symmetry: &'static str,
-    pub pressure_size: &'static str,
-    pub pressure_strength: &'static str,
     pub history: &'static str,
     pub undo: &'static str,
     pub redo: &'static str,
     pub new_sphere: &'static str,
     pub reference_tools: &'static str,
-    pub navigation_hint: &'static str,
+    pub navigation: &'static str,
+    pub hint_zbrush: &'static str,
+    pub hint_blender: &'static str,
+    pub hint_maya: &'static str,
 }
 
 pub const JA: Tr = Tr {
@@ -80,21 +81,29 @@ pub const JA: Tr = Tr {
     drop_hint: "スプラット・3Dスキャン・画像をここにドロップ",
     theme_light: "ライト",
     theme_dark: "ダーク",
-    brush: "ブラシ",
-    clay: "盛る",
-    smooth: "ならす",
-    move_: "動かす",
+    tools: "ツール",
+    clay: "クレイ",
+    smooth: "スムーズ",
+    move_: "ムーブ",
     size: "大きさ",
     strength: "強さ",
     symmetry: "左右対称",
-    pressure_size: "筆圧で大きさ",
-    pressure_strength: "筆圧で強さ",
     history: "履歴",
     undo: "元に戻す",
     redo: "やり直す",
     new_sphere: "新しい球",
     reference_tools: "モチーフ",
-    navigation_hint: "Alt / Space ＋ドラッグで回転・移動・拡大",
+    navigation: "視点操作",
+    hint_zbrush: "背景をドラッグ：回転
+Alt：移動
+右ドラッグ：回転
+Ctrl＋右：拡大",
+    hint_blender: "中ボタン：回転
+Shift＋中：移動
+Ctrl＋中：拡大",
+    hint_maya: "Alt＋左：回転
+Alt＋中：移動
+Alt＋右：拡大",
 };
 
 pub const EN: Tr = Tr {
@@ -104,21 +113,29 @@ pub const EN: Tr = Tr {
     drop_hint: "drop a splat, 3D scan or image here",
     theme_light: "light",
     theme_dark: "dark",
-    brush: "brush",
+    tools: "tools",
     clay: "clay",
     smooth: "smooth",
     move_: "move",
     size: "size",
     strength: "strength",
     symmetry: "symmetry",
-    pressure_size: "pressure → size",
-    pressure_strength: "pressure → strength",
     history: "history",
     undo: "undo",
     redo: "redo",
     new_sphere: "new sphere",
     reference_tools: "reference",
-    navigation_hint: "Alt / Space + drag to turn, pan, zoom",
+    navigation: "navigation",
+    hint_zbrush: "drag the background: turn
+Alt: pan
+right drag: turn
+Ctrl + right: zoom",
+    hint_blender: "middle: turn
+Shift + middle: pan
+Ctrl + middle: zoom",
+    hint_maya: "Alt + left: turn
+Alt + middle: pan
+Alt + right: zoom",
 };
 
 pub const FR: Tr = Tr {
@@ -128,21 +145,29 @@ pub const FR: Tr = Tr {
     drop_hint: "déposez ici un splat, un scan 3D ou une image",
     theme_light: "clair",
     theme_dark: "sombre",
-    brush: "pinceau",
-    clay: "ajouter",
+    tools: "outils",
+    clay: "argile",
     smooth: "lisser",
     move_: "déplacer",
     size: "taille",
     strength: "force",
     symmetry: "symétrie",
-    pressure_size: "pression → taille",
-    pressure_strength: "pression → force",
     history: "historique",
     undo: "annuler",
     redo: "rétablir",
     new_sphere: "nouvelle sphère",
     reference_tools: "modèle",
-    navigation_hint: "Alt / Espace + glisser : tourner, déplacer, zoomer",
+    navigation: "navigation",
+    hint_zbrush: "glisser le fond : tourner
+Alt : déplacer
+clic droit : tourner
+Ctrl + droit : zoomer",
+    hint_blender: "milieu : tourner
+Maj + milieu : déplacer
+Ctrl + milieu : zoomer",
+    hint_maya: "Alt + gauche : tourner
+Alt + milieu : déplacer
+Alt + droit : zoomer",
 };
 
 #[cfg(test)]
