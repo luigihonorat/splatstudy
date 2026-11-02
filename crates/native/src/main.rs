@@ -100,14 +100,15 @@ fn run() -> Result<(), String> {
         .skip(1)
         .filter_map(|a| a.strip_prefix("--").map(str::to_owned))
         .collect();
+    // Before restoring, so its notices come in the chosen language.
+    if let Some(saved) = config::load_preferences() {
+        app.apply_preferences(saved.trim());
+    }
     // The last session first, unless `--fresh`.
     let fresh = options.iter().any(|o| o == "fresh");
     let (mut autosave, options) = autosave::Autosave::restore(&mut app, &options, fresh);
     app.apply_url_options(&options.join("&"));
     app.set_first_run(config::first_run());
-    if let Some(saved) = config::load_preferences() {
-        app.apply_preferences(saved.trim());
-    }
     let mut preferences = app.preferences();
 
     let event_subsystem = sdl.event().map_err(|e| e.to_string())?;
