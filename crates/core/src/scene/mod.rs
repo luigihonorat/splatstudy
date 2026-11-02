@@ -27,7 +27,7 @@ use glam::Vec3;
 use crate::camera::OrbitCamera;
 use crate::io::{ReadError, Reader, Writer};
 use crate::reference::Reference;
-use crate::sculpt::{Entry, Mesh};
+use crate::sculpt::{Entry, Mesh, Sculpt};
 
 pub use reference::SavedReference;
 
@@ -105,7 +105,11 @@ impl SceneWriter {
     pub fn chunk(&mut self, tag: u32, deflate: bool, payload: &[u8]) -> &mut Self {
         if deflate {
             let packed = miniz_oxide::deflate::compress_to_vec(payload, DEFLATE_LEVEL);
-            self.out.u32(tag).u32(DEFLATED).len(packed.len()).raw(&packed);
+            self.out
+                .u32(tag)
+                .u32(DEFLATED)
+                .len(packed.len())
+                .raw(&packed);
         } else {
             self.out.u32(tag).u32(0).len(payload.len()).raw(payload);
         }
@@ -253,6 +257,36 @@ impl Scene {
     }
 }
 
+/// The live sculpt for a scene that was saved as `saved` after `log` was
+/// applied to `start`: the log is applied again, so the new sculpt has the
+/// session's undo steps and goes on recording after it, and the timelapse
+/// covers both. True when that gave the saved clay bit for bit.
+///
+/// If it doesn't (a scene from a version whose brushes worked differently),
+/// the saved clay wins and the session starts afresh from it: false.
+pub fn resume_sculpt(start: Mesh, saved: Mesh, log: &[Entry]) -> (Sculpt, bool) {
+    if log.is_empty() {
+        return (Sculpt::new(saved), true);
+    }
+    if start.triangles == saved.triangles {
+        let mut sculpt = Sculpt::new(start);
+        for entry in log {
+            sculpt.set_clock(entry.time);
+            sculpt.apply(entry.event);
+        }
+        let same = |a: &[Vec3], b: &[Vec3]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(p, q)| p.to_array().map(f32::to_bits) == q.to_array().map(f32::to_bits))
+        };
+        if same(&sculpt.mesh.positions, &saved.positions) {
+            return (sculpt, true);
+        }
+    }
+    (Sculpt::new(saved), false)
+}
+
 fn write_mesh(w: &mut Writer, mesh: &Mesh) {
     w.len(mesh.positions.len());
     for &p in &mesh.positions {
@@ -352,7 +386,7 @@ pub(crate) fn position_bits(positions: &[Vec3]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sculpt::{Brush, Dab, Sculpt};
+    use crate::sculpt::{Brush, Dab};
 
     /// A short session on a small sphere: a few strokes, an undo.
     fn session() -> (Mesh, Sculpt) {
@@ -429,6 +463,39 @@ mod tests {
             .log(&scene.log)
             .view(&view);
         assert_eq!(w.finish(), data);
+    }
+
+    #[test]
+    fn a_resumed_sculpt_has_the_session_and_goes_on_recording() {
+        let (start, live) = session();
+        let scene = Scene::read(&save(&start, &live, &view())).unwrap();
+        let start = scene.start().unwrap().clone();
+        let (mut resumed, complete) = resume_sculpt(start.clone(), scene.mesh, &scene.log);
+        assert!(complete);
+        assert_eq!(
+            position_bits(&resumed.mesh.positions),
+            position_bits(&live.mesh.positions)
+        );
+        // The same log, entry for entry, and the same undo steps.
+        let encode = |entries: &[Entry]| {
+            let mut w = Writer::new();
+            log::write_entries(&mut w, entries);
+            w.finish()
+        };
+        assert_eq!(encode(resumed.log()), encode(live.log()));
+        assert_eq!(resumed.can_undo(), live.can_undo());
+        assert_eq!(resumed.can_redo(), live.can_redo());
+        resumed.redo();
+        assert_eq!(resumed.log().len(), live.log().len() + 1);
+
+        // A saved clay the log doesn't lead to: the clay wins, without a log.
+        let mut odd = live.mesh.clone();
+        odd.positions[0] += Vec3::splat(0.01);
+        let kept = odd.positions[0];
+        let (resumed, complete) = resume_sculpt(start, odd, live.log());
+        assert!(!complete);
+        assert_eq!(resumed.mesh.positions[0], kept);
+        assert!(resumed.log().is_empty());
     }
 
     #[test]

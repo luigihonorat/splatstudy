@@ -9,6 +9,9 @@ use super::App;
 pub(super) struct ExportState {}
 
 impl App {
+    /// Stops an export under way, dropping what it made so far.
+    pub(super) fn cancel_export(&mut self) {}
+
     /// The folder picked for an image sequence (desktop).
     pub(super) fn on_folder(&mut self, _path: String) {}
 
