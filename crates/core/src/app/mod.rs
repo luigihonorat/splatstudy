@@ -167,8 +167,9 @@ pub struct App {
     help: help::HelpState,
     /// Asked for since the last frame; handed to the shell with it.
     requests: Vec<Request>,
-    /// A short message at the bottom of the views, and when it was posted.
-    notice: Option<(String, f64)>,
+    /// A short message at the bottom of the views, and when it was first
+    /// shown.
+    notice: Option<(String, Option<f64>)>,
     /// The clock passed to the current frame, in seconds.
     now: f64,
     dirty: bool,
@@ -408,7 +409,9 @@ impl App {
 
     /// Shows a short message at the bottom of the views for a few seconds.
     fn notify(&mut self, text: impl Into<String>) {
-        self.notice = Some((text.into(), self.now));
+        // Timed from the frame that first shows it: `now` is the last
+        // frame's clock, which can be long ago when the app was idle.
+        self.notice = Some((text.into(), None));
         self.dirty = true;
     }
 
@@ -478,10 +481,11 @@ impl App {
     }
 
     fn notice_ui(&mut self, ui: &egui::Ui) {
-        let Some((text, posted)) = &self.notice else {
+        let now = self.now;
+        let Some((text, posted)) = &mut self.notice else {
             return;
         };
-        let left = NOTICE_SECONDS - (self.now - posted);
+        let left = NOTICE_SECONDS - (now - *posted.get_or_insert(now));
         if left <= 0.0 {
             self.notice = None;
             return;

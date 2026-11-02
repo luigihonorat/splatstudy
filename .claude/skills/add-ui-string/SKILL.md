@@ -33,8 +33,12 @@ a test.
 
    ```
    cd crates/core/assets/fonts
-   F:/dev/splatstudy/tools/venv/Scripts/python.exe subset.py F:/dev/splatstudy/fonts-src
+   python subset.py <folder with the original Google Fonts files>
    ```
+
+   (Python with fontTools. In the maintainer's checkout both sit next to the
+   repository: `../../../../../tools/venv/Scripts/python.exe` and
+   `../../../../../fonts-src`.)
 
    and run the test again. Commit `NotoSansJP-UI.ttf` with the strings. On a
    merge conflict in the font, take the other side's file and rerun the script.

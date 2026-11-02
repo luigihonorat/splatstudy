@@ -14,8 +14,8 @@ matters as much as the code. Report; don't change files.
 
 Run, from the repository root:
 
-1. `F:/dev/splatstudy/tools/venv/Scripts/python.exe -m reuse lint`
-   (or `reuse lint`). Every file needs copyright and licence information,
+1. `reuse lint` (the `reuse` Python tool; in the maintainer's checkout,
+   `../tools/venv/Scripts/python.exe -m reuse lint`). Every file needs copyright and licence information,
    either as a header or through `REUSE.toml`. Source files (`.rs`, `.wgsl`,
    `.py`, `.sh`, `.js` inside crates) start with:
 

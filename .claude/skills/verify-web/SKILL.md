@@ -21,7 +21,9 @@ For the browser build:
    free DevTools port):
 
    ```
-   F:/dev/splatstudy/tools/venv/Scripts/python.exe scripts/webshot.py \
+   # Python with websocket-client; in the maintainer's checkout:
+   # ../tools/venv/Scripts/python.exe
+   python scripts/webshot.py \
      "http://127.0.0.1:81xx/?lang=ja" <scratchpad>/ja.png --wait 5
    ```
 
