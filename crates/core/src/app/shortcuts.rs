@@ -99,7 +99,10 @@ impl App {
                 ] {
                     rows.push((label, key.to_owned()));
                 }
+                rows.push((tr.open_scene, self.keys("O")));
+                rows.push((tr.save_scene, self.keys("S")));
                 if !WEB {
+                    rows.push((tr.save_scene_as, self.keys("Shift+S")));
                     rows.push((tr.new_scene, self.keys("N")));
                     rows.push((tr.exit, self.keys("Q")));
                 }
