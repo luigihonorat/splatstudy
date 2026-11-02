@@ -93,9 +93,14 @@ fn web(dev: bool) -> Result<(), String> {
     if !dev {
         wasm_opt(&bg);
     }
-    for entry in fs::read_dir(root.join("web")).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        fs::copy(entry.path(), dist.join(entry.file_name())).map_err(|e| e.to_string())?;
+    // web/ holds the page and its folders (samples/ among them).
+    let web = root.join("web");
+    for file in files_in(&web)? {
+        let to = dist.join(file.strip_prefix(&web).map_err(|e| e.to_string())?);
+        if let Some(dir) = to.parent() {
+            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        fs::copy(&file, &to).map_err(|e| format!("{}: {e}", file.display()))?;
     }
     // Stamp a content hash into index.html so caches never mix a new page
     // with an old wasm.
@@ -232,20 +237,28 @@ fn wasm_opt(wasm: &Path) {
     }
 }
 
+/// Every file under `dir`, in subfolders too, sorted.
+fn files_in(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            files.extend(files_in(&path)?);
+        } else {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 fn report_sizes(dist: &Path, wasm: &Path) -> Result<(), String> {
-    for entry in fs::read_dir(dist).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let size = entry.metadata().map_err(|e| e.to_string())?.len();
-        println!(
-            "{:>10.1} KiB  {}",
-            size as f64 / 1024.0,
-            entry.file_name().to_string_lossy()
-        );
+    for file in files_in(dist)? {
+        let size = fs::metadata(&file).map_err(|e| e.to_string())?.len();
+        let name = file.strip_prefix(dist).unwrap_or(&file);
+        println!("{:>10.1} KiB  {}", size as f64 / 1024.0, name.display());
         if size > FILE_LIMIT {
-            return Err(format!(
-                "{} is over the per-file limit",
-                entry.path().display()
-            ));
+            return Err(format!("{} is over the per-file limit", file.display()));
         }
     }
     let size = fs::metadata(wasm).map_err(|e| e.to_string())?.len();
