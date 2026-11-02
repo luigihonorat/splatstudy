@@ -280,8 +280,13 @@ fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), 
                 shell.app.push_event(InputEvent::Text(name.clone()));
             }
             // Keep the browser from acting on keys the app uses.
+            // Cmd/Ctrl+S, +Shift+S and +O are the app's save, save as and
+            // open, not the browser's.
+            let command = if is_mac() { e.meta_key() } else { e.ctrl_key() };
+            let file_key = command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o");
             if matches!(name.as_str(), "Alt" | "Tab" | " " | "F2")
                 || (!shortcut && name.starts_with("Arrow"))
+                || file_key
             {
                 e.prevent_default();
             }
