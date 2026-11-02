@@ -5,9 +5,9 @@
 // Σ' = J W Σ Wᵀ Jᵀ, with W the turn into view space and J the Jacobian of
 // the perspective divide at the splat's centre. The vertex shader draws a
 // quad over ±3σ along the 2D Gaussian's axes; the fragment shader fades
-// it out with exp(-r²/2). Splats come back to front (sorted on the CPU),
-// premultiplied, over whatever the pass already holds; depth is tested
-// against the clay but not written.
+// it out with exp(-r²/2). Splats come back to front (sorted by
+// `splat_sort.wgsl`, or on the CPU), premultiplied, over whatever the pass
+// already holds; depth is tested against the clay but not written.
 
 struct Uniforms {
     view: mat4x4<f32>,
@@ -21,7 +21,7 @@ struct Uniforms {
     crop_max: vec4<f32>,
     // Silhouette colour, display values.
     flat_colour: vec4<f32>,
-    // x: opacity, y: flat.
+    // x: each splat's opacity, y: flat, z: the ghost layer's opacity.
     params: vec4<f32>,
 };
 
@@ -132,4 +132,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     let rgb = select(in.colour.rgb, u.flat_colour.rgb, u.params.y > 0.5);
     return vec4<f32>(rgb * alpha, alpha);
+}
+
+// The ghost. Its splats are drawn whole (with `vs` and `fs`) into a target
+// of their own, which is then laid over the view at params.z, the ghost's
+// opacity: one see-through layer, so overlapping splats are no stronger
+// than one. The target is as large as the view, read pixel for pixel.
+@group(0) @binding(5) var layer: texture_2d<f32>;
+
+// One triangle over the whole target.
+@vertex
+fn vs_layer(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32((v << 1u) & 2u), f32(v & 2u));
+    return vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_layer(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+    // Premultiplied, so fading is a plain scale.
+    return textureLoad(layer, vec2<i32>(pixel.xy), 0) * u.params.z;
 }

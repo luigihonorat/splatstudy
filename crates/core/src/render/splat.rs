@@ -6,8 +6,14 @@
 //! The splats live in storage buffers (centre, 3D covariance, colour); each
 //! is drawn as an instanced 4-vertex quad that the vertex shader shapes by
 //! EWA projection (see `splat.wgsl`). Blending needs them back to front,
-//! so the CPU sorts them by view depth with a 16-bit counting sort, and
-//! only again once the view has turned past a small angle.
+//! so they are sorted by view depth with a 16-bit counting sort: in
+//! compute shaders (`splat_sort.wgsl`), or on the CPU where those don't
+//! run; and only again once the view has turned past a small angle.
+//!
+//! The ghost ([`SplatLook::over`]) draws the splats whole into a target of
+//! its own, then lays that over the pass at the ghost's opacity: one
+//! see-through layer, like the mesh ghost, instead of splats that each
+//! fade and build up where they overlap.
 //!
 //! Like [`ClayPass`](super::clay::ClayPass), each [`Slot`] keeps its own
 //! camera, look and draw order, so the reference view, a ghost over the
@@ -24,6 +30,7 @@ use wgpu::util::DeviceExt;
 
 use super::{DEPTH_FORMAT, SAMPLES, Slot, VIEW_FORMAT};
 use crate::camera::OrbitCamera;
+use crate::reference::fit::percentile_box;
 use crate::reference::{Aabb, Splats};
 use crate::ui::theme::SILHOUETTE_INK;
 
@@ -40,15 +47,53 @@ struct Uniforms {
     params: [f32; 4],
 }
 
+/// What the GPU sort needs, as `Params` in `splat_sort.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SortParams {
+    row: [f32; 4],
+    lo: f32,
+    scale: f32,
+    count: u32,
+    stride: u32,
+}
+
 /// Re-sort once the view direction has turned by more than this (cosine of
 /// about one degree): a stale order shows only as faint popping.
 const RESORT_COS: f32 = 0.999_85;
+
+/// Invocations per workgroup in `splat_sort.wgsl`.
+const SORT_GROUP: u32 = 256;
+/// Depth steps of the sort, as in `splat_sort.wgsl`.
+const BUCKETS: u64 = 1 << 16;
+
+/// Where splats are put in depth order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortOn {
+    /// A counting sort in compute shaders, leaving the CPU free, so
+    /// millions of splats turn smoothly. The default where compute shaders
+    /// run.
+    Gpu,
+    /// The same counting sort on the CPU, then uploaded.
+    Cpu,
+}
+
+/// The ghost's own target: the splats at full opacity, laid over the slot
+/// in one go.
+struct Layer {
+    size: [u32; 2],
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+}
 
 /// One slot's camera, draw order and the direction it was sorted for.
 struct SlotState {
     uniforms: wgpu::Buffer,
     order: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The GPU sort's parameters and bindings, when the GPU sorts.
+    sort: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    layer: Option<Layer>,
     sorted_for: Option<Vec3>,
     over: bool,
 }
@@ -56,12 +101,16 @@ struct SlotState {
 /// How splats are drawn into a slot.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SplatLook {
-    /// 0..1, fading every splat (a ghost).
+    /// 0..1. Alone, it fades every splat; with `over`, the splats fade
+    /// together as one layer.
     pub opacity: f32,
     /// Filled with the silhouette colour, [`SILHOUETTE_INK`].
     pub flat: bool,
     /// Drawn over everything already in the pass instead of being hidden by
-    /// the clay in front: the ghost over the sculpt.
+    /// the clay in front: the ghost over the sculpt. The splats are drawn
+    /// whole into a target of their own when the slot is prepared, and the
+    /// pass gets that target at `opacity`, so where splats overlap the
+    /// ghost is no stronger than where one splat covers.
     pub over: bool,
 }
 
@@ -75,31 +124,70 @@ impl Default for SplatLook {
     }
 }
 
+/// The compute pipelines and scratch buffers of the GPU sort.
+struct GpuSort {
+    layout: wgpu::BindGroupLayout,
+    depth_keys: wgpu::ComputePipeline,
+    prefix: wgpu::ComputePipeline,
+    place: wgpu::ComputePipeline,
+    /// Each splat's depth key. The slots share it: each sort goes in a
+    /// submit of its own, one after the other.
+    keys: wgpu::Buffer,
+    /// Splats per depth step, then where each step starts in the order.
+    counts: wgpu::Buffer,
+    /// The dispatch: workgroups across, rows, and invocations per row.
+    groups: [u32; 3],
+}
+
 /// Gaussian splats on the GPU, ready to draw from any slot.
 pub struct SplatPass {
     device: wgpu::Device,
     /// Hidden by the clay in front.
     pipeline: wgpu::RenderPipeline,
-    /// Over everything drawn before: the ghost.
-    over: wgpu::RenderPipeline,
+    /// The ghost's splats, alone into its target at full opacity.
+    layer_splats: wgpu::RenderPipeline,
+    /// The ghost's target laid over the pass.
+    layer_over: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    layer_layout: wgpu::BindGroupLayout,
     positions: wgpu::Buffer,
     covariances: wgpu::Buffer,
     colours: wgpu::Buffer,
     /// Centres in file coordinates, for sorting.
     centres: Vec<Vec3>,
+    /// Where nearly all centres lie, in file coordinates. The GPU sort's
+    /// depth steps span it; the few beyond (floaters) clamp to its ends,
+    /// still on the right side of everything inside.
+    depth_box: Aabb,
     /// File coordinates to the clay's space, and the crop box.
     placement: Cell<(Mat4, Option<Aabb>)>,
     /// Made the first time a slot is prepared.
     slots: [RefCell<Option<SlotState>>; Slot::COUNT],
+    gpu_sort: Option<GpuSort>,
     scratch: RefCell<Sorter>,
 }
 
+/// Whether `splat_sort.wgsl` can run: 256 invocations per workgroup, 1 KiB
+/// of workgroup memory and four storage buffers.
+fn can_sort_on_gpu(limits: &wgpu::Limits) -> bool {
+    limits.max_compute_workgroup_size_x >= SORT_GROUP
+        && limits.max_compute_invocations_per_workgroup >= SORT_GROUP
+        && limits.max_compute_workgroup_storage_size >= 4 * SORT_GROUP
+        && limits.max_storage_buffers_per_shader_stage >= 4
+        && limits.max_compute_workgroups_per_dimension >= 1
+}
+
 impl SplatPass {
-    /// Uploads `splats`. More splats than the GPU's buffers hold are thinned
-    /// evenly; [`SplatPass::len`] says how many were kept. `None` if there
-    /// are none.
+    /// Uploads `splats`, to be sorted on the GPU where it can. More splats
+    /// than the GPU's buffers hold are thinned evenly; [`SplatPass::len`]
+    /// says how many were kept. `None` if there are none.
     pub fn new(device: &wgpu::Device, splats: &Splats) -> Option<Self> {
+        Self::sorting_on(device, splats, SortOn::Gpu)
+    }
+
+    /// [`SplatPass::new`], sorting where asked. [`SortOn::Gpu`] falls back
+    /// to the CPU without compute shaders.
+    pub fn sorting_on(device: &wgpu::Device, splats: &Splats, sort: SortOn) -> Option<Self> {
         let n = splats.positions.len();
         if n == 0 {
             return None;
@@ -110,13 +198,13 @@ impl SplatPass {
             .min(limits.max_buffer_size);
         let fits = (largest / 24).max(1) as usize;
         let step = n.div_ceil(fits);
-        let kept: Vec<usize> = (0..n).step_by(step).collect();
+        let kept = n.div_ceil(step);
 
-        let mut positions = Vec::with_capacity(kept.len() * 3);
-        let mut covariances = Vec::with_capacity(kept.len() * 6);
-        let mut colours = Vec::with_capacity(kept.len());
-        let mut centres = Vec::with_capacity(kept.len());
-        for &i in &kept {
+        let mut positions = Vec::with_capacity(kept * 3);
+        let mut covariances = Vec::with_capacity(kept * 6);
+        let mut colours = Vec::with_capacity(kept);
+        let mut centres = Vec::with_capacity(kept);
+        for i in (0..n).step_by(step) {
             let p = splats.positions[i];
             centres.push(p);
             positions.extend_from_slice(&p.to_array());
@@ -133,55 +221,77 @@ impl SplatPass {
         let positions = storage("splat positions", bytemuck::cast_slice(&positions));
         let covariances = storage("splat covariances", bytemuck::cast_slice(&covariances));
         let colours = storage("splat colours", bytemuck::cast_slice(&colours));
+        let depth_box = percentile_box(&centres, 0.01, 0.99)
+            .map(|b| b.grown(0.5))
+            .unwrap_or(Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            });
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("splat.wgsl"));
-        let storage_entry = |binding| wgpu::BindGroupLayoutEntry {
+        let buffer_entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility,
             ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                ty,
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
             count: None,
         };
+        let uniform = wgpu::BufferBindingType::Uniform;
+        let read_only = wgpu::BufferBindingType::Storage { read_only: true };
+        let vertex = wgpu::ShaderStages::VERTEX;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("splats"),
             entries: &[
+                buffer_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, uniform),
+                buffer_entry(1, vertex, read_only),
+                buffer_entry(2, vertex, read_only),
+                buffer_entry(3, vertex, read_only),
+                buffer_entry(4, vertex, read_only),
+            ],
+        });
+        let layer_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("splat layer"),
+            entries: &[
+                buffer_entry(0, wgpu::ShaderStages::FRAGMENT, uniform),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
-                storage_entry(1),
-                storage_entry(2),
-                storage_entry(3),
-                storage_entry(4),
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("splats"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = |compare| {
+        let pipeline_layout = |layout| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("splats"),
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
+            })
+        };
+        let splat_layout = pipeline_layout(&layout);
+        let over_layout = pipeline_layout(&layer_layout);
+        // Into a view's pass, tested against its depth with `compare`; or,
+        // with `None`, alone into the ghost's target.
+        let pipeline = |layout, vs, fs, strip, compare: Option<wgpu::CompareFunction>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("splats"),
-                layout: Some(&pipeline_layout),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some("vs"),
+                    entry_point: Some(vs),
                     compilation_options: Default::default(),
                     buffers: &[],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs"),
+                    entry_point: Some(fs),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: VIEW_FORMAT,
@@ -190,11 +300,15 @@ impl SplatPass {
                     })],
                 }),
                 primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    topology: if strip {
+                        wgpu::PrimitiveTopology::TriangleStrip
+                    } else {
+                        wgpu::PrimitiveTopology::TriangleList
+                    },
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
+                depth_stencil: compare.map(|compare| wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(false),
                     depth_compare: Some(compare),
@@ -202,24 +316,42 @@ impl SplatPass {
                     bias: Default::default(),
                 }),
                 multisample: wgpu::MultisampleState {
-                    count: SAMPLES,
+                    count: if compare.is_some() { SAMPLES } else { 1 },
                     ..Default::default()
                 },
                 multiview_mask: None,
                 cache: None,
             })
         };
+        let gpu_sort = (sort == SortOn::Gpu && can_sort_on_gpu(&limits))
+            .then(|| GpuSort::new(device, centres.len(), &limits));
         Some(Self {
             device: device.clone(),
-            pipeline: pipeline(wgpu::CompareFunction::Less),
-            over: pipeline(wgpu::CompareFunction::Always),
+            pipeline: pipeline(
+                &splat_layout,
+                "vs",
+                "fs",
+                true,
+                Some(wgpu::CompareFunction::Less),
+            ),
+            layer_splats: pipeline(&splat_layout, "vs", "fs", true, None),
+            layer_over: pipeline(
+                &over_layout,
+                "vs_layer",
+                "fs_layer",
+                false,
+                Some(wgpu::CompareFunction::Always),
+            ),
             layout,
+            layer_layout,
             positions,
             covariances,
             colours,
             centres,
+            depth_box,
             placement: Cell::new((Mat4::IDENTITY, None)),
             slots: Default::default(),
+            gpu_sort,
             scratch: RefCell::new(Sorter::default()),
         })
     }
@@ -231,6 +363,15 @@ impl SplatPass {
 
     pub fn is_empty(&self) -> bool {
         self.centres.is_empty()
+    }
+
+    /// Where the splats are sorted.
+    pub fn sorts_on(&self) -> SortOn {
+        if self.gpu_sort.is_some() {
+            SortOn::Gpu
+        } else {
+            SortOn::Cpu
+        }
     }
 
     /// Where the splats sit: `model` maps file coordinates into the clay's
@@ -250,6 +391,10 @@ impl SplatPass {
     /// Sets the camera and look for the slot's next draw, and re-sorts the
     /// slot's splats if the view has turned. `size` is the target's size
     /// in pixels.
+    ///
+    /// The GPU sort and the ghost's own target ([`SplatLook::over`]) are
+    /// drawn here, in a submit of their own, so call it before submitting
+    /// the pass that [`draw`](Self::draw)s the slot.
     pub fn prepare(
         &self,
         queue: &wgpu::Queue,
@@ -259,7 +404,8 @@ impl SplatPass {
         look: &SplatLook,
     ) {
         let (model, crop) = self.placement.get();
-        let size = [size[0].max(1) as f32, size[1].max(1) as f32];
+        let pixels = [size[0].max(1), size[1].max(1)];
+        let size = pixels.map(|v| v as f32);
         let view = camera.view();
         let proj = camera.projection(size[0] / size[1]);
         let focal = [proj.x_axis.x * size[0] / 2.0, proj.y_axis.y * size[1] / 2.0];
@@ -268,6 +414,13 @@ impl SplatPass {
             None => (Vec3::ZERO, Vec3::ZERO, 0.0),
         };
         let [r, g, b, _] = SILHOUETTE_INK.to_array().map(|c| f32::from(c) / 255.0);
+        let opacity = look.opacity.clamp(0.0, 1.0);
+        // A ghost's splats go whole into its target, and the target fades.
+        let (splat_opacity, layer_opacity) = if look.over {
+            (1.0, opacity)
+        } else {
+            (opacity, 1.0)
+        };
         let uniforms = Uniforms {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
@@ -277,9 +430,9 @@ impl SplatPass {
             crop_max: crop_max.extend(0.0).to_array(),
             flat_colour: [r, g, b, 1.0],
             params: [
-                look.opacity.clamp(0.0, 1.0),
+                splat_opacity,
                 if look.flat { 1.0 } else { 0.0 },
-                0.0,
+                layer_opacity,
                 0.0,
             ],
         };
@@ -288,6 +441,7 @@ impl SplatPass {
         let state = cell.get_or_insert_with(|| self.slot_state());
         queue.write_buffer(&state.uniforms, 0, bytemuck::bytes_of(&uniforms));
         state.over = look.over;
+        let mut encoder = None;
 
         // View depth is one row of view · model; only its direction
         // changes the order.
@@ -297,10 +451,58 @@ impl SplatPass {
             .sorted_for
             .is_some_and(|last| last.dot(direction) > RESORT_COS);
         if !fresh {
-            let mut sorter = self.scratch.borrow_mut();
-            let order = sorter.back_to_front(&self.centres, row.truncate());
-            queue.write_buffer(&state.order, 0, bytemuck::cast_slice(order));
+            match (&self.gpu_sort, &state.sort) {
+                (Some(sort), Some((params, bind_group))) => {
+                    let (lo, hi) = depth_range(self.depth_box, row.truncate());
+                    let now = SortParams {
+                        row: row.to_array(),
+                        lo,
+                        scale: if hi > lo { 65_535.0 / (hi - lo) } else { 0.0 },
+                        count: self.centres.len() as u32,
+                        stride: sort.groups[2],
+                    };
+                    queue.write_buffer(params, 0, bytemuck::bytes_of(&now));
+                    let encoder = encoder.get_or_insert_with(|| {
+                        self.device.create_command_encoder(&Default::default())
+                    });
+                    sort.encode(encoder, bind_group);
+                }
+                _ => {
+                    let mut sorter = self.scratch.borrow_mut();
+                    let order = sorter.back_to_front(&self.centres, row.truncate());
+                    queue.write_buffer(&state.order, 0, bytemuck::cast_slice(order));
+                }
+            }
             state.sorted_for = Some(direction);
+        }
+
+        if look.over {
+            if state.layer.as_ref().is_none_or(|l| l.size != pixels) {
+                state.layer = Some(self.layer(&state.uniforms, pixels));
+            }
+            if let Some(layer) = &state.layer {
+                let encoder = encoder
+                    .get_or_insert_with(|| self.device.create_command_encoder(&Default::default()));
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("splat layer"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &layer.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&self.layer_splats);
+                pass.set_bind_group(0, &state.bind_group, &[]);
+                pass.draw(0..4, 0..self.centres.len() as u32);
+            }
+        }
+        if let Some(encoder) = encoder {
+            queue.submit([encoder.finish()]);
         }
     }
 
@@ -309,13 +511,53 @@ impl SplatPass {
         let Some(state) = cell.as_ref() else {
             return;
         };
-        pass.set_pipeline(if state.over {
-            &self.over
-        } else {
-            &self.pipeline
+        if !state.over {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &state.bind_group, &[]);
+            pass.draw(0..4, 0..self.centres.len() as u32);
+        } else if let Some(layer) = &state.layer {
+            pass.set_pipeline(&self.layer_over);
+            pass.set_bind_group(0, &layer.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
+    /// A ghost target of `size` pixels, laid over with `uniforms`.
+    fn layer(&self, uniforms: &wgpu::Buffer, size: [u32; 2]) -> Layer {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("splat layer"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: VIEW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
         });
-        pass.set_bind_group(0, &state.bind_group, &[]);
-        pass.draw(0..4, 0..self.centres.len() as u32);
+        let view = texture.create_view(&Default::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splat layer"),
+            layout: &self.layer_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+            ],
+        });
+        Layer {
+            size,
+            view,
+            bind_group,
+        }
     }
 
     fn slot_state(&self) -> SlotState {
@@ -357,13 +599,149 @@ impl SplatPass {
                 },
             ],
         });
+        let sort = self
+            .gpu_sort
+            .as_ref()
+            .map(|sort| sort.bindings(&self.device, &self.positions, &order));
         SlotState {
             uniforms,
             order,
             bind_group,
+            sort,
+            layer: None,
             sorted_for: None,
             over: false,
         }
+    }
+}
+
+/// The least and greatest depth `dot(row, p)` over the corners of `b`.
+fn depth_range(b: Aabb, row: Vec3) -> (f32, f32) {
+    (0..8).fold((f32::MAX, f32::MIN), |(lo, hi), i| {
+        let corner = Vec3::new(
+            if i & 1 == 0 { b.min.x } else { b.max.x },
+            if i & 2 == 0 { b.min.y } else { b.max.y },
+            if i & 4 == 0 { b.min.z } else { b.max.z },
+        );
+        let z = row.dot(corner);
+        (lo.min(z), hi.max(z))
+    })
+}
+
+impl GpuSort {
+    fn new(device: &wgpu::Device, n: usize, limits: &wgpu::Limits) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("splat_sort.wgsl"));
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let storage = |read_only| wgpu::BufferBindingType::Storage { read_only };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("splat sort"),
+            entries: &[
+                entry(0, wgpu::BufferBindingType::Uniform),
+                entry(1, storage(true)),
+                entry(2, storage(false)),
+                entry(3, storage(false)),
+                entry(4, storage(false)),
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("splat sort"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = |entry_point| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry_point),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let buffer = |label, size| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        // Rows of workgroups no longer than the device allows.
+        let needed = (n as u32).div_ceil(SORT_GROUP).max(1);
+        let across = needed.min(limits.max_compute_workgroups_per_dimension);
+        let rows = needed.div_ceil(across);
+        Self {
+            depth_keys: pipeline("depth_keys"),
+            prefix: pipeline("prefix"),
+            place: pipeline("place"),
+            layout,
+            keys: buffer("splat keys", (n.max(1) * 4) as u64),
+            counts: buffer("splat counts", BUCKETS * 4),
+            groups: [across, rows, across * SORT_GROUP],
+        }
+    }
+
+    /// A slot's sort parameters, and its bindings, sorting into `order`.
+    fn bindings(
+        &self,
+        device: &wgpu::Device,
+        positions: &wgpu::Buffer,
+        order: &wgpu::Buffer,
+    ) -> (wgpu::Buffer, wgpu::BindGroup) {
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("splat sort"),
+            size: size_of::<SortParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let resources = [
+            params.as_entire_binding(),
+            positions.as_entire_binding(),
+            self.keys.as_entire_binding(),
+            self.counts.as_entire_binding(),
+            order.as_entire_binding(),
+        ];
+        let entries: Vec<wgpu::BindGroupEntry> = resources
+            .into_iter()
+            .enumerate()
+            .map(|(binding, resource)| wgpu::BindGroupEntry {
+                binding: binding as u32,
+                resource,
+            })
+            .collect();
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("splat sort"),
+            layout: &self.layout,
+            entries: &entries,
+        });
+        (params, bind_group)
+    }
+
+    /// Sorts into the order `bind_group` holds, with its parameters already
+    /// written.
+    fn encode(&self, encoder: &mut wgpu::CommandEncoder, bind_group: &wgpu::BindGroup) {
+        encoder.clear_buffer(&self.counts, 0, None);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("splat sort"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, bind_group, &[]);
+        let [across, rows, _] = self.groups;
+        pass.set_pipeline(&self.depth_keys);
+        pass.dispatch_workgroups(across, rows, 1);
+        pass.set_pipeline(&self.prefix);
+        pass.dispatch_workgroups(1, 1, 1);
+        pass.set_pipeline(&self.place);
+        pass.dispatch_workgroups(across, rows, 1);
     }
 }
 
