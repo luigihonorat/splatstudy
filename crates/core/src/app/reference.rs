@@ -21,7 +21,7 @@ use crate::camera::OrbitCamera;
 use crate::input::FilePurpose;
 use crate::reference::load;
 use crate::reference::samples::Sample;
-use crate::reference::{Aabb, Alignment, Content, Credit, Reference, Source, UpAxis};
+use crate::reference::{Aabb, Alignment, Content, Credit, RefMesh, Reference, Source, UpAxis};
 use crate::render::Slot;
 use crate::render::clay::{ClayPass, GpuMesh, Look};
 use crate::render::splat::{SplatLook, SplatPass};
@@ -187,6 +187,13 @@ fn thin_scroll_bar() -> egui::style::ScrollStyle {
     }
 }
 
+/// Whether a mesh's vertex and index buffers fit the GPU's largest buffer.
+fn mesh_fits(limits: &wgpu::Limits, mesh: &RefMesh) -> bool {
+    let vertices = (mesh.positions.len() * size_of::<Vertex>()) as u64;
+    let indices = (mesh.triangles.len() * size_of::<[u32; 3]>()) as u64;
+    vertices.max(indices) <= limits.max_buffer_size
+}
+
 /// A mesh reference moved into the clay's space, with normals for shading.
 fn place_mesh(device: &wgpu::Device, r: &Reference) -> Drawn {
     let built_for = (r.align, r.crop);
@@ -274,6 +281,15 @@ impl App {
     /// Shows `reference` as it is placed, cropped and credited, replacing
     /// any other. Opening a scene restores its reference this way.
     pub(super) fn set_reference(&mut self, reference: Reference) {
+        // Larger buffers than the GPU allows would panic in wgpu: refuse
+        // the mesh and keep what was shown.
+        if let Content::Mesh(mesh) = &reference.content
+            && !mesh_fits(&self.device.limits(), mesh)
+        {
+            let tr = self.lang.tr();
+            let name = &reference.source.name;
+            return self.notify(format!("{name} — {}", tr.refs.mesh_too_large));
+        }
         self.remove_reference();
         let drawn = match &reference.content {
             Content::Splats(splats) => match SplatPass::new(&self.device, splats) {
@@ -782,6 +798,23 @@ fn crop_box(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meshes_must_fit_the_largest_buffer() {
+        let mesh = RefMesh {
+            positions: vec![Vec3::ZERO; 1000],
+            triangles: vec![[0, 1, 2]; 4000],
+            colors: None,
+        };
+        let limits = |max_buffer_size| wgpu::Limits {
+            max_buffer_size,
+            ..wgpu::Limits::default()
+        };
+        // 28 kB of vertices, 48 kB of indices.
+        assert!(mesh_fits(&limits(48_000), &mesh));
+        assert!(!mesh_fits(&limits(47_999), &mesh));
+        assert!(!mesh_fits(&limits(27_999), &mesh));
+    }
 
     #[test]
     fn crop_sliders_follow_the_up_axis() {

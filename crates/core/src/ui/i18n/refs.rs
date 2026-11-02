@@ -28,6 +28,8 @@ pub struct RefTr {
     pub source: &'static str,
     /// Notice when a file has more splats than the GPU can hold.
     pub thinned: &'static str,
+    /// Notice when a mesh is larger than the GPU's buffers.
+    pub mesh_too_large: &'static str,
 }
 
 pub const JA: RefTr = RefTr {
@@ -48,6 +50,7 @@ pub const JA: RefTr = RefTr {
     licence: "ライセンス",
     source: "出典",
     thinned: "スプラットが多いため、一部を間引いて表示しています",
+    mesh_too_large: "メッシュが大きすぎて、この GPU では表示できません",
 };
 
 pub const EN: RefTr = RefTr {
@@ -68,6 +71,7 @@ pub const EN: RefTr = RefTr {
     licence: "licence",
     source: "source",
     thinned: "too many splats for this GPU: showing part of them",
+    mesh_too_large: "this mesh is too large for this GPU",
 };
 
 pub const FR: RefTr = RefTr {
@@ -88,4 +92,5 @@ pub const FR: RefTr = RefTr {
     licence: "licence",
     source: "source",
     thinned: "trop de splats pour ce GPU : une partie seulement est affichée",
+    mesh_too_large: "ce maillage est trop grand pour ce GPU",
 };
