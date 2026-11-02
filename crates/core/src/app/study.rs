@@ -279,12 +279,14 @@ impl App {
         if menu::item(ui, tr.mirror_view, "R", self.study.mirror).clicked() {
             self.study.mirror = !self.study.mirror;
         }
+        ui.separator();
         if menu::item(ui, tr.silhouette, "K", self.study.silhouette).clicked() {
             self.study.silhouette = !self.study.silhouette;
         }
         if menu::item(ui, tr.ghost, "O", self.study.ghost).clicked() {
             self.study.ghost = !self.study.ghost;
         }
+        ui.separator();
         if menu::item(ui, tr.plumb_line, "V", self.study.plumb).clicked() {
             self.study.plumb = !self.study.plumb;
         }
@@ -301,6 +303,7 @@ impl App {
                 }
             }
         });
+        ui.separator();
         menu::submenu(ui, st.pose_timer, |ui| {
             ui.set_min_width(140.0);
             let now = self.now;
