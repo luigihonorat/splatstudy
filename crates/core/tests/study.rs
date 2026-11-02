@@ -93,11 +93,11 @@ fn the_silhouette_has_two_colours_only() {
     let ink = SILHOUETTE_INK.to_array();
     let bg = VIEW_BG.to_array();
     let (mut inked, mut edges) = (0, 0);
-    for p in data.chunks_exact(4) {
+    for p in data.as_chunks::<4>().0 {
         // The colour goes to linear and back: allow one step of rounding.
         if p.iter().zip(ink).all(|(a, b)| a.abs_diff(b) <= 1) {
             inked += 1;
-        } else if p != bg {
+        } else if *p != bg {
             // Multisampled edges mix the two: still grey, between them.
             assert!(p[0] == p[1] && p[1] == p[2] && p[0] < ink[0], "{p:?}");
             edges += 1;

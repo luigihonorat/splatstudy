@@ -472,7 +472,7 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, divisions: u32) {
         let y = (rect.top() + k as f32 * cell).round() + 0.5;
         painter.hline(rect.x_range(), y, stroke);
     }
-    let offset = if n % 2 == 0 { 0.0 } else { 0.5 };
+    let offset = if n.is_multiple_of(2) { 0.0 } else { 0.5 };
     let reach = (rect.width() / 2.0 / cell).ceil() as i32 + 1;
     for k in -reach..=reach {
         let x = rect.center().x + (k as f32 + offset) * cell;
