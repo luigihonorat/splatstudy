@@ -307,6 +307,11 @@ const LEVELS: [(u8, u32, u32, u32); 6] = [
 /// and hardware decoders that stop at 4.0 or 4.1 may refuse a 5.0 file
 /// without trying, so the level is put back where the stream really is.
 /// Only the level bytes change; the stream itself is the same.
+///
+/// The SPS is read to its end, so the frames the stream keeps for
+/// decoding (its reference frames, and the decoder buffering its VUI may
+/// declare) are checked against the lower level's buffer. An SPS that
+/// can't be read through to its last bit is left alone.
 pub fn lower_level(avcc: &mut [u8], width: u16, height: u16, fps: u32) -> Option<u8> {
     // avcC: version, profile, compatibility, level, length size, SPS count,
     // then the first SPS's length and bytes.
@@ -319,12 +324,12 @@ pub fn lower_level(avcc: &mut [u8], width: u16, height: u16, fps: u32) -> Option
     if sps.len() < 4 || sps[0] & 0x1F != 7 || sps[3] != avcc[3] {
         return None;
     }
-    let refs = max_num_ref_frames(sps)?;
+    let frames = buffered_frames(sps)?;
     let mbs = u32::from(width).div_ceil(16) * u32::from(height).div_ceil(16);
     let (level, ..) = LEVELS
         .iter()
         .copied()
-        .find(|&(_, fs, mbps, dpb)| mbs <= fs && mbs * fps <= mbps && mbs * refs.max(1) <= dpb)?;
+        .find(|&(_, fs, mbps, dpb)| mbs <= fs && mbs * fps <= mbps && mbs * frames <= dpb)?;
     if level >= avcc[3] {
         return None;
     }
@@ -333,9 +338,12 @@ pub fn lower_level(avcc: &mut [u8], width: u16, height: u16, fps: u32) -> Option
     Some(level)
 }
 
-/// Reads `max_num_ref_frames` from an SPS NAL unit (7.3.2.1.1); `None`
-/// when the SPS has scaling matrices or is cut short.
-fn max_num_ref_frames(sps: &[u8]) -> Option<u32> {
+/// How many frames the decoder must keep, from an SPS NAL unit
+/// (7.3.2.1.1): `max_num_ref_frames`, or the VUI's
+/// `max_dec_frame_buffering` (E.1.1) when it declares more, at least 1.
+/// `None` when the SPS has scaling matrices, is cut short, or doesn't end
+/// where its fields do: then it isn't understood well enough to relabel.
+fn buffered_frames(sps: &[u8]) -> Option<u32> {
     let mut b = BitReader::new(&sps[1..]);
     let profile = b.bits(8)?;
     b.bits(16)?; // constraint flags, level
@@ -366,7 +374,93 @@ fn max_num_ref_frames(sps: &[u8]) -> Option<u32> {
         }
         _ => {}
     }
-    b.ue()
+    let refs = b.ue()?; // max_num_ref_frames
+    b.bits(1)?; // gaps_in_frame_num_value_allowed_flag
+    b.ue()?; // pic_width_in_mbs_minus1
+    b.ue()?; // pic_height_in_map_units_minus1
+    if b.bits(1)? == 0 {
+        b.bits(1)?; // frame_mbs_only_flag off: mb_adaptive_frame_field_flag
+    }
+    b.bits(1)?; // direct_8x8_inference_flag
+    if b.bits(1)? == 1 {
+        for _ in 0..4 {
+            b.ue()?; // frame_crop_*_offset
+        }
+    }
+    let mut buffering = 0;
+    if b.bits(1)? == 1 {
+        buffering = vui_buffering(&mut b)?.unwrap_or(0);
+    }
+    // rbsp_trailing_bits: a one, then zeros to the end.
+    if b.bits(1)? != 1 || !b.rest_is_zero() {
+        return None;
+    }
+    Some(refs.max(buffering).max(1))
+}
+
+/// Reads `vui_parameters` (E.1.1) up to `max_dec_frame_buffering`, which
+/// it gives if the VUI has a `bitstream_restriction`.
+fn vui_buffering(b: &mut BitReader) -> Option<Option<u32>> {
+    if b.bits(1)? == 1 && b.bits(8)? == 255 {
+        b.bits(32)?; // aspect_ratio_idc Extended_SAR: sar_width, sar_height
+    }
+    if b.bits(1)? == 1 {
+        b.bits(1)?; // overscan_appropriate_flag
+    }
+    if b.bits(1)? == 1 {
+        b.bits(4)?; // video_format, video_full_range_flag
+        if b.bits(1)? == 1 {
+            b.bits(24)?; // colour_primaries, transfer, matrix_coefficients
+        }
+    }
+    if b.bits(1)? == 1 {
+        b.ue()?; // chroma_sample_loc_type_top_field
+        b.ue()?; // chroma_sample_loc_type_bottom_field
+    }
+    if b.bits(1)? == 1 {
+        b.bits(32)?; // num_units_in_tick
+        b.bits(32)?; // time_scale
+        b.bits(1)?; // fixed_frame_rate_flag
+    }
+    let nal_hrd = b.bits(1)? == 1;
+    if nal_hrd {
+        hrd_parameters(b)?;
+    }
+    let vcl_hrd = b.bits(1)? == 1;
+    if vcl_hrd {
+        hrd_parameters(b)?;
+    }
+    if nal_hrd || vcl_hrd {
+        b.bits(1)?; // low_delay_hrd_flag
+    }
+    b.bits(1)?; // pic_struct_present_flag
+    if b.bits(1)? == 0 {
+        return Some(None); // no bitstream_restriction
+    }
+    b.bits(1)?; // motion_vectors_over_pic_boundaries_flag
+    for _ in 0..4 {
+        b.ue()?; // max_bytes_per_pic_denom … log2_max_mv_length_vertical
+    }
+    let reorder = b.ue()?; // max_num_reorder_frames
+    let buffering = b.ue()?; // max_dec_frame_buffering
+    // Reordering happens inside the buffer: more is not a valid SPS.
+    (reorder <= buffering && buffering <= 16).then_some(Some(buffering))
+}
+
+/// Skips `hrd_parameters` (E.1.2).
+fn hrd_parameters(b: &mut BitReader) -> Option<()> {
+    let cpbs = b.ue()?; // cpb_cnt_minus1
+    if cpbs > 31 {
+        return None;
+    }
+    b.bits(8)?; // bit_rate_scale, cpb_size_scale
+    for _ in 0..=cpbs {
+        b.ue()?; // bit_rate_value_minus1
+        b.ue()?; // cpb_size_value_minus1
+        b.bits(1)?; // cbr_flag
+    }
+    b.bits(20)?; // four delay and offset lengths
+    Some(())
 }
 
 /// Reads an H.264 RBSP bit by bit, dropping emulation prevention bytes.
@@ -408,6 +502,18 @@ impl<'a> BitReader<'a> {
 
     fn bits(&mut self, n: u32) -> Option<u32> {
         (0..n).try_fold(0, |v, _| Some((v << 1) | self.bit()?))
+    }
+
+    /// Only zero bits are left.
+    fn rest_is_zero(&mut self) -> bool {
+        while self.bit != 0 {
+            if self.bit() != Some(0) {
+                return false;
+            }
+        }
+        self.data[self.byte.min(self.data.len())..]
+            .iter()
+            .all(|&b| b == 0)
     }
 
     /// An unsigned Exp-Golomb number.
@@ -710,7 +816,7 @@ pub(crate) mod tests {
     #[test]
     fn the_level_comes_down_to_what_the_stream_needs() {
         let original = unhex(EDGE_AVCC);
-        assert_eq!(max_num_ref_frames(&original[8..8 + 25]), Some(1));
+        assert_eq!(buffered_frames(&original[8..8 + 25]), Some(1));
         let mut avcc = original.clone();
         assert_eq!(lower_level(&mut avcc, 1920, 1080, 30), Some(40));
         assert_eq!((avcc[3], avcc[8 + 3]), (40, 40), "the record and its SPS");
@@ -741,6 +847,132 @@ pub(crate) mod tests {
         assert_eq!(lower_level(&mut odd, 1920, 1080, 30), None);
         let mut fake = vec![1, 0x64, 0, 0x28, 0xFF, 0xE1, 0, 0, 1, 0, 0];
         assert_eq!(lower_level(&mut fake, 1920, 1080, 30), None);
+    }
+
+    /// Writes an H.264 RBSP bit by bit.
+    #[derive(Default)]
+    struct BitWriter {
+        bytes: Vec<u8>,
+        bits: u32,
+    }
+
+    impl BitWriter {
+        fn bits(&mut self, n: u32, v: u32) -> &mut Self {
+            for i in (0..n).rev() {
+                if self.bits.is_multiple_of(8) {
+                    self.bytes.push(0);
+                }
+                *self.bytes.last_mut().unwrap() |= (((v >> i) & 1) as u8) << (7 - self.bits % 8);
+                self.bits += 1;
+            }
+            self
+        }
+
+        fn ue(&mut self, v: u32) -> &mut Self {
+            let n = 32 - (v + 1).leading_zeros();
+            self.bits(n - 1, 0).bits(n, v + 1)
+        }
+
+        /// The trailing bits, then the NAL unit with emulation prevention.
+        fn nal(mut self) -> Vec<u8> {
+            self.bits(1, 1);
+            let mut out = vec![0x67];
+            let mut zeros = 0;
+            for b in self.bytes {
+                if zeros >= 2 && b <= 3 {
+                    out.push(3);
+                    zeros = 0;
+                }
+                out.push(b);
+                zeros = if b == 0 { zeros + 1 } else { 0 };
+            }
+            out
+        }
+    }
+
+    /// A 1080p High-profile SPS at level 5.0 with a full VUI: colour,
+    /// timing, NAL HRD and a bitstream restriction declaring `buffering`
+    /// frames (and as many reordered), or none.
+    fn sps(buffering: Option<u32>) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.bits(8, 100).bits(8, 0).bits(8, 50).ue(0); // profile, flags, level, id
+        w.ue(1).ue(0).ue(0).bits(1, 0).bits(1, 0); // 4:2:0, 8 bits, no matrices
+        w.ue(0).ue(2); // frame_num bits, POC type 2
+        w.ue(1).bits(1, 0); // one reference frame, no gaps
+        w.ue(119).ue(67).bits(1, 1).bits(1, 1); // 120 × 68 MBs, frames, 8x8
+        w.bits(1, 1).ue(0).ue(0).ue(0).ue(4); // cropped to 1080
+        w.bits(1, 1); // VUI
+        w.bits(1, 1).bits(8, 255).bits(16, 1).bits(16, 1); // square pixels
+        w.bits(1, 0); // overscan
+        w.bits(1, 1)
+            .bits(3, 5)
+            .bits(1, 0)
+            .bits(1, 1)
+            .bits(24, 0x01_01_01);
+        w.bits(1, 1).ue(0).ue(0); // chroma location
+        w.bits(1, 1).bits(32, 1).bits(32, 60).bits(1, 1); // 30 fps
+        w.bits(1, 1).ue(1).bits(4, 0).bits(4, 0); // NAL HRD, two CPBs
+        for _ in 0..2 {
+            w.ue(2_000_000).ue(4_000_000).bits(1, 0);
+        }
+        w.bits(5, 23).bits(5, 23).bits(5, 23).bits(5, 24);
+        w.bits(1, 0).bits(1, 0).bits(1, 0); // no VCL HRD, low delay, pic_struct
+        match buffering {
+            Some(n) => {
+                w.bits(1, 1)
+                    .bits(1, 1)
+                    .ue(2)
+                    .ue(1)
+                    .ue(16)
+                    .ue(16)
+                    .ue(n)
+                    .ue(n);
+            }
+            None => {
+                w.bits(1, 0);
+            }
+        }
+        w.nal()
+    }
+
+    /// An avcC record holding `sps`, at the level it announces.
+    fn avcc(sps: &[u8]) -> Vec<u8> {
+        let mut a = vec![1, sps[1], sps[2], sps[3], 0xFF, 0xE1];
+        a.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        a.extend_from_slice(sps);
+        a.extend_from_slice(&[1, 0, 4, 0x68, 0xEE, 0x3C, 0xB0]);
+        a
+    }
+
+    #[test]
+    fn the_vui_decoder_buffering_counts_against_the_lower_level() {
+        let level = |buffering| lower_level(&mut avcc(&sps(buffering)), 1920, 1080, 30);
+        assert_eq!(buffered_frames(&sps(Some(3))), Some(3));
+        // 4.0 holds four 1080p frames: up to that, it comes down to 4.0.
+        assert_eq!(level(None), Some(40));
+        assert_eq!(level(Some(1)), Some(40));
+        assert_eq!(level(Some(4)), Some(40));
+        // Five need 5.0, which it already says.
+        assert_eq!(level(Some(5)), None);
+        // At 60 fps, 4.2 holds four too.
+        let mut fast = avcc(&sps(Some(4)));
+        assert_eq!(lower_level(&mut fast, 1920, 1080, 60), Some(42));
+
+        // Not read to its exact end: left alone.
+        let mut longer = sps(Some(1));
+        longer.push(0x80);
+        assert_eq!(buffered_frames(&longer), None);
+        assert_eq!(lower_level(&mut avcc(&longer), 1920, 1080, 30), None);
+        let mut shorter = sps(Some(1));
+        shorter.pop();
+        assert_eq!(lower_level(&mut avcc(&shorter), 1920, 1080, 30), None);
+        // A trailing zero byte after the stop bit is still the end.
+        let mut padded = sps(Some(1));
+        padded.push(0);
+        assert_eq!(buffered_frames(&padded), Some(1));
+        for len in 1..sps(Some(4)).len() {
+            assert_eq!(buffered_frames(&sps(Some(4))[..len]), None, "{len}");
+        }
     }
 
     #[test]
