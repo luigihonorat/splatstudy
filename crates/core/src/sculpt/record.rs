@@ -138,6 +138,9 @@ impl Checkpoint {
                     if t.iter().any(|&v| v as usize >= n) {
                         return Err(r.invalid("a triangle corner that isn't a vertex"));
                     }
+                    if t[0] == t[1] || t[1] == t[2] || t[2] == t[0] {
+                        return Err(r.invalid("a triangle with a corner twice"));
+                    }
                     triangles.push(t);
                 }
                 Some(triangles.into())
@@ -753,6 +756,17 @@ mod tests {
         let mut replay = Replay::of(&again);
         assert!(replay.seek(f64::INFINITY, usize::MAX));
         assert_same(&replay, &again);
+    }
+
+    #[test]
+    fn a_checkpoint_with_a_triangle_corner_twice_is_refused() {
+        let mut bad = Checkpoint::of(&Mesh::icosphere(1), 0, 0.0, true);
+        let mut triangles = bad.triangles.as_deref().unwrap().to_vec();
+        triangles[5][2] = triangles[5][0];
+        bad.triangles = Some(triangles.into());
+        let mut w = Writer::new();
+        bad.write(&mut w);
+        assert!(Checkpoint::read(&mut Reader::new(&w.finish())).is_err());
     }
 
     #[test]

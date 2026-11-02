@@ -385,8 +385,9 @@ fn write_mesh(w: &mut Writer, mesh: &Mesh) {
     }
 }
 
-/// Reads a mesh in its saved order, refusing indices out of range (which
-/// would panic later) and empty meshes (nothing to sculpt).
+/// Reads a mesh in its saved order, refusing indices out of range and
+/// triangles with a corner twice (either would panic later), and empty
+/// meshes (nothing to sculpt).
 fn read_mesh(r: &mut Reader) -> Result<Mesh, ReadError> {
     let n = r.len(12)?;
     if n > MAX_VERTICES {
@@ -409,6 +410,9 @@ fn read_mesh(r: &mut Reader) -> Result<Mesh, ReadError> {
         let t = [r.u32()?, r.u32()?, r.u32()?];
         if t.iter().any(|&i| i as usize >= n) {
             return Err(r.invalid("a triangle with a vertex that isn't there"));
+        }
+        if t[0] == t[1] || t[1] == t[2] || t[2] == t[0] {
+            return Err(r.invalid("a triangle with a corner twice"));
         }
         triangles.push(t);
     }
@@ -771,6 +775,16 @@ mod tests {
             w.vec3(p);
         }
         w.len(1).u32(0).u32(1).u32(3);
+        let mut scene = SceneWriter::new();
+        scene.chunk(MESH, false, &w.finish());
+        assert!(Scene::read(&scene.finish()).is_err());
+        // A triangle with a corner twice: subdividing it would panic.
+        let mut w = Writer::new();
+        w.len(3);
+        for p in [Vec3::ZERO, Vec3::X, Vec3::Y] {
+            w.vec3(p);
+        }
+        w.len(2).u32(0).u32(1).u32(2).u32(0).u32(2).u32(2);
         let mut scene = SceneWriter::new();
         scene.chunk(MESH, false, &w.finish());
         assert!(Scene::read(&scene.finish()).is_err());

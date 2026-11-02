@@ -35,14 +35,15 @@ pub fn subdivide(mesh: &Mesh) -> Mesh {
     positions.reserve(edge_count(mesh));
     // The new vertex of each edge, stored at the edge's place in the
     // neighbour list of its lower vertex.
-    let slot = |a: u32, b: u32| -> usize {
+    // `None` for a pair that isn't an edge: a vertex with itself, in a
+    // triangle with a corner twice.
+    let slot = |a: u32, b: u32| -> Option<usize> {
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-        let at = mesh.neighbours.of(lo).iter().position(|&u| u == hi);
-        mesh.neighbours.start(lo) + at.expect("an edge of the mesh")
+        let at = mesh.neighbours.of(lo).iter().position(|&u| u == hi)?;
+        Some(mesh.neighbours.start(lo) + at)
     };
     let mut middle = vec![u32::MAX; mesh.neighbours.len()];
-    let mut midpoint = |a: u32, b: u32, positions: &mut Vec<Vec3>| -> u32 {
-        let s = slot(a, b);
+    let mut midpoint = |s: usize, a: u32, b: u32, positions: &mut Vec<Vec3>| -> u32 {
         if middle[s] == u32::MAX {
             middle[s] = positions.len() as u32;
             positions.push(eased_midpoint(mesh, a, b));
@@ -51,9 +52,13 @@ pub fn subdivide(mesh: &Mesh) -> Mesh {
     };
     let mut triangles = Vec::with_capacity(mesh.triangles.len() * 4);
     for &[a, b, c] in &mesh.triangles {
-        let ab = midpoint(a, b, &mut positions);
-        let bc = midpoint(b, c, &mut positions);
-        let ca = midpoint(c, a, &mut positions);
+        // A triangle with no area has nothing to split: it is left out.
+        let (Some(sab), Some(sbc), Some(sca)) = (slot(a, b), slot(b, c), slot(c, a)) else {
+            continue;
+        };
+        let ab = midpoint(sab, a, b, &mut positions);
+        let bc = midpoint(sbc, b, c, &mut positions);
+        let ca = midpoint(sca, c, a, &mut positions);
         triangles.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
     }
     Mesh::new(positions, triangles)
@@ -117,6 +122,20 @@ mod tests {
             .map(|p| (p.length() - 1.0).abs())
             .fold(0.0, f32::max);
         assert!(worst < 0.003, "{worst}");
+    }
+
+    #[test]
+    fn a_triangle_with_a_corner_twice_is_left_out_not_a_panic() {
+        let positions = vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
+        let mesh = Mesh::from_ordered(positions, vec![[0, 1, 2], [0, 2, 1], [3, 3, 1]]);
+        let fine = subdivide(&mesh);
+        assert_eq!(fine.triangles.len(), 8);
+        assert!(
+            fine.triangles
+                .iter()
+                .flatten()
+                .all(|&v| (v as usize) < fine.positions.len())
+        );
     }
 
     #[test]
