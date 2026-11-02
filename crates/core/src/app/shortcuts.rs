@@ -92,9 +92,12 @@ impl App {
                     (tr.study.swap_sides, "W"),
                     (tr.mirror_view, "R"),
                     (tr.silhouette, "K"),
+                    (tr.study.difference, "Shift+K"),
                     (tr.ghost, "O"),
                     (tr.plumb_line, "V"),
                     (tr.grid, "G"),
+                    (tr.study.measure, "D"),
+                    (tr.study.lighting, "B"),
                     (tr.mesh.remesh, "Shift+R"),
                 ] {
                     rows.push((label, key.to_owned()));
