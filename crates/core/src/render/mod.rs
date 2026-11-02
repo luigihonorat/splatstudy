@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception
+// SPDX-FileCopyrightText: 2026 The SplatStudy contributors
+// SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! GPU side. Each 3D view renders into its own texture, which the interface
 //! shows as an image. That keeps the panels simple, lets tests read pixels
 //! back, and leaves room for rendering more views (stereo, later).

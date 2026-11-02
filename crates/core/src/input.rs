@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception
+// SPDX-FileCopyrightText: 2026 The SplatStudy contributors
+// SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Platform-neutral input, modelled on the web's Pointer Events. Both shells
 //! translate into these types; the core turns them into egui input and keeps
 //! the raw pen samples (with pressure) for sculpting.

@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception
+// SPDX-FileCopyrightText: 2026 The SplatStudy contributors
+// SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! UI strings for every language. Each language is one `Tr` value, so a
 //! missing string is a compile error. Japanese is the primary language.
 //!

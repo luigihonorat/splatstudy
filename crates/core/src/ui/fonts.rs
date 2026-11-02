@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception
+// SPDX-FileCopyrightText: 2026 The SplatStudy contributors
+// SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Barlow for Latin text with Noto Sans JP as its fallback, both OFL. The
 //! files are subsets made by `assets/fonts/subset.py`; Noto Sans JP is one
 //! variable font used at two weights.

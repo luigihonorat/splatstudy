@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception
+// SPDX-FileCopyrightText: 2026 The SplatStudy contributors
+// SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! The browser shell: a full-window canvas, WebGPU through wgpu, and the DOM's
 //! Pointer Events (with pen pressure) translated into core input events.
 

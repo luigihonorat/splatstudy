@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception
+// SPDX-FileCopyrightText: 2026 The SplatStudy contributors
+// SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! The desktop shell: an SDL3 window (SDL has pen pressure on Windows, macOS
 //! and Linux), a wgpu surface, and SDL events translated into core input.
 //! Everything SDL-specific lives in this file, so a later move to winit only

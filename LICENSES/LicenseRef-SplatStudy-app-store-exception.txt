@@ -1,0 +1,29 @@
+SplatStudy App Store Exception
+SPDX-License-Identifier: LicenseRef-SplatStudy-app-store-exception
+
+Additional permission under GNU GPL version 3 section 7
+
+SplatStudy is licensed under the GNU General Public License, version 3 or
+(at your option) any later version. As an additional permission under
+section 7 of that licence, the copyright holders of SplatStudy give you
+permission to convey a covered work, or a work based on it, through an
+application store or similar distribution service (for example Apple's
+App Store, Google Play or Microsoft Store) under that service's terms,
+even where those terms, or the technical measures of that service, place
+restrictions on recipients that would otherwise conflict with sections 6
+or 10 of the GNU General Public License, provided that:
+
+  1. the Corresponding Source of the work you convey is available to every
+     recipient under the GNU General Public License, at no charge, from a
+     place named in the store listing or inside the application; and
+
+  2. the only extra restrictions are those imposed by the store's terms or
+     its distribution mechanism; you add none of your own.
+
+If you modify SplatStudy, you may extend this permission to your version,
+but you are not obliged to. If you do not wish to, delete this permission
+from your version.
+
+This permission covers only the code whose copyright holders have released
+it under these terms. It does not cover third-party code under other
+licences.

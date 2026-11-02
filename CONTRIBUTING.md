@@ -10,6 +10,7 @@ splatstudy は **Built with Claude: Japan 2026** の参加作品です。審査�
 - **DCO：** すべてのコミットに `Signed-off-by: 名前 <メール>` を付けてください（`git commit -s`）。これは [Developer Certificate of Origin](https://developercertificate.org/) に同意し、そのコードを提供する権利があることを示します。CLA はありません。
 - **依存関係：** 追加するクレートは寛容なライセンス（MIT、Apache-2.0、BSD、zlib など）に限ります。GPL のクレートを入れるとアプリストア例外が使えなくなるためです。
 - **素材：** 権利のはっきりしたもの（CC0、CC BY など）だけ。出典を書いてください。
+- **ファイルの先頭：** [REUSE](https://reuse.software/) の SPDX ヘッダー（`SPDX-FileCopyrightText` と `SPDX-License-Identifier`）を付けてください。CI が確認します。
 - **AI の利用：** AI に手伝ってもらったコードも歓迎します。コミットに `Co-Authored-By:` で明記してください。
 - **個人情報：** コミットには GitHub の noreply アドレスを使うことをおすすめします。
 
@@ -25,5 +26,6 @@ splatstudy is an entry in **Built with Claude: Japan 2026**, which requires all 
 - **DCO:** sign off every commit (`git commit -s`), certifying the [Developer Certificate of Origin](https://developercertificate.org/). No CLA.
 - **Dependencies:** permissively licensed crates only (MIT, Apache-2.0, BSD, zlib…). A GPL dependency would make the app store exception unusable.
 - **Assets:** only material with clear rights (CC0, CC BY…), with its source.
+- **File headers:** [REUSE](https://reuse.software/) SPDX headers (`SPDX-FileCopyrightText`, `SPDX-License-Identifier`); CI checks them.
 - **AI assistance:** welcome; say so with a `Co-Authored-By:` trailer.
 - **Privacy:** consider committing with your GitHub noreply address.

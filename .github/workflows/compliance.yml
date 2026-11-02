@@ -1,0 +1,46 @@
+# Licensing and contribution checks:
+#   reuse  every file states its licence and copyright (REUSE 3.3)
+#   deny   every dependency is permissively licensed (keeps the app store exception usable)
+#   dco    every commit in a pull request is signed off (git commit -s)
+
+name: compliance
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  reuse:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5
+
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Every commit is signed off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for c in $(git rev-list "$BASE..$HEAD"); do
+            if ! git log -1 --format=%B "$c" | grep -q '^Signed-off-by: '; then
+              echo "::error::$(git log -1 --format='%h %s' "$c") has no Signed-off-by line (use git commit -s)"
+              missing=1
+            fi
+          done
+          exit $missing

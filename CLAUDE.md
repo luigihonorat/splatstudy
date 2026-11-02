@@ -36,8 +36,10 @@ cargo build -p splatstudy-native     # デスクトップ版（SDL3 をソース
 
 ## 規約
 
-- すべてのソースファイルの先頭に SPDX ヘッダー：
-  `SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception`
+- すべてのソースファイルの先頭に REUSE の SPDX ヘッダー（コメントを書けないファイルは `REUSE.toml`）：
+  `SPDX-FileCopyrightText: 2026 The SplatStudy contributors`
+  `SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception`
+- 依存クレートを追加したら `cargo deny check licenses`（GPL 系は不可）。
 - UI の文字列はすべて `crates/core/src/ui/i18n.rs`（日本語・英語・フランス語）。日本語を変えたら `crates/core/assets/fonts/subset.py` でフォントを作り直す。
 - デザインは thevirtualform.com に合わせる：モノクロ、1px の線、箱を使わない、選択中は文字色と 1px の下線。色は `ui/theme.rs` のトークンだけを使う。
 - 彫刻ビューでは左ドラッグ＝彫る。視点操作は Alt / Space ＋ドラッグ（Houdini 式）。

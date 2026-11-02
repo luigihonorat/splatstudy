@@ -42,7 +42,9 @@ cargo run -p splatstudy-native --release   # デスクトップ版（CMake が�
 
 ## ライセンス
 
-GPL-3.0-or-later に、アプリストアで配布するための追加許可（[`LICENSE-EXCEPTION`](LICENSE-EXCEPTION)）を付けています。フォント（Barlow、Noto Sans JP）は SIL Open Font License です。
+GPL-3.0-or-later に、アプリストアで配布するための追加許可（[`LICENSE-EXCEPTION`](LICENSE-EXCEPTION)）を付けています。フォント（Barlow、Noto Sans JP）は SIL Open Font License です。すべてのファイルのライセンスは [REUSE](https://reuse.software/) 形式で書かれています（[`LICENSES/`](LICENSES)）。
+
+参加のしかたは [`CONTRIBUTING.md`](CONTRIBUTING.md)、脆弱性の報告は [`SECURITY.md`](SECURITY.md) を見てください。
 
 ---
 

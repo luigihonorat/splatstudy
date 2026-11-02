@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception
+# SPDX-FileCopyrightText: 2026 The SplatStudy contributors
+# SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 # PreToolUse hook: keeps Claude Code inside this project during the hackathon.
 # Built with Claude Japan 2026 requires every line to be written during the
 # event, so earlier prototypes in sibling folders must never be read.
