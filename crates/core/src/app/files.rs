@@ -14,14 +14,12 @@ use crate::input::FilePurpose;
 use crate::reference::Reference;
 use crate::reference::load;
 use crate::render::clay::GpuMesh;
-use crate::scene::{self, SavedReference, Scene, SceneWriter, StudyView, View};
-use crate::sculpt::{Mesh, Sculpt};
+use crate::scene::{SavedReference, Scene, SceneWriter, StudyView, View};
+use crate::sculpt::Sculpt;
 use crate::ui::menu;
 
 /// Scene files' extension.
 pub(super) const SCENE_EXTENSION: &str = "splatstudy";
-/// Sculpts that can be imported (lowercase, no dot).
-const SCULPT_EXTENSIONS: &[&str] = &["obj", "stl"];
 /// Scenes download as plain bytes; no browser knows the type.
 const SCENE_MIME: &str = "application/octet-stream";
 
@@ -32,9 +30,6 @@ pub(super) struct FileState {
     name: Option<String>,
     /// The file as last opened or saved, for revert.
     saved: Option<Arc<[u8]>>,
-    /// The mesh the session started from, kept so saving needn't build the
-    /// start sphere again. Filled on the first save or by opening a scene.
-    start: Option<Mesh>,
 }
 
 /// A file name's extension, lowercase, without the dot.
@@ -95,17 +90,18 @@ impl App {
             reference,
             view,
         } = scene;
-        let start = checkpoints
-            .into_iter()
-            .next()
-            .filter(|c| c.log_index == 0)
-            .map_or_else(start_mesh, |c| c.mesh);
+        // The timelapse needs the clay the log starts from; without it the
+        // replay would start from the default sphere.
+        let complete = log.is_empty()
+            || checkpoints
+                .first()
+                .is_some_and(|c| c.log_index == 0 && c.triangles.is_some());
 
         self.cancel_export();
         self.playback = None;
         self.drags = [None; 2];
-        let (sculpt, complete) = scene::resume_sculpt(start.clone(), mesh, &log);
-        self.sculpt = sculpt;
+        self.sculpt = Sculpt::with_history(mesh, log, checkpoints);
+        self.sculpt.take_topology_changed();
         self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
         if let Some(view) = view {
             self.cameras = view.cameras;
@@ -121,20 +117,18 @@ impl App {
         self.files = FileState {
             name: Some(name.to_owned()),
             saved: Some(bytes),
-            start: Some(start),
         };
         if !complete {
             self.notify(self.lang.tr().files.timelapse_lost);
         }
     }
 
-    /// The scene as a file: the clay, where the session started, the
-    /// session, the reference and the views.
-    fn scene_bytes(&mut self) -> Vec<u8> {
-        let start = self.files.start.get_or_insert_with(start_mesh);
+    /// The scene as a file: the clay, its checkpoints (the first is where
+    /// the session started), the session, the reference and the views.
+    fn scene_bytes(&self) -> Vec<u8> {
         let mut w = SceneWriter::new();
         w.mesh(&self.sculpt.mesh)
-            .checkpoints(&[(0, 0.0, start)])
+            .checkpoints(self.sculpt.checkpoints())
             .log(self.sculpt.log());
         if let Some(reference) = self.scene_reference() {
             w.reference(reference);
@@ -161,11 +155,6 @@ impl App {
             mime: SCENE_MIME,
             bytes,
         });
-    }
-
-    /// The mesh the recorded session starts from, for replaying it.
-    pub(super) fn session_start(&mut self) -> Mesh {
-        self.files.start.get_or_insert_with(start_mesh).clone()
     }
 
     /// The scene's file name without its extension, for naming exports.
@@ -288,10 +277,7 @@ impl App {
             });
         }
         if menu::action(ui, true, tr.import_sculpt, "") {
-            self.request(Request::OpenFile {
-                purpose: FilePurpose::Sculpt,
-                extensions: SCULPT_EXTENSIONS,
-            });
+            self.ask_import_sculpt();
         }
     }
 

@@ -271,8 +271,15 @@ impl Job {
         };
         self.replay.seek(time, usize::MAX);
         let sculpt = &mut self.replay.sculpt;
-        for range in sculpt.take_dirty() {
-            self.gpu_mesh.write(gpu.queue, &sculpt.mesh, range);
+        if sculpt.take_topology_changed() {
+            // A checkpoint with other triangles: the index buffer can't be
+            // updated in place.
+            self.gpu_mesh = GpuMesh::new(gpu.device, &sculpt.mesh);
+            sculpt.take_dirty();
+        } else {
+            for range in sculpt.take_dirty() {
+                self.gpu_mesh.write(gpu.queue, &sculpt.mesh, range);
+            }
         }
 
         let mut encoder = gpu.device.create_command_encoder(&Default::default());

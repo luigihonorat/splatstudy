@@ -11,23 +11,24 @@
 //! newer files still open, minus what is new.
 //!
 //! - `MESH`: the clay as it is now, in its own vertex order.
-//! - `CKPT`: the meshes the log starts from; the first one, at log index 0,
-//!   is where the timelapse begins.
-//! - `LOG_`: every recorded call, see [`log`].
+//! - `CKPT`: the clay's checkpoints; the first, at log index 0, is where
+//!   the timelapse begins (see [`Checkpoint`]).
+//! - `LOG_`: every recorded call (see [`Entry`]).
 //! - `REF_`: the reference file, kept whole, with its placement and credit.
 //! - `VIEW`: the cameras, the divider and the study aids that were on.
 //!
+//! The log and checkpoints use the encodings next to their types, in
+//! `sculpt::record`, so whoever adds an event also adds how it is saved.
+//!
 //! Reading returns a [`ReadError`] for anything malformed; it never panics.
 
-pub mod log;
 pub mod reference;
-
-use glam::Vec3;
 
 use crate::camera::OrbitCamera;
 use crate::io::{ReadError, Reader, Writer};
 use crate::reference::Reference;
-use crate::sculpt::{Entry, Mesh, Sculpt};
+use crate::sculpt::record::{read_checkpoints, read_log, write_checkpoints, write_log};
+use crate::sculpt::{Checkpoint, Entry, Mesh};
 
 pub use reference::SavedReference;
 
@@ -57,21 +58,11 @@ const MAX_INFLATED: usize = 1 << 30;
 pub struct Scene {
     /// The clay as it was saved.
     pub mesh: Mesh,
-    /// Where the log starts from, in log order; may be empty in a file
-    /// without a log.
+    /// The clay at points of the log; the first is where it starts.
     pub checkpoints: Vec<Checkpoint>,
     pub log: Vec<Entry>,
     pub reference: Option<SavedReference>,
     pub view: Option<View>,
-}
-
-/// A mesh the log continues from: before `log_index` entries had been
-/// applied, the clay was `mesh`.
-pub struct Checkpoint {
-    pub log_index: usize,
-    /// On the app's clock, in seconds.
-    pub time: f64,
-    pub mesh: Mesh,
 }
 
 /// How the two views were looking.
@@ -143,21 +134,16 @@ impl SceneWriter {
         self.chunk(MESH, true, &w.finish())
     }
 
-    /// The meshes the log starts from: `(log index, time, mesh)`, the first
-    /// at index 0.
-    pub fn checkpoints(&mut self, checkpoints: &[(usize, f64, &Mesh)]) -> &mut Self {
+    /// The clay's checkpoints, the first being the start of the log.
+    pub fn checkpoints(&mut self, checkpoints: &[Checkpoint]) -> &mut Self {
         let mut w = Writer::new();
-        w.len(checkpoints.len());
-        for &(index, time, mesh) in checkpoints {
-            w.u64(index as u64).f64(time);
-            write_mesh(&mut w, mesh);
-        }
+        write_checkpoints(&mut w, checkpoints);
         self.chunk(CHECKPOINTS, true, &w.finish())
     }
 
     pub fn log(&mut self, entries: &[Entry]) -> &mut Self {
         let mut w = Writer::new();
-        log::write_entries(&mut w, entries);
+        write_log(&mut w, entries);
         self.chunk(LOG, true, &w.finish())
     }
 
@@ -259,7 +245,7 @@ impl Scene {
             match chunk.tag {
                 MESH => mesh = Some(read_mesh(&mut r)?),
                 CHECKPOINTS => checkpoints = read_checkpoints(&mut r)?,
-                LOG => log = log::read_entries(&mut r)?,
+                LOG => log = read_log(&mut r)?,
                 REFERENCE => reference = Some(reference::read_reference(&mut r)?),
                 VIEW => view = Some(read_view(&mut r)?),
                 _ => {}
@@ -269,15 +255,6 @@ impl Scene {
             offset: data.len(),
             what: "a scene without clay",
         })?;
-        if checkpoints
-            .iter()
-            .any(|c: &Checkpoint| c.log_index > log.len())
-        {
-            return Err(ReadError::Invalid {
-                offset: data.len(),
-                what: "a checkpoint past the end of the log",
-            });
-        }
         Ok(Scene {
             mesh,
             checkpoints,
@@ -286,44 +263,6 @@ impl Scene {
             view,
         })
     }
-
-    /// The mesh the log starts from, if the file has one.
-    pub fn start(&self) -> Option<&Mesh> {
-        self.checkpoints
-            .first()
-            .filter(|c| c.log_index == 0)
-            .map(|c| &c.mesh)
-    }
-}
-
-/// The live sculpt for a scene that was saved as `saved` after `log` was
-/// applied to `start`: the log is applied again, so the new sculpt has the
-/// session's undo steps and goes on recording after it, and the timelapse
-/// covers both. True when that gave the saved clay bit for bit.
-///
-/// If it doesn't (a scene from a version whose brushes worked differently),
-/// the saved clay wins and the session starts afresh from it: false.
-pub fn resume_sculpt(start: Mesh, saved: Mesh, log: &[Entry]) -> (Sculpt, bool) {
-    if log.is_empty() {
-        return (Sculpt::new(saved), true);
-    }
-    if start.triangles == saved.triangles {
-        let mut sculpt = Sculpt::new(start);
-        for entry in log {
-            sculpt.set_clock(entry.time);
-            sculpt.apply(entry.event);
-        }
-        let same = |a: &[Vec3], b: &[Vec3]| {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b)
-                    .all(|(p, q)| p.to_array().map(f32::to_bits) == q.to_array().map(f32::to_bits))
-        };
-        if same(&sculpt.mesh.positions, &saved.positions) {
-            return (sculpt, true);
-        }
-    }
-    (Sculpt::new(saved), false)
 }
 
 fn write_mesh(w: &mut Writer, mesh: &Mesh) {
@@ -362,25 +301,6 @@ fn read_mesh(r: &mut Reader) -> Result<Mesh, ReadError> {
         return Err(r.invalid("a mesh without triangles"));
     }
     Ok(Mesh::from_ordered(positions, triangles))
-}
-
-fn read_checkpoints(r: &mut Reader) -> Result<Vec<Checkpoint>, ReadError> {
-    let n = r.len(16)?;
-    let mut checkpoints: Vec<Checkpoint> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let log_index = usize::try_from(r.u64()?).map_err(|_| r.invalid("a checkpoint index"))?;
-        let time = r.f64()?;
-        let mesh = read_mesh(r)?;
-        if checkpoints.last().is_some_and(|c| c.log_index > log_index) {
-            return Err(r.invalid("checkpoints out of order"));
-        }
-        checkpoints.push(Checkpoint {
-            log_index,
-            time,
-            mesh,
-        });
-    }
-    Ok(checkpoints)
 }
 
 fn read_view(r: &mut Reader) -> Result<View, ReadError> {
@@ -447,7 +367,7 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
 
 /// Vertex positions as bytes, for comparing meshes bit for bit.
 #[cfg(test)]
-pub(crate) fn position_bits(positions: &[Vec3]) -> Vec<u32> {
+pub(crate) fn position_bits(positions: &[glam::Vec3]) -> Vec<u32> {
     positions
         .iter()
         .flat_map(|p| p.to_array().map(f32::to_bits))
@@ -456,13 +376,14 @@ pub(crate) fn position_bits(positions: &[Vec3]) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
+    use glam::Vec3;
+
     use super::*;
-    use crate::sculpt::{Brush, Dab};
+    use crate::sculpt::{Brush, Dab, Replay, Sculpt};
 
     /// A short session on a small sphere: a few strokes, an undo.
-    fn session() -> (Mesh, Sculpt) {
-        let start = Mesh::icosphere(3);
-        let mut s = Sculpt::new(start.clone());
+    fn session() -> Sculpt {
+        let mut s = Sculpt::new(Mesh::icosphere(3));
         for k in 0..3 {
             s.set_clock(1.0 + k as f64);
             s.begin_stroke();
@@ -481,13 +402,13 @@ mod tests {
             s.end_stroke();
         }
         s.undo();
-        (start, s)
+        s
     }
 
-    fn save(start: &Mesh, s: &Sculpt, view: &View) -> Vec<u8> {
+    fn save(s: &Sculpt, view: &View) -> Vec<u8> {
         let mut w = SceneWriter::new();
         w.mesh(&s.mesh)
-            .checkpoints(&[(0, 0.0, start)])
+            .checkpoints(s.checkpoints())
             .log(s.log())
             .view(view);
         w.finish()
@@ -517,9 +438,9 @@ mod tests {
 
     #[test]
     fn a_scene_round_trips_and_its_log_replays_to_the_saved_clay() {
-        let (start, live) = session();
+        let live = session();
         let view = view();
-        let data = save(&start, &live, &view);
+        let data = save(&live, &view);
         let scene = Scene::read(&data).expect("reads back");
 
         assert_eq!(
@@ -529,56 +450,52 @@ mod tests {
         assert_eq!(scene.mesh.triangles, live.mesh.triangles);
         assert_eq!(scene.view, Some(view));
         assert!(scene.reference.is_none());
-        let start_back = scene.start().expect("checkpoint 0");
-        assert_eq!(start_back.triangles, start.triangles);
+        assert_eq!(scene.checkpoints, live.checkpoints());
+        assert_eq!(scene.checkpoints[0].log_index, 0);
 
-        // Replaying the saved log on the saved start gives the saved clay.
-        let mut replay = crate::sculpt::Replay::new(start_back.clone(), scene.log.clone());
+        // Replaying the saved log from the saved checkpoints gives the clay.
+        let mut replay = Replay::new(scene.checkpoints.clone(), scene.log.clone());
         assert!(replay.seek(f64::INFINITY, usize::MAX));
         assert_eq!(
             position_bits(&replay.sculpt.mesh.positions),
             position_bits(&live.mesh.positions)
         );
-        // Writing what was read gives the same bytes.
-        let mut w = SceneWriter::new();
-        w.mesh(&scene.mesh)
-            .checkpoints(&[(0, 0.0, start_back)])
-            .log(&scene.log)
-            .view(&view);
-        assert_eq!(w.finish(), data);
+        // The sculpt the app makes of it saves to the same bytes.
+        let resumed = Sculpt::with_history(scene.mesh, scene.log, scene.checkpoints);
+        assert_eq!(save(&resumed, &view), data);
     }
 
     #[test]
-    fn a_resumed_sculpt_has_the_session_and_goes_on_recording() {
-        let (start, live) = session();
-        let scene = Scene::read(&save(&start, &live, &view())).unwrap();
-        let start = scene.start().unwrap().clone();
-        let (mut resumed, complete) = resume_sculpt(start.clone(), scene.mesh, &scene.log);
-        assert!(complete);
+    fn a_scene_with_a_new_mesh_mid_session_replays_through_it() {
+        let mut live = session();
+        // A remesh or an import: other triangles, then more strokes.
+        live.set_clock(10.0);
+        live.replace_mesh(Mesh::icosphere(2));
+        live.set_clock(11.0);
+        live.begin_stroke();
+        live.dab(Dab {
+            brush: Brush::Inflate,
+            centre: Vec3::Z,
+            radius: 0.5,
+            strength: 1.0,
+            invert: false,
+            symmetry: true,
+            direction: Vec3::ZERO,
+        });
+        live.end_stroke();
+        live.refresh();
+        let data = save(&live, &view());
+        let scene = Scene::read(&data).unwrap();
+        assert_eq!(scene.mesh.triangles, live.mesh.triangles);
+        let mut replay = Replay::new(scene.checkpoints.clone(), scene.log.clone());
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_eq!(replay.sculpt.mesh.triangles, live.mesh.triangles);
         assert_eq!(
-            position_bits(&resumed.mesh.positions),
+            position_bits(&replay.sculpt.mesh.positions),
             position_bits(&live.mesh.positions)
         );
-        // The same log, entry for entry, and the same undo steps.
-        let encode = |entries: &[Entry]| {
-            let mut w = Writer::new();
-            log::write_entries(&mut w, entries);
-            w.finish()
-        };
-        assert_eq!(encode(resumed.log()), encode(live.log()));
-        assert_eq!(resumed.can_undo(), live.can_undo());
-        assert_eq!(resumed.can_redo(), live.can_redo());
-        resumed.redo();
-        assert_eq!(resumed.log().len(), live.log().len() + 1);
-
-        // A saved clay the log doesn't lead to: the clay wins, without a log.
-        let mut odd = live.mesh.clone();
-        odd.positions[0] += Vec3::splat(0.01);
-        let kept = odd.positions[0];
-        let (resumed, complete) = resume_sculpt(start, odd, live.log());
-        assert!(!complete);
-        assert_eq!(resumed.mesh.positions[0], kept);
-        assert!(resumed.log().is_empty());
+        let resumed = Sculpt::with_history(scene.mesh, scene.log, scene.checkpoints);
+        assert_eq!(save(&resumed, &view()), data);
     }
 
     #[test]
@@ -592,12 +509,12 @@ mod tests {
 
     #[test]
     fn unknown_chunks_are_skipped() {
-        let (start, live) = session();
+        let live = session();
         let mut w = SceneWriter::new();
         w.chunk(tag(b"ZZZZ"), false, b"from the future")
             .mesh(&live.mesh)
             .chunk(tag(b"YYYY"), true, &[7; 100])
-            .checkpoints(&[(0, 0.0, &start)]);
+            .checkpoints(live.checkpoints());
         let scene = Scene::read(&w.finish()).expect("reads");
         assert_eq!(scene.mesh.positions.len(), live.mesh.positions.len());
         assert!(scene.log.is_empty());
@@ -606,8 +523,8 @@ mod tests {
 
     #[test]
     fn every_truncation_and_corruption_is_an_error_not_a_panic() {
-        let (start, live) = session();
-        let data = save(&start, &live, &view());
+        let live = session();
+        let data = save(&live, &view());
         // Cutting anywhere fails cleanly (a cut on a chunk boundary still
         // leaves the clay or loses it, and either is fine as long as no
         // panic happens). Step through the header byte by byte, the rest
@@ -626,7 +543,11 @@ mod tests {
             let mut bad = data.clone();
             let at = (seed as usize >> 4) % bad.len();
             bad[at] ^= (seed >> 24) as u8 | 1;
-            let _ = Scene::read(&bad);
+            // What still reads must also replay without a panic.
+            if let Ok(scene) = Scene::read(&bad) {
+                let mut replay = Replay::new(scene.checkpoints, scene.log);
+                replay.seek(f64::INFINITY, usize::MAX);
+            }
         }
     }
 

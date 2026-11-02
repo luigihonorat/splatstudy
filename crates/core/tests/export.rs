@@ -310,7 +310,8 @@ mod job {
             s.end_stroke();
             s.refresh();
         }
-        Replay::new(start, s.log().to_vec())
+        let _ = start;
+        Replay::of(&s)
     }
 
     fn settings() -> Settings {

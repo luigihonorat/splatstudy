@@ -17,7 +17,7 @@ use crate::export::{
 };
 use crate::reference::{Content, Credit};
 use crate::render::Slot;
-use crate::sculpt::{Mesh, Replay};
+use crate::sculpt::{Checkpoint, Mesh, Replay};
 use crate::ui::{self, menu};
 
 /// Session seconds per video second, as in the timelapse panel.
@@ -119,9 +119,15 @@ impl App {
     }
 
     fn open_export(&mut self) {
-        // Only the times matter here, so any mesh will do.
-        self.export.duration =
-            Replay::new(Mesh::icosphere(0), self.sculpt.log().to_vec()).duration();
+        // Only the times matter here, so a tiny start mesh will do.
+        let tiny = Mesh::icosphere(0);
+        let start = Checkpoint {
+            log_index: 0,
+            time: 0.0,
+            positions: tiny.positions.as_slice().into(),
+            triangles: Some(tiny.triangles.as_slice().into()),
+        };
+        self.export.duration = Replay::new(vec![start], self.sculpt.log().to_vec()).duration();
         // Without a reference its half would stay black. A layout the user
         // picked stays.
         if !self.export.layout_picked {
@@ -185,7 +191,7 @@ impl App {
             speed: self.export.speed,
             look: self.sculpt_look(),
         };
-        let replay = Replay::new(self.session_start(), self.sculpt.log().to_vec());
+        let replay = Replay::of(&self.sculpt);
         let reference = self.scene_reference();
         let credit = reference.and_then(|r| credit_line(&r.credit));
         let card = EndCard {
