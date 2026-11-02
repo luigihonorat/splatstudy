@@ -107,6 +107,7 @@ async fn run() -> Result<(), JsValue> {
     let mut app = App::new(device.clone(), queue.clone(), format, lang);
     app.set_debug(query_value(&search, "debug").is_some());
     app.set_mac(is_mac());
+    app.set_video_encoder(Box::new(video::WebVideo::new()));
 
     let shell = Rc::new(RefCell::new(Shell {
         app,
