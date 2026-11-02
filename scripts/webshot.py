@@ -4,7 +4,7 @@
 
     python scripts/webshot.py URL OUT.png [--size 1400x850] [--wait 6]
         [--dpr 1] [--js EXPRESSION | --cdp 'Method {json}' | --pick FILE]...
-        [--downloads DIR]
+        [--downloads DIR] [--profile DIR]
 
 Starts a separate headless Edge with a fresh profile (never the user's
 browser) on a free DevTools port, so several copies can run at once. It loads
@@ -16,7 +16,9 @@ page's <input type=file> as if picked in the dialog (send
 'Page.setInterceptFileChooserDialog {"enabled": true}' first so no dialog
 opens). Then it takes the screenshot, prints the
 page's console, exceptions and step results, and closes Edge. With
---downloads, files the page downloads are saved into DIR.
+--downloads, files the page downloads are saved into DIR. With --profile,
+Edge uses DIR as its profile and keeps it, so a second run sees what the
+first stored (autosave, preferences).
 
 Needs the websocket-client package. Set EDGE to use another Chromium.
 """
@@ -124,10 +126,23 @@ def main():
         help="give this file to the page's <input type=file>, as if picked",
     )
     ap.add_argument("--downloads", help="save the page's downloads into this folder")
+    ap.add_argument(
+        "--profile",
+        help="use and keep this browser profile folder, so storage survives to the next run",
+    )
     args = ap.parse_args()
     width, height = (int(v) for v in args.size.split("x"))
 
-    profile = tempfile.mkdtemp(prefix="webshot-")
+    if args.profile:
+        profile = os.path.abspath(args.profile)
+        os.makedirs(profile, exist_ok=True)
+        # Edge rewrites it once it listens; an old one would point elsewhere.
+        try:
+            os.remove(os.path.join(profile, "DevToolsActivePort"))
+        except OSError:
+            pass
+    else:
+        profile = tempfile.mkdtemp(prefix="webshot-")
     edge = subprocess.Popen(
         [
             EDGE,
@@ -202,7 +217,8 @@ def main():
             edge.wait(timeout=10)
         except subprocess.TimeoutExpired:
             edge.kill()
-        shutil.rmtree(profile, ignore_errors=True)
+        if not args.profile:
+            shutil.rmtree(profile, ignore_errors=True)
 
 
 if __name__ == "__main__":
