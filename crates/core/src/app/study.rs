@@ -3,12 +3,12 @@
 //! Study aids for comparing the sculpt with the reference: camera link,
 //! silhouette, ghost, mirror view, plumb line, grid and the pose timer.
 
-use egui::{CursorIcon, Key, Rect, Sense, Stroke, pos2};
+use egui::{Align2, CursorIcon, Key, Rect, Sense, Stroke, pos2};
 
 use super::views::shown;
-use super::{App, SCULPT};
+use super::{App, REFERENCE, SCULPT};
 use crate::render::clay::Look;
-use crate::ui::{menu, theme};
+use crate::ui::{fonts, menu, theme};
 
 /// Which views show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,6 +42,130 @@ pub(super) struct StudyState {
     pub(super) silhouette: bool,
     /// The reference laid over the sculpt view, see-through.
     pub(super) ghost: bool,
+    pub(super) timer: PoseTimer,
+}
+
+/// Round lengths offered, in minutes, and numbers of rounds.
+pub(super) const TIMER_MINUTES: [u32; 6] = [1, 2, 5, 10, 20, 30];
+pub(super) const TIMER_ROUNDS: [u32; 4] = [1, 3, 5, 10];
+/// How long the views flash when a round ends, in seconds.
+const FLASH_SECONDS: f64 = 1.2;
+
+/// Where the timer's clock is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Clock {
+    Off,
+    /// The current round started at `start`, moved later by any pauses.
+    Running {
+        start: f64,
+    },
+    Paused {
+        elapsed: f64,
+    },
+}
+
+/// Timed rounds, as in a life-drawing class: a few minutes per pose, or
+/// per side of the cast. It runs from the frame clock, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PoseTimer {
+    pub(super) minutes: u32,
+    pub(super) rounds: u32,
+    pub(super) clock: Clock,
+    /// The round under way, from 0.
+    pub(super) round: u32,
+    /// When the last round ended, for the flash.
+    pub(super) ended_at: Option<f64>,
+}
+
+impl Default for PoseTimer {
+    fn default() -> Self {
+        Self {
+            minutes: 5,
+            rounds: 1,
+            clock: Clock::Off,
+            round: 0,
+            ended_at: None,
+        }
+    }
+}
+
+impl PoseTimer {
+    fn length(&self) -> f64 {
+        f64::from(self.minutes.max(1)) * 60.0
+    }
+
+    pub(super) fn start(&mut self, now: f64) {
+        self.round = 0;
+        self.clock = Clock::Running { start: now };
+    }
+
+    pub(super) fn stop(&mut self) {
+        self.clock = Clock::Off;
+    }
+
+    /// Pauses a running clock, resumes a paused one, starts a stopped one.
+    pub(super) fn toggle(&mut self, now: f64) {
+        self.clock = match self.clock {
+            Clock::Running { start } => Clock::Paused {
+                elapsed: now - start,
+            },
+            Clock::Paused { elapsed } => Clock::Running {
+                start: now - elapsed,
+            },
+            Clock::Off => {
+                self.start(now);
+                return;
+            }
+        };
+    }
+
+    /// Seconds left in the current round.
+    pub(super) fn remaining(&self, now: f64) -> f64 {
+        let elapsed = match self.clock {
+            Clock::Off => 0.0,
+            Clock::Running { start } => now - start,
+            Clock::Paused { elapsed } => elapsed,
+        };
+        (self.length() - elapsed).max(0.0)
+    }
+
+    /// Moves on when the round is over. Returns `Some(true)` when the last
+    /// round just ended, `Some(false)` for any other round, `None` if none
+    /// ended. Rounds missed while the app slept all count.
+    pub(super) fn tick(&mut self, now: f64) -> Option<bool> {
+        let Clock::Running { start } = self.clock else {
+            return None;
+        };
+        let length = self.length();
+        let ended = ((now - start) / length).floor();
+        if ended < 1.0 {
+            return None;
+        }
+        self.ended_at = Some(now);
+        self.round += ended as u32;
+        if self.round >= self.rounds {
+            self.round = self.rounds.saturating_sub(1);
+            self.clock = Clock::Off;
+            return Some(true);
+        }
+        self.clock = Clock::Running {
+            start: start + ended * length,
+        };
+        Some(false)
+    }
+
+    /// How strong the end-of-round flash is now, 1 fading to 0.
+    pub(super) fn flash(&self, now: f64) -> f32 {
+        self.ended_at.map_or(0.0, |at| {
+            (1.0 - (now - at) / FLASH_SECONDS).clamp(0.0, 1.0) as f32
+        })
+    }
+}
+
+/// Seconds as the clock shows them, rounded up: `m:ss`.
+fn clock_text(seconds: f64) -> String {
+    let whole = seconds.ceil() as u64;
+    format!("{}:{:02}", whole / 60, whole % 60)
 }
 
 impl Default for StudyState {
@@ -57,6 +181,7 @@ impl Default for StudyState {
             grid_divisions: 4,
             silhouette: false,
             ghost: false,
+            timer: PoseTimer::default(),
         }
     }
 }
@@ -176,6 +301,95 @@ impl App {
                 }
             }
         });
+        menu::submenu(ui, st.pose_timer, |ui| {
+            ui.set_min_width(140.0);
+            let now = self.now;
+            let timer = &mut self.study.timer;
+            let toggle = match timer.clock {
+                Clock::Off => st.start,
+                Clock::Running { .. } => tr.pause,
+                Clock::Paused { .. } => st.resume,
+            };
+            if menu::action(ui, true, toggle, "") {
+                timer.toggle(now);
+            }
+            if menu::action(ui, timer.clock != Clock::Off, st.stop, "") {
+                timer.stop();
+            }
+            ui.separator();
+            for n in TIMER_MINUTES {
+                if menu::item(ui, &(st.minutes)(n), "", timer.minutes == n).clicked() {
+                    timer.minutes = n;
+                }
+            }
+            ui.separator();
+            for n in TIMER_ROUNDS {
+                if menu::item(ui, &(st.rounds)(n), "", timer.rounds == n).clicked() {
+                    timer.rounds = n;
+                }
+            }
+        });
+    }
+
+    /// The pose timer over the views: the clock in the top right corner of
+    /// the sculpt view (click to pause), and a soft flash over both views
+    /// when a round ends.
+    pub(super) fn timer_ui(&mut self, ui: &egui::Ui, area: Rect, rects: [Rect; 2]) {
+        let now = self.now;
+        if self.study.timer.tick(now) == Some(true) {
+            self.notify(self.lang.tr().study.time_up);
+        }
+        let flash = self.study.timer.flash(now);
+        if flash > 0.0 {
+            let veil = theme::VIEW_INK.gamma_multiply(0.22 * flash);
+            ui.painter().rect_filled(area, 0.0, veil);
+            ui.ctx().request_repaint();
+        }
+        let timer = &mut self.study.timer;
+        if timer.clock == Clock::Off {
+            return;
+        }
+        let rect = if shown(rects[SCULPT]) {
+            rects[SCULPT]
+        } else {
+            rects[REFERENCE]
+        };
+        let remaining = timer.remaining(now);
+        let painter = ui.painter();
+        let clock =
+            painter.layout_no_wrap(clock_text(remaining), fonts::light(26.0), theme::VIEW_INK);
+        let corner = rect.right_top() + egui::vec2(-14.0, 8.0);
+        let clock_rect =
+            Rect::from_min_size(corner - egui::vec2(clock.size().x, 0.0), clock.size());
+        let response = ui
+            .interact(clock_rect, ui.scope_id().with("pose timer"), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if response.clicked() {
+            timer.toggle(now);
+        }
+        let running = matches!(timer.clock, Clock::Running { .. });
+        let colour = if running || response.hovered() {
+            theme::VIEW_INK
+        } else {
+            theme::VIEW_TEXT
+        };
+        painter.galley(clock_rect.min, clock, colour);
+        if timer.rounds > 1 {
+            painter.text(
+                egui::pos2(clock_rect.right(), clock_rect.bottom() + 2.0),
+                Align2::RIGHT_TOP,
+                format!("{} / {}", timer.round + 1, timer.rounds),
+                fonts::regular(12.0),
+                theme::VIEW_TEXT,
+            );
+        }
+        if running {
+            // Again when the shown second changes.
+            let next = remaining - (remaining.ceil() - 1.0);
+            let next = if next <= 0.0 { 1.0 } else { next };
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(next + 0.01));
+        }
     }
 
     /// The plumb line and the grid over each shown view. They are drawn in
@@ -262,5 +476,72 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, divisions: u32) {
         if x > rect.left() + 0.5 && x < rect.right() - 0.5 {
             painter.vline(x.round() + 0.5, rect.y_range(), stroke);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timer(minutes: u32, rounds: u32) -> PoseTimer {
+        PoseTimer {
+            minutes,
+            rounds,
+            ..PoseTimer::default()
+        }
+    }
+
+    #[test]
+    fn rounds_follow_each_other_then_the_timer_stops() {
+        let mut t = timer(1, 3);
+        t.start(100.0);
+        assert_eq!(t.tick(130.0), None);
+        assert_eq!(t.remaining(130.0), 30.0);
+        assert_eq!(t.tick(160.5), Some(false));
+        assert_eq!(t.round, 1);
+        // The next round counts from when the last one ended, not from
+        // the frame that noticed.
+        assert_eq!(t.remaining(160.5), 59.5);
+        assert_eq!(t.flash(160.5), 1.0);
+        assert_eq!(t.tick(220.0), Some(false));
+        assert_eq!(t.tick(280.0), Some(true));
+        assert_eq!(t.clock, Clock::Off);
+        assert_eq!(t.round, 2, "the last round stays shown");
+        assert_eq!(t.tick(400.0), None);
+    }
+
+    #[test]
+    fn a_pause_keeps_the_time_left() {
+        let mut t = timer(5, 1);
+        t.start(0.0);
+        t.toggle(100.0);
+        assert_eq!(t.clock, Clock::Paused { elapsed: 100.0 });
+        assert_eq!(t.tick(1000.0), None, "no round ends while paused");
+        assert_eq!(t.remaining(1000.0), 200.0);
+        t.toggle(1000.0);
+        assert_eq!(t.remaining(1050.0), 150.0);
+        assert_eq!(t.tick(1200.0), Some(true));
+    }
+
+    #[test]
+    fn rounds_missed_while_asleep_all_count() {
+        let mut t = timer(1, 5);
+        t.start(0.0);
+        assert_eq!(t.tick(150.0), Some(false));
+        assert_eq!(t.round, 2);
+        assert_eq!(t.remaining(150.0), 30.0);
+    }
+
+    #[test]
+    fn the_flash_fades_and_the_clock_rounds_up() {
+        let mut t = timer(1, 2);
+        t.start(0.0);
+        t.tick(60.0);
+        assert!(t.flash(60.6) > 0.0 && t.flash(60.6) < 1.0);
+        assert_eq!(t.flash(70.0), 0.0);
+        assert_eq!(clock_text(300.0), "5:00");
+        assert_eq!(clock_text(299.2), "5:00");
+        assert_eq!(clock_text(59.0), "0:59");
+        assert_eq!(clock_text(0.0), "0:00");
     }
 }

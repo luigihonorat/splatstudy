@@ -184,16 +184,17 @@ impl App {
             }
         }
         // Empty reference view: say what can go there.
-        let right = rects[REFERENCE];
-        if shown(right) {
-            painter.with_clip_rect(right).text(
-                right.center(),
+        let reference = rects[REFERENCE];
+        if shown(reference) {
+            painter.with_clip_rect(reference).text(
+                reference.center(),
                 Align2::CENTER_CENTER,
                 tr.drop_hint,
                 fonts::light(16.0),
                 theme::VIEW_TEXT,
             );
         }
+        self.timer_ui(ui, area, rects);
 
         let left = rects[SCULPT];
         if shown(left) {
