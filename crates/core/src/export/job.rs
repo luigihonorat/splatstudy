@@ -95,6 +95,17 @@ pub enum Progress {
     Failed(String),
 }
 
+/// The camera for a view `aspect` wide: in a view taller than wide, the
+/// field of view is widened so the camera's view still fits across, as
+/// it does up and down in the app's wide views.
+pub fn fit_camera(camera: &OrbitCamera, aspect: f32) -> OrbitCamera {
+    let mut camera = *camera;
+    if aspect < 1.0 {
+        camera.fov_y = 2.0 * ((camera.fov_y / 2.0).tan() / aspect.max(0.1)).atan();
+    }
+    camera
+}
+
 /// What a step needs from the app.
 pub struct Gpu<'a> {
     pub device: &'a wgpu::Device,
@@ -273,7 +284,7 @@ impl Job {
             gpu.clay.prepare(
                 gpu.queue,
                 Slot::ExportSculpt,
-                &self.cameras[0],
+                &fit_camera(&self.cameras[0], view.aspect()),
                 view.aspect(),
                 &self.settings.look,
             );
@@ -283,7 +294,11 @@ impl Job {
             }
             if let Some(view) = self.compositor.reference_view() {
                 let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
-                draw_reference(&mut pass, &self.cameras[1], view.size);
+                draw_reference(
+                    &mut pass,
+                    &fit_camera(&self.cameras[1], view.aspect()),
+                    view.size,
+                );
             }
             Overlay::Views {
                 credit: self.credit.as_deref(),
@@ -377,5 +392,20 @@ impl Job {
         if let (Sink::Video(_), Some(encoder)) = (&self.sink, encoder) {
             encoder.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tall_views_see_as_far_across_as_wide_ones_see_up() {
+        let camera = OrbitCamera::default();
+        assert_eq!(fit_camera(&camera, 16.0 / 9.0), camera);
+        let tall = fit_camera(&camera, 9.0 / 16.0);
+        // Half the width seen across equals what the original sees up.
+        let across = (tall.fov_y / 2.0).tan() * 9.0 / 16.0;
+        assert!((across - (camera.fov_y / 2.0).tan()).abs() < 1e-5);
     }
 }
