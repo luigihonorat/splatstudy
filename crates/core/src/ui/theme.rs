@@ -21,6 +21,14 @@ pub const CLAY: Color32 = hex(0xC4C4C4);
 /// Text and outlines drawn over the black views.
 pub const VIEW_TEXT: Color32 = hex(0x8A8A8A);
 pub const VIEW_INK: Color32 = hex(0xF2F2F2);
+/// Silhouette mode: shapes filled flat on the black view.
+pub const SILHOUETTE_INK: Color32 = hex(0xE6E6E6);
+/// Plumb line, grid and other guides over the views.
+pub const GUIDE: Color32 = hex(0xEE8A2A);
+/// The crop box around a reference.
+pub const CROP_LINE: Color32 = hex(0xEE8A2A);
+/// How strongly the ghost of the reference shows over the sculpt.
+pub const GHOST_OPACITY: f32 = 0.35;
 
 /// The site's CSS custom properties, one set per mode.
 #[derive(Clone, Copy, Debug)]

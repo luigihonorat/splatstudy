@@ -5,7 +5,8 @@
 Usage: python subset.py <folder with the original Google Fonts files>
 
 Needs fontTools (pip install fonttools). Reads every string literal in
-src/ui/i18n.rs so new Japanese text is always covered, then writes:
+src/ui/i18n.rs and src/ui/i18n/*.rs so new Japanese text is always
+covered, then writes:
   Barlow-Light.ttf, Barlow-Regular.ttf   Latin (en, fr) and punctuation
   NotoSansJP-UI.ttf                      kana, CJK punctuation, used kanji;
                                          variable, wght axis limited to 300-500
@@ -46,7 +47,8 @@ def codepoints(ranges):
 
 
 def ui_text():
-    source = I18N.read_text(encoding="utf-8")
+    files = [I18N, *sorted(I18N.with_suffix("").glob("*.rs"))]
+    source = "".join(f.read_text(encoding="utf-8") for f in files)
     return "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', source))
 
 
@@ -64,6 +66,8 @@ def cut(src, dst, unicodes, limit_wght=None):
     # trips a fontTools bug on Noto Sans JP's gvar table.
     if limit_wght is not None:
         font = instancer.instantiateVariableFont(font, {"wght": limit_wght})
+    # Keep the source's timestamp, so the output only changes with its glyphs.
+    font.recalcTimestamp = False
     font.save(dst)
     print(f"{dst.name}: {dst.stat().st_size // 1024} KiB, {len(unicodes)} code points")
 

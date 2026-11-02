@@ -3,8 +3,18 @@
 //! UI strings for every language. Each language is one `Tr` value, so a
 //! missing string is a compile error. Japanese is the primary language.
 //!
+//! Each part of the editor keeps its own strings in a file under `i18n/`,
+//! with the same three languages, so parts built at the same time don't edit
+//! one file. Strings shared by the whole app stay here.
+//!
 //! After changing Japanese text, regenerate the embedded font subset with
 //! `assets/fonts/subset.py`.
+
+pub mod export;
+pub mod files;
+pub mod mesh;
+pub mod refs;
+pub mod study;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Lang {
@@ -121,6 +131,11 @@ pub struct Tr {
     pub licences: &'static str,
     pub about: &'static str,
     pub about_text: &'static str,
+    pub refs: &'static refs::RefTr,
+    pub study: &'static study::StudyTr,
+    pub mesh: &'static mesh::MeshTr,
+    pub files: &'static files::FilesTr,
+    pub video: &'static export::ExportTr,
 }
 
 pub const JA: Tr = Tr {
@@ -202,6 +217,11 @@ Alt＋右：拡大",
     licences: "ライセンス",
     about: "SplatStudy について",
     about_text: "3D のモチーフを見ながら塑像するための、デジタル彫刻ツール。",
+    refs: &refs::JA,
+    study: &study::JA,
+    mesh: &mesh::JA,
+    files: &files::JA,
+    video: &export::JA,
 };
 
 pub const EN: Tr = Tr {
@@ -283,6 +303,11 @@ Alt + right: zoom",
     licences: "licences",
     about: "about splatstudy",
     about_text: "sculpt from 3D references, the way students study from plaster casts.",
+    refs: &refs::EN,
+    study: &study::EN,
+    mesh: &mesh::EN,
+    files: &files::EN,
+    video: &export::EN,
 };
 
 pub const FR: Tr = Tr {
@@ -364,6 +389,11 @@ Alt + droit : zoomer",
     licences: "licences",
     about: "à propos de splatstudy",
     about_text: "sculpter d'après des modèles 3D, comme on étudie d'après le plâtre.",
+    refs: &refs::FR,
+    study: &study::FR,
+    mesh: &mesh::FR,
+    files: &files::FR,
+    video: &export::FR,
 };
 
 #[cfg(test)]
