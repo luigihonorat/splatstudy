@@ -345,7 +345,11 @@ impl Sculpt {
             return;
         }
         if self.mesh.positions != positions {
+            let moved: Vec<u32> = (0..positions.len() as u32)
+                .filter(|&v| self.mesh.positions[v as usize] != positions[v as usize])
+                .collect();
             self.mesh.positions.copy_from_slice(positions);
+            self.bvh.touch(&self.mesh, &moved);
             self.bvh_stale = true;
         }
         self.mesh.recompute_normals();
@@ -381,7 +385,7 @@ impl Sculpt {
     pub fn refresh(&mut self) {
         if self.bvh_stale {
             self.record(Event::Refresh);
-            self.bvh.refit(&self.mesh);
+            self.bvh.refit_touched(&self.mesh);
             self.bvh_stale = false;
         }
     }
@@ -548,6 +552,7 @@ impl Sculpt {
         for &v in &self.affected {
             self.dirty_pages[v as usize / PAGE] = true;
         }
+        self.bvh.touch(&self.mesh, &self.moved);
         self.bvh_stale = true;
     }
 
