@@ -11,6 +11,7 @@
 
 pub mod fit;
 pub mod load;
+pub mod samples;
 
 use std::sync::Arc;
 
