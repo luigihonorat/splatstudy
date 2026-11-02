@@ -316,6 +316,9 @@ impl App {
                 _ => None,
             });
 
+        // A remesh or import from anywhere in the UI: new GPU buffers before
+        // uploading.
+        self.sync_clay();
         let resized = self.fit_views(ppp);
         if let Some(playback) = &mut self.playback {
             let sculpt = &mut playback.replay.sculpt;

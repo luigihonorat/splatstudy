@@ -87,6 +87,18 @@ impl App {
                 }
                 rows.push((tr.frame_sculpt, "F".to_owned()));
                 rows.push((tr.reset_view, "Home".to_owned()));
+                for (label, key) in [
+                    (tr.link_cameras, "L"),
+                    (tr.study.swap_sides, "W"),
+                    (tr.mirror_view, "R"),
+                    (tr.silhouette, "K"),
+                    (tr.ghost, "O"),
+                    (tr.plumb_line, "V"),
+                    (tr.grid, "G"),
+                    (tr.mesh.remesh, "Shift+R"),
+                ] {
+                    rows.push((label, key.to_owned()));
+                }
                 if !WEB {
                     rows.push((tr.new_scene, self.keys("N")));
                     rows.push((tr.exit, self.keys("Q")));
