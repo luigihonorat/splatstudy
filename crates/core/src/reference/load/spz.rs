@@ -185,6 +185,7 @@ fn rotation_v3(b: &[u8]) -> Quat {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::reference::Content;
 
     /// Wraps data in a gzip member, with a file name in the header.
     pub(crate) fn gzip(data: &[u8]) -> Vec<u8> {
@@ -281,6 +282,147 @@ pub(crate) mod tests {
         let mut wrong_version = three_splats(3);
         wrong_version[0] = 0;
         assert!(load_spz(&wrong_version).is_err());
+    }
+
+    /// CRC-32 (the gzip one), bit by bit.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A splat as a capture holds it, before packing.
+    struct Gaussian {
+        position: Vec3,
+        /// Natural logarithms of the standard deviations.
+        log_scale: Vec3,
+        rotation: Quat,
+        /// Before the sigmoid.
+        opacity: f32,
+        /// The first spherical harmonic's coefficients.
+        dc: [f32; 3],
+    }
+
+    /// Packs `splats` the way the published `.spz` description lays a file
+    /// out, from the floats a capture holds rather than from the bytes this
+    /// loader reads: a gzip member (no file name, with its CRC and size)
+    /// around the 16-byte header, then positions, alphas, colours, scales,
+    /// rotations and `sh_degree`'s higher harmonics, each for all splats.
+    fn canonical(splats: &[Gaussian], version: u32, sh_degree: u8) -> Vec<u8> {
+        let byte = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+        let mut d = Vec::new();
+        d.extend_from_slice(&0x5053_474E_u32.to_le_bytes());
+        d.extend_from_slice(&version.to_le_bytes());
+        d.extend_from_slice(&(splats.len() as u32).to_le_bytes());
+        d.extend_from_slice(&[sh_degree, 12, 0, 0]);
+        for s in splats {
+            for v in s.position.to_array() {
+                let fixed = (v * 4096.0).round() as i32;
+                d.extend_from_slice(&fixed.to_le_bytes()[..3]);
+            }
+        }
+        for s in splats {
+            d.push(byte(255.0 / (1.0 + (-s.opacity).exp())));
+        }
+        for s in splats {
+            d.extend(s.dc.map(|c| byte(c * 0.15 * 255.0 + 127.5)));
+        }
+        for s in splats {
+            d.extend(s.log_scale.to_array().map(|l| byte((l + 10.0) * 16.0)));
+        }
+        for s in splats {
+            let q = s.rotation.normalize();
+            if version == 2 {
+                let q = if q.w < 0.0 { -q } else { q };
+                d.extend([q.x, q.y, q.z].map(|c| byte(c * 127.5 + 127.5)));
+            } else {
+                d.extend(encode_v3(q));
+            }
+        }
+        let higher = match sh_degree {
+            0 => 0,
+            1 => 3,
+            2 => 8,
+            _ => 15,
+        };
+        // Arbitrary higher harmonics, which must be skipped whole.
+        d.extend((0..splats.len() * higher * 3).map(|i| (i * 37 % 251) as u8));
+
+        let mut gz = vec![0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 3];
+        gz.extend(miniz_oxide::deflate::compress_to_vec(&d, 9));
+        gz.extend_from_slice(&crc32(&d).to_le_bytes());
+        gz.extend_from_slice(&(d.len() as u32).to_le_bytes());
+        gz
+    }
+
+    #[test]
+    fn a_file_packed_as_published_reads_back() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        let splats = [
+            Gaussian {
+                position: Vec3::new(0.25, -1.5, 3.0),
+                log_scale: Vec3::new(-4.0, -5.5, -3.25),
+                rotation: Quat::from_axis_angle(Vec3::new(1.0, 2.0, -0.5).normalize(), 1.1),
+                opacity: 2.0,
+                dc: [1.2, -0.4, 0.0],
+            },
+            Gaussian {
+                position: Vec3::new(-1000.125, 0.0, 512.5),
+                log_scale: Vec3::new(0.0, -9.0, 2.5),
+                rotation: Quat::from_rotation_y(-2.8),
+                opacity: -3.0,
+                dc: [-1.7, 1.6, 0.3],
+            },
+            Gaussian {
+                position: Vec3::new(1e-3, -2e-3, 7.0),
+                log_scale: Vec3::splat(-6.0),
+                rotation: Quat::from_xyzw(0.1, -0.7, 0.2, -0.6).normalize(),
+                opacity: 0.0,
+                dc: [0.5, 0.5, -0.5],
+            },
+        ];
+        for (version, sh_degree) in [(2, 0), (2, 1), (3, 2), (3, 3)] {
+            let file = canonical(&splats, version, sh_degree);
+            let Ok(Content::Splats(s)) = super::super::load("capture.spz", &file) else {
+                panic!("v{version} with degree {sh_degree} doesn't load");
+            };
+            assert_eq!(s.len(), splats.len());
+            for (i, g) in splats.iter().enumerate() {
+                let at = format!("v{version}, degree {sh_degree}, splat {i}");
+                assert!(s.positions[i].distance(g.position) < 1e-3, "{at}");
+                let scale = g.log_scale.exp();
+                assert!(
+                    ((s.scales[i] - scale) / scale).abs().max_element() < 0.04,
+                    "{at}: {} vs {scale}",
+                    s.scales[i]
+                );
+                let turned = s.rotations[i].angle_between(g.rotation.normalize());
+                assert!(turned < 0.03, "{at}: {turned}");
+                let [r, gr, b, a] = s.colors[i];
+                for (got, dc) in [r, gr, b].into_iter().zip(g.dc) {
+                    let want = sh0_to_u8(dc);
+                    assert!(got.abs_diff(want) <= 2, "{at}: {got} vs {want}");
+                }
+                let alpha = 255.0 / (1.0 + (-g.opacity).exp());
+                assert!((f32::from(a) - alpha).abs() <= 1.0, "{at}: {a} vs {alpha}");
+            }
+        }
+        // As the format says, already Y up.
+        let file = canonical(&splats, 3, 0);
+        let content = super::super::load("capture.spz", &file).unwrap();
+        assert_eq!(
+            super::super::usual_up("capture.spz", &content),
+            crate::reference::UpAxis::Y
+        );
     }
 
     #[test]
