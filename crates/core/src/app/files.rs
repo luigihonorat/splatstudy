@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Scenes: new, open, save, autosave, and importing files.
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use egui::Key;
 
@@ -40,10 +40,29 @@ pub(super) struct FileState {
     /// as long as the old.
     generation: u64,
     /// The reference file's key, worked out once per file: hashing a big
-    /// splat takes a moment.
-    reference_key: Option<(Weak<[u8]>, BlobKey)>,
+    /// splat takes a moment. The file is known by its address and length
+    /// (holding on to it would keep its memory after it is dropped), and
+    /// the key is forgotten whenever another reference may take its place.
+    reference_key: Option<(FileAddress, BlobKey)>,
     /// The checkpoints and log as last saved, to encode only what is new.
     history: HistoryCache,
+}
+
+/// Where a file's bytes are, and how many: tells it apart from any other
+/// file alive at the same time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileAddress {
+    at: usize,
+    len: usize,
+}
+
+impl FileAddress {
+    fn of(bytes: &Arc<[u8]>) -> Self {
+        Self {
+            at: Arc::as_ptr(bytes).cast::<u8>() as usize,
+            len: bytes.len(),
+        }
+    }
 }
 
 /// A fingerprint of everything an autosave keeps that can change: which
@@ -115,7 +134,10 @@ impl App {
         };
         match purpose {
             FilePurpose::Scene => self.open_scene(name, bytes),
-            FilePurpose::Reference => self.load_reference(name, bytes),
+            FilePurpose::Reference => {
+                self.files.reference_key = None;
+                self.load_reference(name, bytes);
+            }
             FilePurpose::Sculpt => self.import_sculpt(name, bytes),
             FilePurpose::Any => self.cannot_open(name),
         }
@@ -183,6 +205,8 @@ impl App {
                 self.restore_study(&study);
             }
         }
+        // Another file may come back at the old one's address.
+        self.files.reference_key = None;
         match reference {
             Some(reference) => self.restore_reference(reference),
             None => self.remove_reference(),
@@ -446,10 +470,11 @@ impl App {
     /// if the scene doesn't read.
     pub fn restore_autosave(&mut self, scene: &[u8], reference: Option<Arc<[u8]>>) -> bool {
         let mut lost = false;
+        let mut known = None;
         let read = Scene::read_with(scene, |key| {
             let found = reference.clone().filter(|bytes| key.matches(bytes));
             lost = found.is_none();
-            found.inspect(|bytes| self.files.reference_key = Some((Arc::downgrade(bytes), key)))
+            found.inspect(|bytes| known = Some((FileAddress::of(bytes), key)))
         });
         let scene = match read {
             Ok(scene) => scene,
@@ -460,6 +485,11 @@ impl App {
         };
         let lost = lost || scene.reference_damaged;
         let complete = self.show_scene(scene);
+        // Hashed already, by `matches`.
+        self.files.reference_key = known.filter(|(file, _)| {
+            self.scene_reference()
+                .is_some_and(|r| FileAddress::of(&r.source.bytes) == *file)
+        });
         self.files.name = None;
         self.files.saved = None;
         let tr = self.lang.tr();
@@ -489,15 +519,19 @@ impl FileState {
         self.generation += 1;
     }
 
-    /// The key of a reference file, hashed only the first time.
+    /// The key of the reference file, `bytes`, hashed only the first time.
+    /// Its address tells it from any other file alive now; a file that
+    /// replaced it at the same address is caught by `reference_key` being
+    /// cleared whenever a reference comes in.
     fn key_of(&mut self, bytes: &Arc<[u8]>) -> BlobKey {
-        if let Some((file, key)) = &self.reference_key
-            && std::ptr::addr_eq(file.as_ptr(), Arc::as_ptr(bytes))
+        let file = FileAddress::of(bytes);
+        if let Some((known, key)) = self.reference_key
+            && known == file
         {
-            return *key;
+            return key;
         }
         let key = BlobKey::of(bytes);
-        self.reference_key = Some((Arc::downgrade(bytes), key));
+        self.reference_key = Some((file, key));
         key
     }
 }
@@ -603,11 +637,21 @@ mod tests {
         assert_eq!(key, BlobKey::of(&bytes));
         // Remembered: a wrong key planted for the same file comes back.
         let planted = BlobKey { hash: 1, len: 1000 };
-        files.reference_key = Some((Arc::downgrade(&bytes), planted));
+        files.reference_key = Some((FileAddress::of(&bytes), planted));
         assert_eq!(files.key_of(&bytes), planted);
         // Another file with the same bytes is hashed afresh.
         let copy: Arc<[u8]> = Arc::from(&bytes[..]);
         assert_eq!(files.key_of(&copy), key);
+    }
+
+    #[test]
+    fn the_key_cache_keeps_no_file_alive() {
+        let mut files = FileState::default();
+        let bytes: Arc<[u8]> = Arc::from(&[7u8; 1000][..]);
+        files.key_of(&bytes);
+        // Only the app's own handle is left: dropping it frees the file.
+        assert_eq!(Arc::strong_count(&bytes), 1);
+        assert_eq!(Arc::weak_count(&bytes), 0);
     }
 
     #[test]
