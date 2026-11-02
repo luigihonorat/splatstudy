@@ -4,6 +4,7 @@
 //!
 //!   cargo xtask web [--dev]       build the browser version into dist/
 //!   cargo xtask serve [--port N]  serve dist/ on http://127.0.0.1:8080
+//!   cargo xtask notices OUT.html  third-party licence notices (needs cargo-about)
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -28,7 +29,11 @@ fn main() -> ExitCode {
                 .unwrap_or(8080);
             serve(port)
         }
-        _ => Err("usage: cargo xtask web [--dev] | serve [--port N]".into()),
+        Some("notices") => match args.get(1) {
+            Some(out) => notices(Path::new(out)),
+            None => Err("usage: cargo xtask notices OUT.html".into()),
+        },
+        _ => Err("usage: cargo xtask web [--dev] | serve [--port N] | notices OUT.html".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -99,7 +104,98 @@ fn web(dev: bool) -> Result<(), String> {
     let html = fs::read_to_string(&index).map_err(|e| e.to_string())?;
     fs::write(&index, html.replace("__BUILD__", &format!("{build:016x}")))
         .map_err(|e| e.to_string())?;
+    if !dev {
+        notices(&dist.join("licenses.html"))?;
+    }
     report_sizes(&dist, &bg)
+}
+
+/// Writes the licence notices every distributed build must carry: the Rust
+/// crates (via cargo-about), plus what cargo-about cannot see because it is
+/// not a crate dependency of the app: SDL's C library, linked statically from
+/// a build dependency, and the embedded fonts.
+fn notices(out: &Path) -> Result<(), String> {
+    let root = root();
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let about = Command::new(&cargo)
+        .current_dir(&root)
+        .args(["about", "generate", "--workspace", "--fail", "about.hbs"])
+        .output()
+        .map_err(|e| format!("cargo about: {e}"))?;
+    if !about.status.success() {
+        return Err(format!(
+            "cargo about failed (install with `cargo install cargo-about --locked --features cli`):
+{}",
+            String::from_utf8_lossy(&about.stderr)
+        ));
+    }
+    let html = String::from_utf8(about.stdout).map_err(|e| e.to_string())?;
+
+    let fonts = root.join("crates/core/assets/fonts");
+    let mut extra = vec![
+        (
+            "SDL 3 (zlib License)",
+            "https://libsdl.org",
+            fs::read_to_string(sdl_license(&cargo, &root)?),
+        ),
+        (
+            "Barlow (SIL Open Font License 1.1)",
+            "https://github.com/jpt/barlow",
+            fs::read_to_string(fonts.join("OFL-Barlow.txt")),
+        ),
+        (
+            "Noto Sans JP (SIL Open Font License 1.1)",
+            "https://github.com/notofonts/noto-cjk",
+            fs::read_to_string(fonts.join("OFL-NotoSansJP.txt")),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, url, text)| {
+        let text = text.map_err(|e| format!("{name}: {e}"))?;
+        Ok(format!(
+            "<h2>{name}</h2>
+<ul><li><a href=\"{url}\">{url}</a></li></ul>
+<pre>{}</pre>
+",
+            escape(&text)
+        ))
+    })
+    .collect::<Result<Vec<String>, String>>()?;
+    extra.insert(0, String::new());
+    let html = html.replace("<!-- EXTRA -->", &extra.concat());
+    if let Some(dir) = out.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    fs::write(out, html).map_err(|e| e.to_string())?;
+    println!("notices: {}", out.display());
+    Ok(())
+}
+
+/// SDL's own LICENSE.txt inside the vendored `sdl3-src` crate.
+fn sdl_license(cargo: &str, root: &Path) -> Result<PathBuf, String> {
+    let meta = Command::new(cargo)
+        .current_dir(root)
+        .args(["metadata", "--format-version", "1"])
+        .output()
+        .map_err(|e| format!("cargo metadata: {e}"))?;
+    let meta = String::from_utf8_lossy(&meta.stdout);
+    meta.split("\"manifest_path\":\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .find(|p| p.contains("sdl3-src-"))
+        .map(|p| {
+            PathBuf::from(p.replace("\\\\", "\\"))
+                .with_file_name("SDL")
+                .join("LICENSE.txt")
+        })
+        .filter(|p| p.exists())
+        .ok_or_else(|| "SDL's LICENSE.txt not found (is sdl3-src fetched?)".into())
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {

@@ -17,6 +17,9 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
       - run: cargo fmt --all --check
       - run: cargo test -p splatstudy-core
       - run: cargo clippy -p splatstudy-core -p xtask -- -D warnings
@@ -46,9 +49,14 @@ jobs:
           sudo apt-get install -y cmake ninja-build libx11-dev libxext-dev libxrandr-dev             libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev             libwayland-dev wayland-protocols libegl-dev libdrm-dev libgbm-dev             libpulse-dev libasound2-dev libudev-dev libdbus-1-dev
       - run: cargo clippy -p splatstudy-native -- -D warnings
       - run: cargo build -p splatstudy-native --release
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: cargo xtask notices target/release/licenses.html
       - uses: actions/upload-artifact@v4
         with:
           name: splatstudy-${{ runner.os }}
           path: |
             target/release/splatstudy
             target/release/splatstudy.exe
+            target/release/licenses.html

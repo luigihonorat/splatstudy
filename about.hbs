@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>splatstudy — third-party licences</title>
+<style>
+  :root { --bg: #F7F7F7; --text: #111111; --muted: #666666; --border: #DDDDDD; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111111; --text: #F2F2F2; --muted: #A3A3A3; --border: #2C2C2C; } }
+  body { background: var(--bg); color: var(--text); margin: 0 auto; max-width: 760px; padding: 56px 24px;
+         font: 400 15px/1.85 system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif; }
+  h1 { font-weight: 300; font-size: 36px; line-height: 1.2; margin: 0 0 12px; }
+  h2 { font-weight: 400; font-size: 18px; margin: 48px 0 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+  p, li { color: var(--muted); }
+  a { color: var(--text); }
+  ul { padding-left: 18px; columns: 2; column-gap: 32px; font-size: 13px; }
+  pre { white-space: pre-wrap; font-size: 12px; line-height: 1.6; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>third-party licences</h1>
+<p>splatstudy is free software under GPL-3.0-or-later with an app store exception
+(<a href="https://github.com/luigihonorat/splatstudy">source code</a>). It includes the
+following work by others, used under their licences.</p>
+<p>splatstudy は GPL-3.0-or-later（アプリストア例外つき）のフリーソフトウェアです。以下の第三者の著作物を、それぞれのライセンスに従って含んでいます。</p>
+<!-- EXTRA -->
+{{#each licenses}}
+<h2 id="{{id}}">{{name}}</h2>
+<ul>
+{{#each used_by}}
+<li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>
