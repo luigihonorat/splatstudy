@@ -60,6 +60,8 @@ pub fn first_run() -> bool {
 // first await (a view also clones its whole buffer when stored).
 #[wasm_bindgen(inline_js = r#"
 let opened = null;
+// The connection once open, to start a write without waiting a turn.
+let openNow = null;
 const done = r => new Promise((ok, fail) => {
   r.onsuccess = () => ok(r.result);
   r.onerror = () => fail(r.error);
@@ -78,7 +80,12 @@ function db() {
         r.result.createObjectStore('scene');
         r.result.createObjectStore('blobs');
       };
-      r.onsuccess = () => ok(r.result);
+      r.onsuccess = () => {
+        openNow = r.result;
+        // Another tab upgrading the database: step aside, open again later.
+        openNow.onversionchange = () => { openNow.close(); openNow = null; opened = null; };
+        ok(r.result);
+      };
       r.onerror = () => fail(r.error);
       r.onblocked = () => fail(new DOMException('blocked by another tab', 'InvalidStateError'));
     });
@@ -109,18 +116,25 @@ export function idb_put_blob(key, bytes) {
   });
 }
 // The scene and the blob it names in one go: other blobs are dropped, so
-// only the file the latest scene needs stays.
-export function idb_put_scene(bytes, keep) {
+// only the file the latest scene needs stays. When the page is leaving,
+// the write starts before this returns and is committed at once, leaving
+// the clean-up to the next save: a page being reloaded doesn't wait.
+export function idb_put_scene(bytes, keep, leaving) {
   const copy = bytes.slice();
-  return db().then(d => {
+  const write = d => {
     const tx = d.transaction(['scene', 'blobs'], 'readwrite');
     tx.objectStore('scene').put(copy, 'current');
-    const blobs = tx.objectStore('blobs');
-    blobs.getAllKeys().onsuccess = e => {
-      for (const k of e.target.result) if (k !== keep) blobs.delete(k);
-    };
+    if (leaving) {
+      if (tx.commit) tx.commit();
+    } else {
+      const blobs = tx.objectStore('blobs');
+      blobs.getAllKeys().onsuccess = e => {
+        for (const k of e.target.result) if (k !== keep) blobs.delete(k);
+      };
+    }
     return finished(tx);
-  });
+  };
+  return openNow ? write(openNow) : db().then(write);
 }
 export function idb_clear() {
   return db().then(d => {
@@ -162,7 +176,11 @@ extern "C" {
     #[wasm_bindgen(catch)]
     async fn idb_put_blob(key: &str, bytes: &[u8]) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
-    async fn idb_put_scene(bytes: &[u8], keep: Option<String>) -> Result<JsValue, JsValue>;
+    async fn idb_put_scene(
+        bytes: &[u8],
+        keep: Option<String>,
+        leaving: bool,
+    ) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
     async fn idb_clear() -> Result<JsValue, JsValue>;
     async fn storage_room() -> JsValue;
@@ -317,10 +335,16 @@ impl Autosave {
                 }
             },
         )?;
-        let leaving = autosave;
-        crate::on(&window, "pagehide", true, move |_: web_sys::Event| {
-            leaving.poll(true)
-        })?;
+        // `beforeunload` comes while a reload or navigation still waits on
+        // the network, early enough for the write to finish; `pagehide`
+        // also covers closing the tab and leaving for the back-forward
+        // cache. Whichever comes second finds nothing left to save.
+        for name in ["beforeunload", "pagehide"] {
+            let leaving = autosave.clone();
+            crate::on(&window, name, true, move |_: web_sys::Event| {
+                leaving.poll(true)
+            })?;
+        }
         Ok(())
     }
 
@@ -354,7 +378,7 @@ impl Autosave {
         drop(st);
         let this = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = this.write(bytes).await;
+            let result = this.write(bytes, leaving).await;
             let mut st = this.state.borrow_mut();
             st.writing = false;
             match result {
@@ -368,7 +392,7 @@ impl Autosave {
     }
 
     /// Stores a save, or clears the stores when there is nothing to keep.
-    async fn write(&self, bytes: Option<Bytes>) -> Result<(), Trouble> {
+    async fn write(&self, bytes: Option<Bytes>, leaving: bool) -> Result<(), Trouble> {
         let Some(save) = bytes else {
             idb_clear().await.map_err(trouble)?;
             self.state.borrow_mut().stored_blob = None;
@@ -383,7 +407,7 @@ impl Autosave {
             None => None,
         };
         let start = now();
-        idb_put_scene(&save.scene, keep.clone())
+        idb_put_scene(&save.scene, keep.clone(), leaving)
             .await
             .map_err(trouble)?;
         log::info!(
