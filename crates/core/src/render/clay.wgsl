@@ -1,19 +1,22 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-// Clay shading: a soft key light that wraps around the form, a sky fill from
+// Clay shading: a key light that wraps around the form, a sky fill from
 // above and a faint rim, so planes and edges read the way they do on a
-// modelling stand under a studio window. Lighting is in view space so the
-// light stays put while the sculpt turns.
+// modelling stand. The lighting (studio window, raking or skylight) sets the
+// key light's direction and wrap and how strong each part is. Lighting is in
+// view space so the light stays put while the sculpt turns.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
     // Clay colour, linear RGB.
     base: vec4<f32>,
-    // Direction towards the key light, view space.
+    // xyz: direction towards the key light, view space; w: its wrap.
     light: vec4<f32>,
     // x: flat (silhouette), y: opacity, z: use vertex colours.
     params: vec4<f32>,
+    // Strengths: x key, y sky, z rim, w highlight.
+    rig: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -69,12 +72,12 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let v = normalize(-in.position);
     let l = normalize(u.light.xyz);
     let n_dot_l = dot(n, l);
-    let wrap = max((n_dot_l + 0.35) / 1.35, 0.0);
+    let wrap = max((n_dot_l + u.light.w) / (1.0 + u.light.w), 0.0);
     let sky = 0.5 + 0.5 * n.y;
     let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
     let h = normalize(l + v);
-    let spec = pow(max(dot(n, h), 0.0), 32.0) * 0.05 * step(0.0, n_dot_l);
-    let light = 0.78 * wrap + 0.30 * sky + 0.10 * rim;
+    let spec = pow(max(dot(n, h), 0.0), 32.0) * u.rig.w * step(0.0, n_dot_l);
+    let light = u.rig.x * wrap + u.rig.y * sky + u.rig.z * rim;
     let colour = base * light + vec3<f32>(spec);
     // Premultiplied, for the blend state.
     let srgb = to_srgb(clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0)));

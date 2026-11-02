@@ -8,6 +8,8 @@
 //! ghost, a see-through mesh laid over what the slot already shows (the
 //! reference over the sculpt). Both can be prepared for one submit.
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use egui::Color32;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
@@ -15,6 +17,7 @@ use wgpu::util::DeviceExt;
 use super::{DEPTH_FORMAT, SAMPLES, Slot, VIEW_FORMAT};
 use crate::camera::OrbitCamera;
 use crate::sculpt::{Mesh, Vertex};
+use crate::ui::theme;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -22,9 +25,14 @@ struct Uniforms {
     view_proj: [[f32; 4]; 4],
     view: [[f32; 4]; 4],
     base: [f32; 4],
+    /// xyz: towards the key light, view space; w: how far the key light
+    /// wraps past the terminator.
     light: [f32; 4],
     /// x: flat, y: opacity, z: use vertex colours, w: unused.
     params: [f32; 4],
+    /// The strengths of the key light, the sky fill, the rim and the
+    /// highlight.
+    rig: [f32; 4],
 }
 
 /// How a mesh is shaded.
@@ -63,9 +71,137 @@ impl Look {
     }
 }
 
-/// The key light, in view space: above, to the left and in front, like a
-/// north window over the modelling stand.
-const LIGHT: Vec3 = Vec3::new(-0.45, 0.65, 0.6);
+/// Where the light comes from, for the clay and for mesh references alike,
+/// so both views read the same. It stays put in view space while the
+/// sculpt turns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lighting {
+    /// A soft key light above, to the left and in front, like a north
+    /// window over the modelling stand.
+    #[default]
+    Studio,
+    /// Low from the side, grazing the surface: small bumps and hollows
+    /// cast their light and shade.
+    Raking,
+    /// From above, like a skylight: the top planes light up and the
+    /// sides fall away, so the turns between planes read clearly.
+    Top,
+}
+
+/// One lighting's numbers.
+struct Rig {
+    /// Towards the key light, view space.
+    direction: Vec3,
+    /// How far the key light wraps past the terminator: 0 is a hard edge.
+    wrap: f32,
+    key: f32,
+    sky: f32,
+    rim: f32,
+    highlight: f32,
+}
+
+impl Lighting {
+    pub const ALL: [Lighting; 3] = [Lighting::Studio, Lighting::Raking, Lighting::Top];
+
+    /// The next one, round again after the last.
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|&l| l == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    fn rig(self) -> Rig {
+        match self {
+            Lighting::Studio => Rig {
+                direction: Vec3::new(-0.45, 0.65, 0.6),
+                wrap: 0.35,
+                key: 0.78,
+                sky: 0.30,
+                rim: 0.10,
+                highlight: 0.05,
+            },
+            Lighting::Raking => Rig {
+                direction: Vec3::new(-0.95, 0.12, 0.28),
+                wrap: 0.0,
+                key: 1.05,
+                sky: 0.12,
+                rim: 0.04,
+                highlight: 0.04,
+            },
+            Lighting::Top => Rig {
+                direction: Vec3::new(0.0, 1.0, 0.2),
+                wrap: 0.15,
+                key: 0.95,
+                sky: 0.12,
+                rim: 0.04,
+                highlight: 0.05,
+            },
+        }
+    }
+}
+
+/// The lighting every clay pass uses, set by the study aids. One for the
+/// whole app, so the clay, mesh references and exports all agree without
+/// each pass being told.
+static LIGHTING: AtomicU8 = AtomicU8::new(Lighting::Studio as u8);
+
+/// Lights every clay pass's next draws with `lighting`.
+pub fn set_lighting(lighting: Lighting) {
+    LIGHTING.store(lighting as u8, Ordering::Relaxed);
+}
+
+/// The lighting clay passes use now.
+pub fn lighting() -> Lighting {
+    Lighting::ALL
+        .get(usize::from(LIGHTING.load(Ordering::Relaxed)))
+        .copied()
+        .unwrap_or_default()
+}
+
+/// How two silhouettes overlap: flat renders of the clay and of the
+/// reference, the same size and from the same camera, as RGBA8 pixels
+/// filled with [`theme::SILHOUETTE_INK`] on [`theme::VIEW_BG`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Overlap {
+    /// Pixels inside both outlines.
+    pub both: u32,
+    /// Inside the clay's alone: where the clay is too big.
+    pub clay_only: u32,
+    /// Inside the reference's alone: where the clay is too small.
+    pub reference_only: u32,
+}
+
+/// A pixel of a flat render is inside the outline: at least half inked,
+/// which splits the multisampled edge down the middle.
+pub fn inked(pixel: &[u8]) -> bool {
+    pixel[0] >= theme::SILHOUETTE_INK.r() / 2
+}
+
+impl Overlap {
+    pub fn of(clay: &[u8], reference: &[u8]) -> Self {
+        let mut overlap = Self::default();
+        for (c, r) in clay
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(reference.as_chunks::<4>().0)
+        {
+            match (inked(c), inked(r)) {
+                (true, true) => overlap.both += 1,
+                (true, false) => overlap.clay_only += 1,
+                (false, true) => overlap.reference_only += 1,
+                (false, false) => {}
+            }
+        }
+        overlap
+    }
+
+    /// Intersection over union, 0..1: 1 when the outlines match exactly.
+    /// `None` when both are empty.
+    pub fn iou(&self) -> Option<f32> {
+        let union = self.both + self.clay_only + self.reference_only;
+        (union > 0).then(|| self.both as f32 / union as f32)
+    }
+}
 
 /// Which set of a slot's uniforms a draw reads.
 #[derive(Clone, Copy)]
@@ -296,17 +432,19 @@ impl ClayPass {
     ) {
         let view: Mat4 = camera.view();
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        let rig = lighting().rig();
         let uniforms = Uniforms {
             view_proj: (camera.projection(aspect) * view).to_cols_array_2d(),
             view: view.to_cols_array_2d(),
             base: super::linear(look.colour),
-            light: LIGHT.normalize().extend(0.0).to_array(),
+            light: rig.direction.normalize().extend(rig.wrap).to_array(),
             params: [
                 flag(look.flat),
                 look.opacity.clamp(0.0, 1.0),
                 flag(look.vertex_colours),
                 0.0,
             ],
+            rig: [rig.key, rig.sky, rig.rim, rig.highlight],
         };
         let (buffer, _) = &self.slots[slot.index()][layer as usize];
         queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));

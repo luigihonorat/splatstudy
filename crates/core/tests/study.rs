@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Offscreen renders of the study aids: the silhouette and the ghost.
+//! Offscreen renders of the study aids: the silhouette, the ghost, the
+//! silhouette match and the lighting.
 //! Skipped (with a message) on machines without any GPU adapter.
 
 use egui::Color32;
 use glam::Vec3;
 use splatstudy_core::camera::OrbitCamera;
-use splatstudy_core::render::clay::{ClayPass, GpuMesh, Look};
+use splatstudy_core::render::clay::{ClayPass, GpuMesh, Lighting, Look, Overlap, set_lighting};
 use splatstudy_core::render::{Slot, ViewTarget, readback::Readback};
 use splatstudy_core::sculpt::Mesh;
-use splatstudy_core::ui::theme::{SILHOUETTE_INK, VIEW_BG};
+use splatstudy_core::ui::theme::{CLAY, SILHOUETTE_INK, VIEW_BG};
 
 const SIZE: u32 = 96;
 
@@ -170,4 +171,135 @@ fn the_clay_keeps_its_own_look_beside_the_ghost() {
         centre.iter().zip(ink).all(|(a, b)| a.abs_diff(b) <= 1),
         "{centre:?}"
     );
+}
+
+/// Renders two meshes flat, each into its own target of `size` from the
+/// front camera, in one submit, as the silhouette match does, and reads
+/// them back.
+fn flat_renders(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: [u32; 2],
+    meshes: [&Mesh; 2],
+) -> [Vec<u8>; 2] {
+    let clay = ClayPass::new(device);
+    let targets = [0, 1].map(|_| ViewTarget::new(device, size));
+    let gpu = meshes.map(|m| GpuMesh::new(device, m));
+    let slots = [Slot::SculptView, Slot::ReferenceView];
+    let mut encoder = device.create_command_encoder(&Default::default());
+    for ((target, mesh), slot) in targets.iter().zip(&gpu).zip(slots) {
+        let ink = Look::flat(SILHOUETTE_INK);
+        clay.prepare(queue, slot, &camera(), target.aspect(), &ink);
+        let mut pass = target.begin_pass(&mut encoder, VIEW_BG);
+        clay.draw(&mut pass, slot, mesh);
+    }
+    let readbacks = targets
+        .each_ref()
+        .map(|t| Readback::copy(device, &mut encoder, t));
+    queue.submit([encoder.finish()]);
+    readbacks.map(|r| {
+        r.map();
+        r.wait(device).expect("read back")
+    })
+}
+
+/// A unit sphere scaled by `s` about the origin.
+fn scaled_sphere(s: f32) -> Mesh {
+    let mut mesh = Mesh::icosphere(4);
+    for p in &mut mesh.positions {
+        *p *= s;
+    }
+    mesh
+}
+
+#[test]
+fn the_silhouette_match_is_the_overlap_of_the_outlines() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping render test");
+        return;
+    };
+    let size = [256, 256];
+    let unit = scaled_sphere(1.0);
+    let [a, b] = flat_renders(&device, &queue, size, [&unit, &unit]);
+    let same = Overlap::of(&a, &b);
+    assert_eq!(same.clay_only + same.reference_only, 0);
+    assert!(same.iou().unwrap() > 0.999);
+
+    // A sphere at 80 %: its outline is a smaller disc inside the other.
+    let small = scaled_sphere(0.8);
+    let [clay, reference] = flat_renders(&device, &queue, size, [&small, &unit]);
+    let overlap = Overlap::of(&clay, &reference);
+    assert_eq!(overlap.clay_only, 0, "the smaller one lies inside");
+    // Seen in perspective, a sphere of radius r at distance d fills a disc
+    // of radius tan(asin(r / d)) on the image plane.
+    let d = camera().distance;
+    let disc = |r: f32| (r / d).asin().tan();
+    let expected = (disc(0.8) / disc(1.0)).powi(2);
+    let iou = overlap.iou().unwrap();
+    assert!((iou - expected).abs() < 0.015, "{iou} vs {expected}");
+
+    // Neither in view: no score.
+    let away = sphere(Vec3::new(50.0, 0.0, 0.0));
+    let [c, r] = flat_renders(&device, &queue, size, [&away, &away]);
+    assert_eq!(Overlap::of(&c, &r).iou(), None);
+}
+
+/// The mean brightness of the sphere's pixels in each half of the view:
+/// left, right, top and bottom.
+fn halves(data: &[u8]) -> [f32; 4] {
+    let mut sums = [0.0f32; 4];
+    let mut counts = [0u32; 4];
+    for (i, p) in data.as_chunks::<4>().0.iter().enumerate() {
+        if *p == VIEW_BG.to_array() {
+            continue;
+        }
+        let (x, y) = (i as u32 % SIZE, i as u32 / SIZE);
+        let half = SIZE / 2;
+        for (k, inside) in [x < half, x >= half, y < half, y >= half]
+            .into_iter()
+            .enumerate()
+        {
+            if inside {
+                sums[k] += f32::from(p[0]);
+                counts[k] += 1;
+            }
+        }
+    }
+    [0, 1, 2, 3].map(|k| sums[k] / counts[k].max(1) as f32)
+}
+
+#[test]
+fn each_lighting_lights_the_clay_from_its_side() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping render test");
+        return;
+    };
+    // The only test here that lights the clay: the others are flat, so
+    // the lighting they all share does not change them.
+    let lit = |lighting: Lighting| {
+        set_lighting(lighting);
+        let data = render(&device, &queue, &Look::lit(CLAY), None);
+        set_lighting(Lighting::Studio);
+        halves(&data)
+    };
+    let [left, right, top, bottom] = lit(Lighting::Studio);
+    assert!(
+        left > right && top > bottom,
+        "studio: from above on the left"
+    );
+    let studio_side = left / right;
+
+    let [left, right, top, bottom] = lit(Lighting::Raking);
+    assert!(
+        left / right > studio_side * 1.5,
+        "raking: hard from the side, {left} / {right}"
+    );
+    assert!(
+        (top / bottom - 1.0).abs() < 0.25,
+        "raking: level, {top} / {bottom}"
+    );
+
+    let [left, right, top, bottom] = lit(Lighting::Top);
+    assert!(top > bottom * 1.8, "top: {top} over {bottom}");
+    assert!((left / right - 1.0).abs() < 0.05, "top: centred");
 }
