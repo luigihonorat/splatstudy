@@ -8,11 +8,13 @@ use egui::Key;
 
 use super::reference::REFERENCE_EXTENSIONS;
 use super::sculpting::start_mesh;
+use super::study::Layout as ViewLayout;
 use super::{App, REFERENCE, Request, SCULPT, WEB};
 use crate::input::FilePurpose;
 use crate::reference::Reference;
+use crate::reference::load;
 use crate::render::clay::GpuMesh;
-use crate::scene::{self, SavedReference, Scene, SceneWriter, View};
+use crate::scene::{self, SavedReference, Scene, SceneWriter, StudyView, View};
 use crate::sculpt::{Mesh, Sculpt};
 use crate::ui::menu;
 
@@ -108,9 +110,13 @@ impl App {
         if let Some(view) = view {
             self.cameras = view.cameras;
             self.split = view.split;
+            if let Some(study) = view.study {
+                self.restore_study(&study);
+            }
         }
-        if let Some(reference) = reference {
-            self.restore_reference(reference);
+        match reference {
+            Some(reference) => self.restore_reference(reference),
+            None => self.remove_reference(),
         }
         self.files = FileState {
             name: Some(name.to_owned()),
@@ -136,6 +142,7 @@ impl App {
         w.view(&View {
             cameras: [self.cameras[SCULPT], self.cameras[REFERENCE]],
             split: self.split,
+            study: Some(self.study_view()),
         });
         w.finish()
     }
@@ -187,20 +194,61 @@ impl App {
         });
     }
 
-    // INTEGRATION (references): these two are where a scene meets the
-    // reference part. Until it keeps the loaded `Reference`, nothing is
-    // saved, and a saved reference is opened like a dropped file, without
-    // its placement and credit.
-
     /// The loaded reference, to save in the scene and credit in exports.
     pub(super) fn scene_reference(&self) -> Option<&Reference> {
-        None
+        self.reference.current.as_ref()
     }
 
     /// Puts a scene's reference back: loads its file again, then restores
-    /// the placement and credit it was saved with.
+    /// the placement, crop and credit it was saved with.
     fn restore_reference(&mut self, saved: SavedReference) {
-        self.load_reference(&saved.source.name, saved.source.bytes);
+        match load::load(&saved.source.name, &saved.source.bytes) {
+            Ok(content) => self.set_reference(saved.into_reference(content)),
+            Err(err) => {
+                log::warn!("{}: {err}", saved.source.name);
+                self.remove_reference();
+                self.cannot_open(&saved.source.name);
+            }
+        }
+    }
+
+    /// The study aids that are on, for the scene.
+    fn study_view(&self) -> StudyView {
+        let s = &self.study;
+        StudyView {
+            layout: match s.layout {
+                ViewLayout::Both => 0,
+                ViewLayout::Sculpt => 1,
+                ViewLayout::Reference => 2,
+            },
+            swapped: s.swapped,
+            link: s.link,
+            mirror: s.mirror,
+            plumb: s.plumb,
+            plumb_x: s.plumb_x,
+            grid: s.grid,
+            grid_divisions: s.grid_divisions,
+            silhouette: s.silhouette,
+            ghost: s.ghost,
+        }
+    }
+
+    fn restore_study(&mut self, view: &StudyView) {
+        let s = &mut self.study;
+        s.layout = match view.layout {
+            1 => ViewLayout::Sculpt,
+            2 => ViewLayout::Reference,
+            _ => ViewLayout::Both,
+        };
+        s.swapped = view.swapped;
+        s.link = view.link;
+        s.mirror = view.mirror;
+        s.plumb = view.plumb;
+        s.plumb_x = view.plumb_x;
+        s.grid = view.grid;
+        s.grid_divisions = view.grid_divisions;
+        s.silhouette = view.silhouette;
+        s.ghost = view.ghost;
     }
 
     /// Scene items at the top of the file menu.

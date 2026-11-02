@@ -15,7 +15,7 @@
 //!   is where the timelapse begins.
 //! - `LOG_`: every recorded call, see [`log`].
 //! - `REF_`: the reference file, kept whole, with its placement and credit.
-//! - `VIEW`: the cameras and the divider.
+//! - `VIEW`: the cameras, the divider and the study aids that were on.
 //!
 //! Reading returns a [`ReadError`] for anything malformed; it never panics.
 
@@ -81,6 +81,26 @@ pub struct View {
     pub cameras: [OrbitCamera; 2],
     /// Share of the width given to the sculpt view.
     pub split: f32,
+    /// Absent in files from before the study aids.
+    pub study: Option<StudyView>,
+}
+
+/// The study aids that were on, as plain values the app maps back. The
+/// pose timer isn't kept: a reopened scene starts a new sitting.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StudyView {
+    /// 0: both views, 1: the sculpt alone, 2: the reference alone.
+    pub layout: u8,
+    pub swapped: bool,
+    pub link: bool,
+    pub mirror: bool,
+    pub plumb: bool,
+    /// Where each plumb line hangs, as a share of its view's width.
+    pub plumb_x: [f32; 2],
+    pub grid: bool,
+    pub grid_divisions: u32,
+    pub silhouette: bool,
+    pub ghost: bool,
 }
 
 /// Writes a scene chunk by chunk.
@@ -159,6 +179,25 @@ impl SceneWriter {
                 .f32(camera.fov_y);
         }
         w.f32(view.split);
+        if let Some(study) = &view.study {
+            let flags = [
+                study.swapped,
+                study.link,
+                study.mirror,
+                study.plumb,
+                study.grid,
+                study.silhouette,
+                study.ghost,
+            ]
+            .iter()
+            .enumerate()
+            .fold(0u8, |bits, (i, &on)| bits | u8::from(on) << i);
+            w.u8(flags)
+                .u8(study.layout)
+                .f32(study.plumb_x[0])
+                .f32(study.plumb_x[1])
+                .u32(study.grid_divisions);
+        }
         self.chunk(VIEW, false, &w.finish())
     }
 
@@ -371,7 +410,39 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
     } else {
         0.5
     };
-    Ok(View { cameras, split })
+    let study = if r.is_empty() {
+        None
+    } else {
+        let flags = r.u8()?;
+        let on = |i: u32| flags & (1 << i) != 0;
+        let layout = r.u8()?;
+        let share = |v: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.5
+            }
+        };
+        let plumb_x = [share(r.f32()?), share(r.f32()?)];
+        let grid_divisions = r.u32()?.clamp(1, 64);
+        Some(StudyView {
+            layout: if layout <= 2 { layout } else { 0 },
+            swapped: on(0),
+            link: on(1),
+            mirror: on(2),
+            plumb: on(3),
+            plumb_x,
+            grid: on(4),
+            grid_divisions,
+            silhouette: on(5),
+            ghost: on(6),
+        })
+    };
+    Ok(View {
+        cameras,
+        split,
+        study,
+    })
 }
 
 /// Vertex positions as bytes, for comparing meshes bit for bit.
@@ -429,6 +500,18 @@ mod tests {
         View {
             cameras: [turned, OrbitCamera::default()],
             split: 0.4,
+            study: Some(StudyView {
+                layout: 2,
+                swapped: true,
+                link: false,
+                mirror: true,
+                plumb: true,
+                plumb_x: [0.25, 0.75],
+                grid: false,
+                grid_divisions: 6,
+                silhouette: true,
+                ghost: false,
+            }),
         }
     }
 
@@ -496,6 +579,15 @@ mod tests {
         assert!(!complete);
         assert_eq!(resumed.mesh.positions[0], kept);
         assert!(resumed.log().is_empty());
+    }
+
+    #[test]
+    fn a_view_without_study_aids_still_reads() {
+        let mut v = view();
+        v.study = None;
+        let mut w = SceneWriter::new();
+        w.mesh(&Mesh::icosphere(1)).view(&v);
+        assert_eq!(Scene::read(&w.finish()).unwrap().view, Some(v));
     }
 
     #[test]

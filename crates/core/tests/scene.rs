@@ -169,6 +169,44 @@ fn a_saved_scene_opens_to_the_same_scene() {
     );
 }
 
+/// Where `needle` first appears in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+#[test]
+fn the_reference_travels_with_the_scene() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping scene test");
+        return;
+    };
+    // A small tetrahedron, as a mesh reference.
+    let obj = b"v 0 0 0\nv 2 0 0\nv 0 2 0\nv 0 0 2\nf 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n";
+    let mut first = Harness::new(&device, &queue);
+    first.open("tetra.obj", obj);
+    first.stroke(400.0);
+    let (name, saved) = first.save();
+    assert!(
+        find(&saved, b"REF_").is_some(),
+        "the scene has a reference chunk"
+    );
+    assert!(find(&saved, obj).is_some(), "with the file as it came");
+
+    // Reopened, it saves to the same bytes: the reference's placement
+    // and the views came back as they were.
+    let mut second = Harness::new(&device, &queue);
+    second.open(&name, &saved);
+    let (_, again) = second.save();
+    assert!(again == saved, "the reopened scene saves differently");
+
+    // A scene without a reference takes the loaded one away.
+    let mut plain = Harness::new(&device, &queue);
+    let (_, without) = plain.save();
+    second.open("plain.splatstudy", &without);
+    let (_, after) = second.save();
+    assert!(find(&after, b"REF_").is_none());
+}
+
 #[test]
 fn a_damaged_scene_leaves_the_open_one_alone() {
     let Some((device, queue)) = device() else {
