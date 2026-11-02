@@ -4,6 +4,7 @@
 //! Pointer Events (with pen pressure) translated into core input events.
 
 mod files;
+mod ime;
 mod storage;
 mod video;
 
@@ -128,8 +129,9 @@ async fn run() -> Result<(), JsValue> {
         let s = shell.clone();
         Rc::new(move |e| s.borrow_mut().app.push_event(e))
     };
-    let files = files::Files::new(&document, deliver)?;
-    animate(shell, files);
+    let files = files::Files::new(&document, deliver.clone())?;
+    let text = ime::TextInput::new(&document, &canvas, deliver)?;
+    animate(shell, files, text);
     let _ = canvas.focus();
     Ok(())
 }
@@ -229,6 +231,10 @@ fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), 
         on(&window, name, false, move |e: KeyboardEvent| {
             let mut shell = s.borrow_mut();
             shell.update_key_modifiers(&e);
+            // The IME owns these; its committed text arrives from `ime`.
+            if ime::is_ime_key(&e) {
+                return;
+            }
             let name = e.key();
             if let Some(key) = Key::from_name(&name) {
                 shell.app.push_event(InputEvent::Key {
@@ -376,13 +382,23 @@ impl Shell {
         }
         out.requests
     }
+
+    /// The app's text field being edited, for the IME.
+    fn text_field(&self) -> Option<ime::Field> {
+        self.app.text_field().map(|f| ime::Field {
+            rect: f.rect,
+            text: f.text,
+            background: f.background,
+            line: f.line,
+        })
+    }
 }
 
 type FrameCallback = Closure<dyn FnMut()>;
 
 /// Runs a frame on every animation frame, then the app's requests, outside
-/// the shell's borrow: files hand events back to it.
-fn animate(shell: Rc<RefCell<Shell>>, files: files::Files) {
+/// the shell's borrow: files and text input hand events back to it.
+fn animate(shell: Rc<RefCell<Shell>>, files: files::Files, text: ime::TextInput) {
     let callback: Rc<RefCell<Option<FrameCallback>>> = Rc::new(RefCell::new(None));
     let next = callback.clone();
     *callback.borrow_mut() = Some(Closure::new(move || {
@@ -393,6 +409,7 @@ fn animate(shell: Rc<RefCell<Shell>>, files: files::Files) {
         for request in requests {
             files.handle(request);
         }
+        text.update(shell.borrow().text_field());
         request_frame(next.borrow().as_ref().expect("frame callback"));
     }));
     request_frame(callback.borrow().as_ref().expect("frame callback"));
