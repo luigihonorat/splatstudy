@@ -11,7 +11,7 @@
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::sync::Arc;
 
-use egui::{Align2, Color32, Id, Order, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -21,7 +21,7 @@ use crate::camera::OrbitCamera;
 use crate::input::FilePurpose;
 use crate::reference::load;
 use crate::reference::samples::Sample;
-use crate::reference::{Aabb, Alignment, Content, Reference, Source, UpAxis};
+use crate::reference::{Aabb, Alignment, Content, Credit, Reference, Source, UpAxis};
 use crate::render::Slot;
 use crate::render::clay::{ClayPass, GpuMesh, Look};
 use crate::render::splat::{SplatLook, SplatPass};
@@ -165,6 +165,28 @@ fn wrap_angle(a: f32) -> f32 {
     (a + PI).rem_euclid(TAU) - PI
 }
 
+/// A scroll bar in the app's manner: a square line in the margin, faint
+/// until the pointer is over the panel, never a box.
+fn thin_scroll_bar() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle {
+        content_margin: egui::Margin {
+            right: 10,
+            ..egui::Margin::ZERO
+        },
+        bar_width: 4.0,
+        floating_width: 2.0,
+        handle_min_length: 24.0,
+        foreground_color: true,
+        dormant_background_opacity: 0.0,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.0,
+        dormant_handle_opacity: 0.25,
+        active_handle_opacity: 0.6,
+        interact_handle_opacity: 1.0,
+        ..egui::style::ScrollStyle::floating()
+    }
+}
+
 /// A mesh reference moved into the clay's space, with normals for shading.
 fn place_mesh(device: &wgpu::Device, r: &Reference) -> Drawn {
     let built_for = (r.align, r.crop);
@@ -305,27 +327,31 @@ impl App {
     }
 
     pub(super) fn reference_panel(&mut self, ui: &mut egui::Ui) {
-        let tr = self.lang.tr();
-        ui::section(ui, tr.reference_tools);
-        if ui::choice(ui, tr.open_reference, false).clicked() {
-            self.request(Request::OpenFile {
-                purpose: FilePurpose::Reference,
-                extensions: REFERENCE_EXTENSIONS,
+        // The whole panel scrolls when it is taller than the window (the
+        // crop sliders and the credit fields together), behind a thin line
+        // that only darkens when it is used.
+        ui.spacing_mut().scroll = thin_scroll_bar();
+        egui::ScrollArea::vertical()
+            .id_salt("reference panel")
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                let tr = self.lang.tr();
+                ui::section(ui, tr.reference_tools);
+                if ui::choice(ui, tr.open_reference, false).clicked() {
+                    self.request(Request::OpenFile {
+                        purpose: FilePurpose::Reference,
+                        extensions: REFERENCE_EXTENSIONS,
+                    });
+                }
+                if self.reference.current.is_some() {
+                    if ui::choice(ui, tr.remove_reference, false).clicked() {
+                        self.remove_reference();
+                    }
+                    self.reference_controls(ui);
+                }
             });
-        }
-        if self.reference.current.is_some() {
-            if ui::choice(ui, tr.remove_reference, false).clicked() {
-                self.remove_reference();
-            }
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| self.reference_controls(ui));
-        }
         // Before this frame's views are drawn.
         self.refresh_mesh();
-        // Drawn from here until the views call it themselves; the rectangle
-        // is the one laid out last frame.
-        self.reference_overlay(ui.ctx(), self.view_rects[REFERENCE]);
     }
 
     /// Alignment, crop and credit.
@@ -444,83 +470,94 @@ impl App {
         }
     }
 
-    /// What is drawn over the reference view: a picture with its pan and
-    /// zoom, the crop box, and the credit line along the bottom.
-    pub(super) fn reference_overlay(&mut self, ctx: &egui::Context, rect: Rect) {
+    /// What is drawn over the reference view, in `rect` as laid out this
+    /// frame: a picture with its pan and zoom, the crop box, and the credit
+    /// line along the bottom. The views call it once the reference view's
+    /// image is drawn, so it never trails the view by a frame.
+    pub(super) fn reference_overlay(&mut self, ui: &egui::Ui, rect: Rect) {
         if !rect.is_positive() || self.reference.current.is_none() {
             return;
         }
-        let image = match &self.reference.drawn {
-            Some(Drawn::Image(texture)) => Some((texture.id(), texture.size_vec2())),
-            _ => None,
+        let painter = ui.painter_at(rect);
+        if let Some(Drawn::Image(texture)) = &self.reference.drawn {
+            let (texture, size) = (texture.id(), texture.size_vec2());
+            // On top of the view's own response, so a picture takes the
+            // pointer for its pan and zoom instead of turning the camera.
+            let response = ui.interact(
+                rect,
+                ui.scope_id().with("reference picture"),
+                Sense::click_and_drag(),
+            );
+            let view = &mut self.reference.image_view;
+            if response.dragged() {
+                view.offset += response.drag_delta();
+            }
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if response.hovered()
+                && scroll != 0.0
+                && let Some(pointer) = response.hover_pos()
+            {
+                let zoom = (view.zoom * (scroll * 0.0015).exp()).clamp(0.1, 50.0);
+                let centre = rect.center() + view.offset;
+                let new_centre = pointer - (pointer - centre) * (zoom / view.zoom);
+                view.offset = new_centre - rect.center();
+                view.zoom = zoom;
+            }
+            if response.double_clicked() {
+                *view = ImageView::default();
+            }
+            let fit = (rect.width() / size.x).min(rect.height() / size.y) * 0.95;
+            let shown = Rect::from_center_size(rect.center() + view.offset, size * fit * view.zoom);
+            // The mirror view shows the picture flipped left to right.
+            let uv = if self.study.mirror {
+                Rect::from_min_max(Pos2::new(1.0, 0.0), Pos2::new(0.0, 1.0))
+            } else {
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+            };
+            painter.image(texture, shown, uv, Color32::WHITE);
+        }
+        let Some(r) = &self.reference.current else {
+            return;
         };
-        egui::Area::new(Id::unique("reference overlay"))
-            .fixed_pos(rect.min)
-            .order(Order::Middle)
-            // A picture takes the pointer for its own pan and zoom; 3D
-            // references leave it to the view.
-            .interactable(image.is_some())
-            .show(ctx, |ui| {
-                let sense = if image.is_some() {
-                    Sense::click_and_drag()
-                } else {
-                    Sense::hover()
-                };
-                let (rect, response) = ui.allocate_exact_size(rect.size(), sense);
-                let painter = ui.painter_at(rect);
-                if let Some((texture, size)) = image {
-                    let view = &mut self.reference.image_view;
-                    if response.dragged() {
-                        view.offset += response.drag_delta();
-                    }
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if response.hovered()
-                        && scroll != 0.0
-                        && let Some(pointer) = response.hover_pos()
-                    {
-                        let zoom = (view.zoom * (scroll * 0.0015).exp()).clamp(0.1, 50.0);
-                        let centre = rect.center() + view.offset;
-                        let new_centre = pointer - (pointer - centre) * (zoom / view.zoom);
-                        view.offset = new_centre - rect.center();
-                        view.zoom = zoom;
-                    }
-                    if response.double_clicked() {
-                        *view = ImageView::default();
-                    }
-                    let fit = (rect.width() / size.x).min(rect.height() / size.y) * 0.95;
-                    let shown =
-                        Rect::from_center_size(rect.center() + view.offset, size * fit * view.zoom);
-                    // The mirror view shows the picture flipped left to right.
-                    let uv = if self.study.mirror {
-                        Rect::from_min_max(Pos2::new(1.0, 0.0), Pos2::new(0.0, 1.0))
-                    } else {
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
-                    };
-                    painter.image(texture, shown, uv, Color32::WHITE);
-                }
-                if let Some(r) = &self.reference.current {
-                    if let Some(crop) = r.crop {
-                        let camera = &self.cameras[REFERENCE];
-                        crop_box(&painter, rect, camera, r.align.matrix(), crop);
-                    }
-                    let c = &r.credit;
-                    let line = [&c.title, &c.author, &c.licence]
-                        .into_iter()
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|s| s.trim())
-                        .collect::<Vec<_>>()
-                        .join(" — ");
-                    if !line.is_empty() {
-                        painter.text(
-                            rect.left_bottom() + egui::vec2(14.0, -12.0),
-                            Align2::LEFT_BOTTOM,
-                            line,
-                            fonts::regular(12.0),
-                            theme::VIEW_TEXT,
+        if let Some(crop) = r.crop {
+            let camera = &self.cameras[REFERENCE];
+            // The box belongs to the 3D view, so it flips with it.
+            crop_box(
+                &painter,
+                rect,
+                camera,
+                r.align.matrix(),
+                crop,
+                self.study.mirror,
+            );
+        }
+        if let Some(covered) = paint_credit(&painter, rect, &r.credit) {
+            let tr = self.lang.tr();
+            let c = &r.credit;
+            ui.interact(
+                covered,
+                ui.scope_id().with("reference credit"),
+                Sense::hover(),
+            )
+            .on_hover_ui(|ui| {
+                ui.set_max_width(rect.width().max(240.0).min(480.0));
+                for (label, text) in [
+                    (tr.refs.title, &c.title),
+                    (tr.refs.author, &c.author),
+                    (tr.refs.licence, &c.licence),
+                    (tr.refs.source, &c.url),
+                ] {
+                    if !text.trim().is_empty() {
+                        ui.label(
+                            RichText::new(label)
+                                .font(fonts::regular(11.0))
+                                .color(ui.visuals().weak_text_color()),
                         );
+                        ui.label(text.trim());
                     }
                 }
             });
+        }
     }
 
     /// Draws the reference into a pass already cleared to the view's
@@ -633,8 +670,83 @@ impl App {
     }
 }
 
-/// The crop box's twelve edges, in [`theme::CROP_LINE`], seen from `camera`.
-fn crop_box(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera, model: Mat4, crop: Aabb) {
+/// Room between the credit and the view's edges, as for the view's label.
+const CREDIT_MARGIN: Vec2 = Vec2::new(14.0, 12.0);
+
+/// The credit's lines, each as a head and a tail that is never cut short:
+/// title, author and licence on one line when `fits` says it fits, else
+/// the title over "author — licence". Parts are trimmed; empty ones are
+/// left out.
+fn credit_lines(c: &Credit, fits: impl Fn(&str) -> bool) -> Vec<[String; 2]> {
+    let [title, author, licence] = [&c.title, &c.author, &c.licence].map(|s| s.trim().to_owned());
+    let one = [&title, &author, &licence]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" — ");
+    if one.is_empty() {
+        return Vec::new();
+    }
+    if fits(&one) {
+        return vec![[one, String::new()]];
+    }
+    // The second line keeps the licence whole: only the author before it
+    // gives way.
+    let tail = match (author.is_empty(), licence.is_empty()) {
+        (_, true) => String::new(),
+        (true, false) => licence,
+        (false, false) => format!(" — {licence}"),
+    };
+    [[title, String::new()], [author, tail]]
+        .into_iter()
+        .filter(|[a, b]| !a.is_empty() || !b.is_empty())
+        .collect()
+}
+
+/// The credit along the bottom of the reference view, cut short with an
+/// ellipsis rather than running off its right edge. Returns what it covers.
+fn paint_credit(painter: &egui::Painter, rect: Rect, c: &Credit) -> Option<Rect> {
+    let font = fonts::regular(12.0);
+    let width = (rect.width() - 2.0 * CREDIT_MARGIN.x).max(0.0);
+    let measure = |text: String| painter.layout_no_wrap(text, font.clone(), theme::VIEW_TEXT);
+    let cut = |text: String, max: f32| {
+        let mut job =
+            egui::text::LayoutJob::simple_singleline(text, font.clone(), theme::VIEW_TEXT);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(max.max(0.0));
+        painter.layout_job(job)
+    };
+    let lines = credit_lines(c, |line| measure(line.to_owned()).size().x <= width);
+    let mut bottom = rect.bottom() - CREDIT_MARGIN.y;
+    let mut covered = Rect::NOTHING;
+    for [head, tail] in lines.into_iter().rev() {
+        // The tail (the licence) is never cut; the head takes what is left.
+        let tail = measure(tail);
+        let head = cut(head, width - tail.size().x);
+        let height = head.size().y.max(tail.size().y);
+        let top = bottom - height;
+        let head_pos = Pos2::new(rect.left() + CREDIT_MARGIN.x, top);
+        let tail_pos = head_pos + Vec2::new(head.size().x, 0.0);
+        covered = covered
+            .union(Rect::from_min_size(head_pos, head.size()))
+            .union(Rect::from_min_size(tail_pos, tail.size()));
+        painter.galley(head_pos, head, theme::VIEW_TEXT);
+        painter.galley(tail_pos, tail, theme::VIEW_TEXT);
+        bottom = top - 2.0;
+    }
+    covered.is_positive().then_some(covered)
+}
+
+/// The crop box's twelve edges, in [`theme::CROP_LINE`], seen from `camera`,
+/// flipped left to right in the mirror view like the view's image.
+fn crop_box(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: &OrbitCamera,
+    model: Mat4,
+    crop: Aabb,
+    mirror: bool,
+) {
     let view_proj = camera.projection(rect.aspect_ratio()) * camera.view() * model;
     let corners: Vec<Option<Pos2>> = (0..8)
         .map(|i| {
@@ -646,8 +758,9 @@ fn crop_box(painter: &egui::Painter, rect: Rect, camera: &OrbitCamera, model: Ma
             let clip = view_proj * p.extend(1.0);
             (clip.w > 1e-4).then(|| {
                 let ndc = clip.truncate() / clip.w;
+                let x = if mirror { -ndc.x } else { ndc.x };
                 Pos2::new(
-                    rect.left() + (ndc.x + 1.0) / 2.0 * rect.width(),
+                    rect.left() + (x + 1.0) / 2.0 * rect.width(),
                     rect.top() + (1.0 - ndc.y) / 2.0 * rect.height(),
                 )
             })
