@@ -639,6 +639,7 @@ impl App {
             flat,
             opacity,
             over,
+            lighting,
         } = *look;
         let (Some(r), Some(drawn)) = (&self.reference.current, &self.reference.drawn) else {
             return;
@@ -672,6 +673,7 @@ impl App {
                     flat,
                     opacity,
                     vertex_colours: *coloured && !flat,
+                    lighting,
                 };
                 if over {
                     clay.prepare_ghost(&self.queue, slot, camera, aspect, &look);

@@ -8,8 +8,6 @@
 //! ghost, a see-through mesh laid over what the slot already shows (the
 //! reference over the sculpt). Both can be prepared for one submit.
 
-use std::sync::atomic::{AtomicU8, Ordering};
-
 use egui::Color32;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
@@ -49,6 +47,8 @@ pub struct Look {
     pub opacity: f32,
     /// Use the vertices' own colours, as scans have.
     pub vertex_colours: bool,
+    /// Where the light comes from. Flat looks ignore it.
+    pub lighting: Lighting,
 }
 
 impl Look {
@@ -59,7 +59,13 @@ impl Look {
             flat: false,
             opacity: 1.0,
             vertex_colours: false,
+            lighting: Lighting::Studio,
         }
+    }
+
+    /// The same look, lit by `lighting`.
+    pub const fn with_lighting(self, lighting: Lighting) -> Self {
+        Self { lighting, ..self }
     }
 
     /// Filled flat with one colour, opaque: a silhouette.
@@ -73,7 +79,8 @@ impl Look {
 
 /// Where the light comes from, for the clay and for mesh references alike,
 /// so both views read the same. It stays put in view space while the
-/// sculpt turns.
+/// sculpt turns. Each draw's [`Look`] carries its own, so an export keeps
+/// the one it started with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Lighting {
     /// A soft key light above, to the left and in front, like a north
@@ -137,24 +144,6 @@ impl Lighting {
             },
         }
     }
-}
-
-/// The lighting every clay pass uses, set by the study aids. One for the
-/// whole app, so the clay, mesh references and exports all agree without
-/// each pass being told.
-static LIGHTING: AtomicU8 = AtomicU8::new(Lighting::Studio as u8);
-
-/// Lights every clay pass's next draws with `lighting`.
-pub fn set_lighting(lighting: Lighting) {
-    LIGHTING.store(lighting as u8, Ordering::Relaxed);
-}
-
-/// The lighting clay passes use now.
-pub fn lighting() -> Lighting {
-    Lighting::ALL
-        .get(usize::from(LIGHTING.load(Ordering::Relaxed)))
-        .copied()
-        .unwrap_or_default()
 }
 
 /// How two silhouettes overlap: flat renders of the clay and of the
@@ -432,7 +421,7 @@ impl ClayPass {
     ) {
         let view: Mat4 = camera.view();
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
-        let rig = lighting().rig();
+        let rig = look.lighting.rig();
         let uniforms = Uniforms {
             view_proj: (camera.projection(aspect) * view).to_cols_array_2d(),
             view: view.to_cols_array_2d(),

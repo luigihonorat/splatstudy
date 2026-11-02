@@ -351,16 +351,19 @@ pub(super) struct ReferenceLook {
     /// this with `ClayPass::prepare_ghost` and `draw_ghost`; splats skip
     /// the depth test.
     pub(super) over: bool,
+    /// Where the light comes from, for a mesh reference that isn't flat.
+    pub(super) lighting: Lighting,
 }
 
 impl App {
     /// The clay's look in the sculpt view.
     pub(super) fn sculpt_look(&self) -> Look {
-        if self.study.silhouette {
+        let look = if self.study.silhouette {
             Look::flat(theme::SILHOUETTE_INK)
         } else {
             Look::lit(theme::CLAY)
-        }
+        };
+        look.with_lighting(self.study.lighting)
     }
 
     /// The reference's look in its own view.
@@ -370,6 +373,7 @@ impl App {
             flat: self.study.silhouette,
             opacity: 1.0,
             over: false,
+            lighting: self.study.lighting,
         }
     }
 
@@ -379,6 +383,7 @@ impl App {
             flat: self.study.silhouette,
             opacity: theme::GHOST_OPACITY,
             over: true,
+            lighting: self.study.lighting,
         })
     }
 
@@ -612,8 +617,6 @@ impl App {
     /// The other aids drawn over the views follow: the proportion measure
     /// and the silhouette match.
     pub(super) fn guides(&mut self, ui: &egui::Ui, rects: [Rect; 2]) {
-        // Before the views are drawn, after this frame's keys and menus.
-        clay::set_lighting(self.study.lighting);
         let (pointer, held) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         if !held {
             self.study.plumb_drag = None;
@@ -838,6 +841,7 @@ impl App {
                 flat: true,
                 opacity: 1.0,
                 over: false,
+                lighting: self.study.lighting,
             };
             self.draw_reference_sized(&mut pass, Slot::ReferenceView, &camera, size, &look);
         }

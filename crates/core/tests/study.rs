@@ -7,7 +7,7 @@
 use egui::Color32;
 use glam::Vec3;
 use splatstudy_core::camera::OrbitCamera;
-use splatstudy_core::render::clay::{ClayPass, GpuMesh, Lighting, Look, Overlap, set_lighting};
+use splatstudy_core::render::clay::{ClayPass, GpuMesh, Lighting, Look, Overlap};
 use splatstudy_core::render::{Slot, ViewTarget, readback::Readback};
 use splatstudy_core::sculpt::Mesh;
 use splatstudy_core::ui::theme::{CLAY, SILHOUETTE_INK, VIEW_BG};
@@ -274,13 +274,9 @@ fn each_lighting_lights_the_clay_from_its_side() {
         eprintln!("no GPU adapter; skipping render test");
         return;
     };
-    // The only test here that lights the clay: the others are flat, so
-    // the lighting they all share does not change them.
     let lit = |lighting: Lighting| {
-        set_lighting(lighting);
-        let data = render(&device, &queue, &Look::lit(CLAY), None);
-        set_lighting(Lighting::Studio);
-        halves(&data)
+        let look = Look::lit(CLAY).with_lighting(lighting);
+        halves(&render(&device, &queue, &look, None))
     };
     let [left, right, top, bottom] = lit(Lighting::Studio);
     assert!(
