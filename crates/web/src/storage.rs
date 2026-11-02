@@ -13,7 +13,7 @@
 //! and says when it is ready (see `splatstudy_core::scene::autosave`); this
 //! decides when to save, and stores.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -219,6 +219,10 @@ pub async fn restore(app: &mut App, search: &str) -> String {
     if !app.restore_autosave(&scene, reference) {
         return search.to_owned();
     }
+    if with_reference {
+        // Known to be stored: a save as the page closes needn't ask.
+        RESTORED_BLOB.set(key.map(|key| key.name()));
+    }
     log::info!("restored the autosave ({} bytes)", scene.len());
     if !with_reference {
         return search.to_owned();
@@ -229,6 +233,11 @@ pub async fn restore(app: &mut App, search: &str) -> String {
         .filter(|pair| !pair.is_empty() && !pair.starts_with("sample="))
         .collect();
     kept.join("&")
+}
+
+thread_local! {
+    /// The reference file the restored autosave named, for the autosave.
+    static RESTORED_BLOB: Cell<Option<String>> = const { Cell::new(None) };
 }
 
 /// Hands the app to a closure; the shell owns it.
@@ -281,7 +290,7 @@ impl Autosave {
                 changed_at: now(),
                 stored: revision,
                 writing: false,
-                stored_blob: None,
+                stored_blob: RESTORED_BLOB.take(),
                 too_big: None,
                 asked_persist: false,
                 trouble: None,
