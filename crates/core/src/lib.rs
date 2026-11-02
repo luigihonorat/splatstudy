@@ -11,6 +11,7 @@ mod app;
 pub mod camera;
 pub mod input;
 pub mod navigation;
+pub mod reference;
 pub mod render;
 pub mod sculpt;
 pub mod ui;
