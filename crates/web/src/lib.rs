@@ -140,7 +140,10 @@ async fn run() -> Result<(), JsValue> {
     if let Some(tag) = query_value(&search, "lang") {
         app.apply_preferences(&format!("lang={tag}"));
     }
-    app.apply_url_options(&search);
+    // The last session first (unless `?fresh`); a sample in the URL
+    // doesn't replace the reference it came back with.
+    let options = storage::restore(&mut app, &search).await;
+    app.apply_url_options(&options);
     app.set_first_run(storage::first_run());
     let preferences = app.preferences();
 
@@ -171,6 +174,12 @@ async fn run() -> Result<(), JsValue> {
     };
     let files = files::Files::new(&document, deliver.clone())?;
     let text = ime::TextInput::new(&document, &canvas, deliver)?;
+    let s = shell.clone();
+    storage::Autosave::start(Rc::new(move |f| {
+        if let Ok(mut shell) = s.try_borrow_mut() {
+            f(&mut shell.app);
+        }
+    }))?;
     animate(shell, files, text, pending);
     let _ = canvas.focus();
     Ok(())
