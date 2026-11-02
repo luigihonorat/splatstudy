@@ -9,6 +9,8 @@ pub struct HelpTr {
     pub reference_text: &'static str,
     pub sculpt_heading: &'static str,
     pub sculpt_text: &'static str,
+    /// Over the study aids' keys.
+    pub study_heading: &'static str,
     /// Under the navigation hint.
     pub navigation_text: &'static str,
     pub more: &'static str,
@@ -22,6 +24,7 @@ pub const JA: HelpTr = HelpTr {
     reference_text: "スプラット（.ply .splat .spz）、3D スキャン（.obj .stl）、画像をウィンドウにドロップするか、ファイル › モチーフを読み込む。",
     sculpt_heading: "塑像",
     sculpt_text: "粘土の上をドラッグ。Ctrl：逆の動き　Shift：スムーズ　[ ]：大きさ",
+    study_heading: "見比べる",
     navigation_text: "ほかの操作方法は「視点操作」メニューから。",
     more: "すべてのショートカット：ヘルプ › キーボードショートカット",
     first_run_hint: "はじめての方へ：使い方",
@@ -33,6 +36,7 @@ pub const EN: HelpTr = HelpTr {
     reference_text: "drop a splat (.ply .splat .spz), a 3D scan (.obj .stl) or an image on the window, or use file › import reference.",
     sculpt_heading: "sculpt",
     sculpt_text: "drag on the clay. Ctrl: opposite action   Shift: smooth   [ ]: size",
+    study_heading: "compare",
     navigation_text: "other styles are in the navigation menu.",
     more: "every shortcut: help › keyboard shortcuts",
     first_run_hint: "new here? getting started",
@@ -44,6 +48,7 @@ pub const FR: HelpTr = HelpTr {
     reference_text: "déposez un splat (.ply .splat .spz), un scan 3D (.obj .stl) ou une image sur la fenêtre, ou passez par fichier › importer un modèle.",
     sculpt_heading: "sculpture",
     sculpt_text: "glissez sur l'argile. Ctrl : action inverse   Maj : lisser   [ ] : taille",
+    study_heading: "comparer",
     navigation_text: "les autres styles sont dans le menu navigation.",
     more: "tous les raccourcis : aide › raccourcis clavier",
     first_run_hint: "première visite ? premiers pas",

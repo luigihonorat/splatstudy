@@ -7,8 +7,10 @@
 use egui::{Align2, RichText};
 
 use super::sculpting::{BRUSHES, brush_name};
+use super::study::Layout;
 use super::{App, Request, SCULPT};
 use crate::input::FilePurpose;
+use crate::reference::samples::Sample;
 use crate::ui::{self, menu, theme};
 
 /// The getting started window and what the URL asked for.
@@ -18,9 +20,6 @@ pub(super) struct HelpState {
     /// First visit: a link under the sculpt view points to getting started
     /// until it is opened or the first stroke is made.
     first_run_hint: bool,
-    /// View names from `?view=`, lowercase, in order. Read by the study part
-    /// through [`App::url_views`].
-    url_views: Vec<String>,
 }
 
 /// A text field being edited, so the shell can put its text input (and the
@@ -39,39 +38,55 @@ impl App {
     /// Applies options given in the page's query string (`?a=1&b=2`, with or
     /// without the `?`) or, on desktop, on the command line:
     ///
-    /// - `sample=<id>` loads `samples/<id>` as the reference, through
-    ///   [`Request::Fetch`].
-    /// - `view=<name>[,<name>…]` (repeatable) asks for study views by name,
-    ///   such as `silhouette` or `ghost`. They are only stored here; the study
-    ///   part reads them with [`App::url_views`] and applies the names it
-    ///   knows.
+    /// - `sample=<id>` loads a bundled sample (see
+    ///   [`SAMPLES`](crate::reference::samples::SAMPLES)) as the reference,
+    ///   through [`Request::Fetch`].
+    /// - `view=<name>[,<name>…]` (repeatable) turns study aids on:
+    ///   `silhouette`, `ghost`, `mirror`, `plumb`, `grid`, `link`, `swap`,
+    ///   and the layout `both`, `sculpt` or `reference`. Unknown names are
+    ///   logged and skipped.
     ///
     /// `lang` and `debug` are read by the shells themselves.
     pub fn apply_url_options(&mut self, query: &str) {
         for (key, value) in query_pairs(query) {
             match key {
-                "sample" if is_sample_id(value) => self.request(Request::Fetch {
-                    url: format!("samples/{value}"),
-                    purpose: FilePurpose::Reference,
-                }),
-                "sample" => log::warn!("ignored sample id {value:?}"),
-                "view" => self.help.url_views.extend(
-                    value
-                        .split(',')
-                        .map(|v| v.trim().to_ascii_lowercase())
-                        .filter(|v| !v.is_empty()),
-                ),
+                "sample" => match Sample::by_id(value) {
+                    Some(sample) => self.request(Request::Fetch {
+                        url: sample.path(),
+                        purpose: FilePurpose::Reference,
+                    }),
+                    None => log::warn!("no sample {value:?}"),
+                },
+                "view" => {
+                    for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                        if !self.apply_view(&name.to_ascii_lowercase()) {
+                            log::warn!("no view {name:?}");
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         self.dirty = true;
     }
 
-    /// The study views asked for in the URL (`?view=silhouette,ghost`), in
-    /// order. Names the study part doesn't know should be ignored.
-    #[allow(dead_code)] // until the study part reads it
-    pub(super) fn url_views(&self) -> &[String] {
-        &self.help.url_views
+    /// Turns on one study aid by its URL name; false if there is none.
+    fn apply_view(&mut self, name: &str) -> bool {
+        let st = &mut self.study;
+        match name {
+            "silhouette" => st.silhouette = true,
+            "ghost" => st.ghost = true,
+            "mirror" => st.mirror = true,
+            "plumb" => st.plumb = true,
+            "grid" => st.grid = true,
+            "link" => st.link = true,
+            "swap" => st.swapped = true,
+            "both" => st.layout = Layout::Both,
+            "sculpt" => st.layout = Layout::Sculpt,
+            "reference" => st.layout = Layout::Reference,
+            _ => return false,
+        }
+        true
     }
 
     /// The shell knows whether this is the first visit (it keeps a flag in
@@ -142,6 +157,18 @@ impl App {
                     .map(|&(brush, key, _)| format!("{} {}", key.name(), brush_name(tr, brush)))
                     .collect();
                 ui.label(RichText::new(keys.join("   ")).color(muted));
+                ui::section(ui, h.study_heading);
+                let study = [
+                    ("L", tr.link_cameras),
+                    ("W", tr.study.swap_sides),
+                    ("R", tr.mirror_view),
+                    ("K", tr.silhouette),
+                    ("O", tr.ghost),
+                    ("V", tr.plumb_line),
+                    ("G", tr.grid),
+                ]
+                .map(|(key, name)| format!("{key} {name}"));
+                ui.label(RichText::new(study.join("   ")).color(muted));
                 ui::section(ui, tr.navigation);
                 ui.label(self.nav_hint());
                 ui.label(RichText::new(h.navigation_text).color(muted));
@@ -210,15 +237,6 @@ fn query_pairs(query: &str) -> impl Iterator<Item = (&str, &str)> {
         .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
 }
 
-/// A sample id is a plain file name: no folders, no leading dot.
-fn is_sample_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.starts_with('.')
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,16 +247,5 @@ mod tests {
         assert_eq!(pairs, [("lang", "ja"), ("debug", ""), ("view", "ghost")]);
         assert_eq!(query_pairs("").count(), 0);
         assert_eq!(query_pairs("?").count(), 0);
-    }
-
-    #[test]
-    fn sample_ids_stay_inside_the_samples_folder() {
-        assert!(is_sample_id("venus.spz"));
-        assert!(is_sample_id("cast_01-head.ply"));
-        assert!(!is_sample_id(""));
-        assert!(!is_sample_id("../index.html"));
-        assert!(!is_sample_id(".hidden"));
-        assert!(!is_sample_id("a/b.ply"));
-        assert!(!is_sample_id("https:%2F%2Fexample.com"));
     }
 }
