@@ -252,6 +252,10 @@ impl Stamp {
 /// Reorders vertices along a Morton (Z-order) curve and triangles by their
 /// first vertex, so nearby surface is nearby in memory: a brush stroke then
 /// touches a few contiguous ranges of the GPU buffer.
+///
+/// Both sorts are stable and done by counting, in linear time: vertices
+/// with the same code, and triangles with the same first vertex, keep
+/// their order, so the result is always the same for the same input.
 fn spatial_order(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
     let (min, max) = positions
         .iter()
@@ -270,19 +274,57 @@ fn spatial_order(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> (Vec<Vec3>, 
         let q = ((p - min) * scale).as_uvec3();
         spread(q.x) | (spread(q.y) << 1) | (spread(q.z) << 2)
     };
-    let mut order: Vec<u32> = (0..positions.len() as u32).collect();
-    order.sort_by_key(|&i| code(positions[i as usize]));
+    let codes: Vec<u32> = positions.iter().map(|&p| code(p)).collect();
+    let order = radix_order(&codes);
     let mut remap = vec![0u32; positions.len()];
     for (new, &old) in order.iter().enumerate() {
         remap[old as usize] = new as u32;
     }
     let positions = order.iter().map(|&i| positions[i as usize]).collect();
-    let mut triangles: Vec<[u32; 3]> = triangles
-        .into_iter()
-        .map(|t| t.map(|i| remap[i as usize]))
-        .collect();
-    triangles.sort_by_key(|t| t[0].min(t[1]).min(t[2]));
-    (positions, triangles)
+    // Triangles by their lowest corner, counted into place.
+    let mut start = vec![0u32; remap.len() + 1];
+    for t in &triangles {
+        let first = t.iter().map(|&i| remap[i as usize]).min().unwrap_or(0);
+        start[first as usize + 1] += 1;
+    }
+    for i in 1..start.len() {
+        start[i] += start[i - 1];
+    }
+    let mut sorted = vec![[0u32; 3]; triangles.len()];
+    for t in triangles {
+        let t = t.map(|i| remap[i as usize]);
+        let first = t[0].min(t[1]).min(t[2]) as usize;
+        sorted[start[first] as usize] = t;
+        start[first] += 1;
+    }
+    (positions, sorted)
+}
+
+/// The indices of `codes` (30-bit Morton codes) in increasing order of
+/// their code, ties in index order: a least-significant-digit radix sort,
+/// three passes of ten bits.
+fn radix_order(codes: &[u32]) -> Vec<u32> {
+    const BITS: u32 = 10;
+    const BUCKETS: usize = 1 << BITS;
+    let mut order: Vec<u32> = (0..codes.len() as u32).collect();
+    let mut next = vec![0u32; codes.len()];
+    for pass in 0..3 {
+        let digit = |i: u32| (codes[i as usize] >> (pass * BITS)) as usize & (BUCKETS - 1);
+        let mut start = [0u32; BUCKETS + 1];
+        for &i in &order {
+            start[digit(i) + 1] += 1;
+        }
+        for b in 1..=BUCKETS {
+            start[b] += start[b - 1];
+        }
+        for &i in &order {
+            let d = digit(i);
+            next[start[d] as usize] = i;
+            start[d] += 1;
+        }
+        std::mem::swap(&mut order, &mut next);
+    }
+    order
 }
 
 fn vertex_faces(vertex_count: usize, triangles: &[[u32; 3]]) -> Adjacency {
@@ -393,6 +435,70 @@ mod tests {
         }
     }
 
+    /// The order the comparison sorts gave, before the counting sorts.
+    fn sorted_the_old_way(
+        positions: &[Vec3],
+        triangles: &[[u32; 3]],
+    ) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let (min, max) = positions
+            .iter()
+            .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &p| {
+                (lo.min(p), hi.max(p))
+            });
+        let scale = 1023.0 / (max - min).max_element().max(1e-12);
+        let spread = |v: u32| {
+            let mut x = v & 0x3ff;
+            x = (x | (x << 16)) & 0x0300_00ff;
+            x = (x | (x << 8)) & 0x0300_f00f;
+            x = (x | (x << 4)) & 0x030c_30c3;
+            (x | (x << 2)) & 0x0924_9249
+        };
+        let code = |p: Vec3| {
+            let q = ((p - min) * scale).as_uvec3();
+            spread(q.x) | (spread(q.y) << 1) | (spread(q.z) << 2)
+        };
+        let mut order: Vec<u32> = (0..positions.len() as u32).collect();
+        order.sort_by_key(|&i| code(positions[i as usize]));
+        let mut remap = vec![0u32; positions.len()];
+        for (new, &old) in order.iter().enumerate() {
+            remap[old as usize] = new as u32;
+        }
+        let positions = order.iter().map(|&i| positions[i as usize]).collect();
+        let mut triangles: Vec<[u32; 3]> = triangles
+            .iter()
+            .map(|t| t.map(|i| remap[i as usize]))
+            .collect();
+        triangles.sort_by_key(|t| t[0].min(t[1]).min(t[2]));
+        (positions, triangles)
+    }
+
+    #[test]
+    fn counting_sorts_give_the_same_order_as_before() {
+        // Saved scenes keep their order, but a fresh mesh should come out
+        // as it always did: a remesh's raw output and a shuffled sphere.
+        let sphere = Mesh::icosphere(4);
+        let field = crate::voxel::sdf::signed_distance(&sphere.positions, &sphere.triangles, 40, 0);
+        let (raw_p, raw_t) = crate::voxel::nets::surface_nets(&field.unwrap());
+        let mut shuffled_p = sphere.positions.clone();
+        let n = shuffled_p.len();
+        let perm: Vec<u32> = (0..n as u32).map(|i| (i * 7919) % n as u32).collect();
+        for (i, &j) in perm.iter().enumerate() {
+            shuffled_p[j as usize] = sphere.positions[i];
+        }
+        let shuffled_t: Vec<[u32; 3]> = sphere
+            .triangles
+            .iter()
+            .rev()
+            .map(|t| t.map(|v| perm[v as usize]))
+            .collect();
+        for (p, t) in [(raw_p, raw_t), (shuffled_p, shuffled_t)] {
+            let (old_p, old_t) = sorted_the_old_way(&p, &t);
+            let (new_p, new_t) = spatial_order(p, t);
+            assert_eq!(new_p, old_p);
+            assert_eq!(new_t, old_t);
+        }
+    }
+
     #[test]
     fn a_huge_fan_builds_quickly_with_each_neighbour_once() {
         // 200k triangles around one vertex: the ring is built in linear time.
@@ -487,7 +593,7 @@ mod tests {
             }
             let [order, faces, ring, normals, all] = best;
             println!(
-                "{name}, {} vertices: Mesh::new {all:.1} ms = order {order:.1}                  + faces {faces:.1} + neighbours {ring:.1} + normals {normals:.1}",
+                "{name}, {} vertices: Mesh::new {all:.1} ms = order {order:.1} + faces {faces:.1} + neighbours {ring:.1} + normals {normals:.1}",
                 positions.len()
             );
         }
