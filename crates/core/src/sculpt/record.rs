@@ -701,6 +701,25 @@ mod tests {
     }
 
     #[test]
+    fn ending_without_a_stroke_logs_nothing_even_after_reopening() {
+        let mut live = Sculpt::new(Mesh::icosphere(3));
+        session_at(&mut live, 0.0, 0.0);
+        let (log, checkpoints) = (live.log().to_vec(), live.checkpoints().to_vec());
+        // A camera drag ending: no stroke is open.
+        live.end_stroke();
+        assert_eq!(live.log(), &log[..]);
+        let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
+        let mut reopened = Sculpt::with_history(current, log.clone(), checkpoints.clone());
+        reopened.end_stroke();
+        assert_eq!(reopened.log(), &log[..], "no stray End");
+        assert_eq!(
+            reopened.checkpoints(),
+            &checkpoints[..],
+            "no resume checkpoint"
+        );
+    }
+
+    #[test]
     fn a_reopened_scene_sculpted_on_still_replays_bit_for_bit() {
         let mut live = Sculpt::new(Mesh::icosphere(4));
         let clock = session_at(&mut live, 0.0, 0.0);

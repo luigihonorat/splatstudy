@@ -443,8 +443,14 @@ impl Sculpt {
 
     /// Closes the stroke and makes it one undo step.
     pub fn end_stroke(&mut self) {
+        // Nothing open (a camera drag ended, a timelapse started): nothing
+        // to log. A stray `End` would count as an edit for the autosave,
+        // and on a reopened scene log a whole checkpoint.
+        if !std::mem::take(&mut self.stroke_open) {
+            return;
+        }
         self.record(Event::End);
-        if !std::mem::take(&mut self.stroke_open) || self.stroke_indices.is_empty() {
+        if self.stroke_indices.is_empty() {
             return;
         }
         let indices = std::mem::take(&mut self.stroke_indices);
