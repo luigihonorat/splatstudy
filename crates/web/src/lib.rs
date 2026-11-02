@@ -157,13 +157,21 @@ async fn run() -> Result<(), JsValue> {
         preferences,
     }));
     listen(&shell, &canvas)?;
+    // Files and text input deliver from their own callbacks. One can fire
+    // while the shell is borrowed (moving the focus commits an IME word
+    // synchronously), so such events wait for the next frame instead.
+    let pending: Rc<RefCell<Vec<InputEvent>>> = Rc::default();
     let deliver: files::Deliver = {
         let s = shell.clone();
-        Rc::new(move |e| s.borrow_mut().app.push_event(e))
+        let p = pending.clone();
+        Rc::new(move |e| match s.try_borrow_mut() {
+            Ok(mut shell) => shell.app.push_event(e),
+            Err(_) => p.borrow_mut().push(e),
+        })
     };
     let files = files::Files::new(&document, deliver.clone())?;
     let text = ime::TextInput::new(&document, &canvas, deliver)?;
-    animate(shell, files, text);
+    animate(shell, files, text, pending);
     let _ = canvas.focus();
     Ok(())
 }
@@ -202,17 +210,16 @@ fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), 
         let c = canvas.clone();
         on(canvas, name, false, move |e: DomPointer| {
             e.prevent_default();
+            if phase == PointerPhase::Down {
+                let _ = c.set_pointer_capture(e.pointer_id());
+                // Before borrowing the shell: taking the focus from the IME
+                // commits its word, which is delivered first, as typed.
+                let _ = c.focus();
+            }
             let mut shell = s.borrow_mut();
             shell.update_modifiers(&e);
-            match phase {
-                PointerPhase::Down => {
-                    let _ = c.set_pointer_capture(e.pointer_id());
-                    let _ = c.focus();
-                }
-                PointerPhase::Up | PointerPhase::Cancel => {
-                    let _ = c.release_pointer_capture(e.pointer_id());
-                }
-                PointerPhase::Move => {}
+            if matches!(phase, PointerPhase::Up | PointerPhase::Cancel) {
+                let _ = c.release_pointer_capture(e.pointer_id());
             }
             // A pen reports several samples per frame; the brush wants them all.
             let coalesced = if phase == PointerPhase::Move {
@@ -275,7 +282,10 @@ fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), 
                     repeat: e.repeat(),
                 });
             }
-            let shortcut = e.ctrl_key() || e.meta_key();
+            // Windows reports AltGr (for @ # € on French and German
+            // keyboards) as Ctrl+Alt: that is typing, not a shortcut.
+            let altgr = e.get_modifier_state("AltGraph") || (e.ctrl_key() && e.alt_key());
+            let shortcut = (e.ctrl_key() || e.meta_key()) && !altgr;
             if pressed && !shortcut && name.chars().count() == 1 {
                 shell.app.push_event(InputEvent::Text(name.clone()));
             }
@@ -440,18 +450,29 @@ type FrameCallback = Closure<dyn FnMut()>;
 
 /// Runs a frame on every animation frame, then the app's requests, outside
 /// the shell's borrow: files and text input hand events back to it.
-fn animate(shell: Rc<RefCell<Shell>>, files: files::Files, text: ime::TextInput) {
+fn animate(
+    shell: Rc<RefCell<Shell>>,
+    files: files::Files,
+    text: ime::TextInput,
+    pending: Rc<RefCell<Vec<InputEvent>>>,
+) {
     let callback: Rc<RefCell<Option<FrameCallback>>> = Rc::new(RefCell::new(None));
     let next = callback.clone();
     *callback.borrow_mut() = Some(Closure::new(move || {
         let now = web_sys::window()
             .and_then(|w| w.performance())
             .map_or(0.0, |p| p.now() / 1000.0);
+        let queued = std::mem::take(&mut *pending.borrow_mut());
+        for event in queued {
+            shell.borrow_mut().app.push_event(event);
+        }
         let requests = shell.borrow_mut().frame(now);
         for request in requests {
             files.handle(request);
         }
-        text.update(shell.borrow().text_field());
+        // Not borrowed while updating: that may move the focus.
+        let field = shell.borrow().text_field();
+        text.update(field);
         request_frame(next.borrow().as_ref().expect("frame callback"));
     }));
     request_frame(callback.borrow().as_ref().expect("frame callback"));

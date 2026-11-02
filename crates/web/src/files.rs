@@ -28,6 +28,27 @@ pub type Deliver = Rc<dyn Fn(InputEvent)>;
 const SLICE: usize = 16 << 20;
 /// How long a download's object URL is kept before it is revoked, in ms.
 const REVOKE_AFTER_MS: i32 = 60_000;
+/// Larger files aren't read: the buffer alone could exhaust the page's
+/// memory, and no reference or scene is that big.
+const MAX_FILE: usize = 1 << 30;
+
+thread_local! {
+    /// The newest read or fetch. A slow read that finishes after a newer
+    /// one has started is dropped instead of replacing it.
+    static LATEST: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Starts a read, making every older one stale.
+fn ticket() -> u64 {
+    LATEST.with(|l| {
+        l.set(l.get() + 1);
+        l.get()
+    })
+}
+
+fn is_latest(ticket: u64) -> bool {
+    LATEST.with(|l| l.get() == ticket)
+}
 
 pub struct Files {
     document: Document,
@@ -160,11 +181,17 @@ fn read_all(files: Vec<File>, purpose: FilePurpose, deliver: Deliver) {
     if files.is_empty() {
         return;
     }
+    let ticket = ticket();
     wasm_bindgen_futures::spawn_local(async move {
         for file in files {
             let name = file.name();
             let start = js_sys::Date::now();
-            match read_blob(&file).await {
+            let read = read_blob(&file).await;
+            if !is_latest(ticket) {
+                log::info!("{name} was replaced by a newer file before it was read");
+                return;
+            }
+            match read {
                 Ok(bytes) => {
                     log::info!(
                         "read {name}: {} bytes in {} ms",
@@ -177,7 +204,15 @@ fn read_all(files: Vec<File>, purpose: FilePurpose, deliver: Deliver) {
                         bytes,
                     });
                 }
-                Err(err) => log::error!("could not read {name}: {err:?}"),
+                Err(err) => {
+                    log::error!("could not read {name}: {err:?}");
+                    // Empty, so the app says it can't open this file.
+                    deliver(InputEvent::File {
+                        purpose,
+                        name,
+                        bytes: Arc::from([]),
+                    });
+                }
             }
         }
     });
@@ -185,8 +220,13 @@ fn read_all(files: Vec<File>, purpose: FilePurpose, deliver: Deliver) {
 
 /// Fetches a file shipped next to the page and hands it to the app.
 fn fetch(url: String, purpose: FilePurpose, deliver: Deliver) {
+    let ticket = ticket();
     wasm_bindgen_futures::spawn_local(async move {
-        match fetch_bytes(&url).await {
+        let fetched = fetch_bytes(&url).await;
+        if !is_latest(ticket) {
+            return;
+        }
+        match fetched {
             Ok(bytes) => deliver(InputEvent::File {
                 purpose,
                 name: file_name(&url).to_owned(),
@@ -208,6 +248,9 @@ async fn fetch_bytes(url: &str) -> Result<Arc<[u8]>, JsValue> {
     }
     let buffer = JsFuture::from(response.array_buffer()?).await?;
     let view = Uint8Array::new(&buffer);
+    if view.length() as usize > MAX_FILE {
+        return Err("file too large".into());
+    }
     let mut bytes = Arc::<[u8]>::new_uninit_slice(view.length() as usize);
     view.copy_to_uninit(Arc::get_mut(&mut bytes).expect("new buffer"));
     // SAFETY: `copy_to_uninit` filled the whole buffer.
@@ -220,6 +263,9 @@ async fn fetch_bytes(url: &str) -> Result<Arc<[u8]>, JsValue> {
 /// large file that alone stalls the page.
 async fn read_blob(blob: &Blob) -> Result<Arc<[u8]>, JsValue> {
     let size = blob.size() as usize;
+    if size > MAX_FILE {
+        return Err(format!("{size} bytes is more than the {MAX_FILE} allowed").into());
+    }
     let mut bytes = Arc::<[u8]>::new_uninit_slice(size);
     let out = Arc::get_mut(&mut bytes).expect("new buffer");
     let mut start = 0;

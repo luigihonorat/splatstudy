@@ -12,6 +12,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sdl3::EventSubsystem;
@@ -23,10 +24,20 @@ use splatstudy_core::{FilePurpose, InputEvent, Request};
 /// The custom event that wakes the main loop.
 struct Wake;
 
+/// Larger files aren't read: no reference or scene is that big, and the
+/// buffer alone could exhaust memory.
+const MAX_FILE: u64 = 2 << 30;
+
+/// The newest read. A slow read that finishes after a newer one started is
+/// dropped instead of replacing it.
+static LATEST: AtomicU64 = AtomicU64::new(0);
+
 /// Results waiting for the main thread, and a way to wake it.
 #[derive(Clone)]
 struct Inbox {
     events: Arc<Mutex<Vec<InputEvent>>>,
+    /// Failures to tell the user about, from any thread.
+    errors: Arc<Mutex<Vec<String>>>,
     /// `None` when no custom event could be registered: the loop then picks
     /// results up within its idle timeout.
     wake: Option<Arc<EventSender>>,
@@ -44,19 +55,42 @@ impl Inbox {
         }
     }
 
+    fn error(&self, message: String) {
+        log::error!("{message}");
+        if let Ok(mut errors) = self.errors.lock() {
+            errors.push(message);
+        }
+        if let Some(sender) = &self.wake {
+            let _ = sender.push_custom_event(Wake);
+        }
+    }
+
     /// Reads a file on a worker thread and delivers it.
     fn read_later(&self, path: PathBuf, purpose: FilePurpose) {
         let inbox = self.clone();
-        std::thread::spawn(move || match read(&path) {
-            Ok(bytes) => {
-                log::info!("read {}: {} bytes", path.display(), bytes.len());
-                inbox.push(InputEvent::File {
-                    purpose,
-                    name: file_name(&path),
-                    bytes,
-                });
+        let ticket = LATEST.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            let read = read(&path);
+            if LATEST.load(Ordering::SeqCst) != ticket {
+                log::info!("{} was replaced by a newer file", path.display());
+                return;
             }
-            Err(e) => log::error!("could not read {}: {e}", path.display()),
+            let bytes = match read {
+                Ok(bytes) => {
+                    log::info!("read {}: {} bytes", path.display(), bytes.len());
+                    bytes
+                }
+                Err(e) => {
+                    log::error!("could not read {}: {e}", path.display());
+                    // Empty, so the app says it can't open this file.
+                    Arc::from([])
+                }
+            };
+            inbox.push(InputEvent::File {
+                purpose,
+                name: file_name(&path),
+                bytes,
+            });
         });
     }
 }
@@ -65,6 +99,8 @@ pub struct Files {
     inbox: Inbox,
     /// The folder picked last, for `WriteFile`.
     folder: Option<PathBuf>,
+    /// A write into the folder failed: the rest are skipped, with one message.
+    write_failed: bool,
 }
 
 impl Files {
@@ -79,9 +115,11 @@ impl Files {
         Self {
             inbox: Inbox {
                 events: Arc::default(),
+                errors: Arc::default(),
                 wake,
             },
             folder: None,
+            write_failed: false,
         }
     }
 
@@ -98,10 +136,21 @@ impl Files {
         };
         for event in &events {
             if let InputEvent::Folder { path } = event {
-                self.folder = Some(PathBuf::from(path));
+                // An empty path: the picker was cancelled.
+                self.folder = (!path.is_empty()).then(|| PathBuf::from(path));
+                self.write_failed = false;
             }
         }
         events
+    }
+
+    /// Failures since the last call, to show the user.
+    pub fn take_errors(&self) -> Vec<String> {
+        self.inbox
+            .errors
+            .lock()
+            .map(|mut e| std::mem::take(&mut *e))
+            .unwrap_or_default()
     }
 
     /// Does what the app asked for after a frame.
@@ -158,15 +207,17 @@ impl Files {
         // it rather than kept inside.
         let bytes = Mutex::new(Some(bytes));
         let wanted = ext.clone();
+        let inbox = self.inbox.clone();
         let result = dialog::show_save_file_dialog(
             &filters,
             Some(name),
             window,
             Box::new(move |result, _| {
-                let Some(mut path) = chosen(result) else {
+                // Taken first, so a cancel frees them too.
+                let Some(bytes) = bytes.lock().ok().and_then(|mut b| b.take()) else {
                     return;
                 };
-                let Some(bytes) = bytes.lock().ok().and_then(|mut b| b.take()) else {
+                let Some(mut path) = chosen(result) else {
                     return;
                 };
                 if path.extension().is_none() && wanted != "*" {
@@ -174,7 +225,7 @@ impl Files {
                 }
                 match std::fs::write(&path, bytes) {
                     Ok(()) => log::info!("saved {}", path.display()),
-                    Err(e) => log::error!("could not save {}: {e}", path.display()),
+                    Err(e) => inbox.error(format!("Could not save {}: {e}", path.display())),
                 }
             }),
         );
@@ -190,17 +241,20 @@ impl Files {
             false,
             window,
             Box::new(move |result, _| {
-                if let Some(path) = chosen(result) {
-                    inbox.push(InputEvent::Folder {
-                        path: path.to_string_lossy().into_owned(),
-                    });
-                }
+                // An empty path tells the app the picker was cancelled.
+                let path = chosen(result)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                inbox.push(InputEvent::Folder { path });
             }),
         );
     }
 
     /// Writes into the picked folder; an absolute path is written as is.
-    fn write(&self, path: &str, bytes: &[u8]) {
+    fn write(&mut self, path: &str, bytes: &[u8]) {
+        if self.write_failed {
+            return;
+        }
         let path = Path::new(path);
         let target = if path.is_absolute() {
             path.to_owned()
@@ -211,7 +265,9 @@ impl Files {
             return;
         };
         if let Err(e) = std::fs::write(&target, bytes) {
-            log::error!("could not write {}: {e}", target.display());
+            self.write_failed = true;
+            self.inbox
+                .error(format!("Could not write {}: {e}", target.display()));
         }
     }
 
@@ -246,7 +302,11 @@ fn chosen(result: Result<Vec<PathBuf>, DialogError>) -> Option<PathBuf> {
 /// Reads a whole file straight into a shared buffer, without a second copy.
 fn read(path: &Path) -> std::io::Result<Arc<[u8]>> {
     let mut file = File::open(path)?;
-    let len = usize::try_from(file.metadata()?.len()).map_err(std::io::Error::other)?;
+    let len = file.metadata()?.len();
+    if len > MAX_FILE {
+        return Err(std::io::Error::other(format!("{len} bytes is too large")));
+    }
+    let len = usize::try_from(len).map_err(std::io::Error::other)?;
     let mut bytes: Arc<[u8]> = std::iter::repeat_n(0, len).collect();
     file.read_exact(Arc::get_mut(&mut bytes).expect("new buffer"))?;
     Ok(bytes)

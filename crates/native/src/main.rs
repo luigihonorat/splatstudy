@@ -154,6 +154,14 @@ fn run() -> Result<(), String> {
         for e in files.take() {
             app.push_event(e);
         }
+        for message in files.take_errors() {
+            let _ = sdl3::messagebox::show_simple_message_box(
+                sdl3::messagebox::MessageBoxFlag::ERROR,
+                "SplatStudy",
+                &message,
+                Some(&window),
+            );
+        }
 
         let due = redraw_at.is_some_and(|t| Instant::now() >= t);
         if !app.needs_frame() && !due {
@@ -164,6 +172,9 @@ fn run() -> Result<(), String> {
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface.configure(&device, &config);
+                // A minimized window stays outdated: retry later, not in a
+                // busy loop.
+                redraw_at = Some(Instant::now() + Duration::from_millis(16));
                 continue;
             }
             _ => {
