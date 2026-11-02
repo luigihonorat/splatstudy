@@ -304,7 +304,6 @@ impl App {
     }
 
     pub(super) fn reference_panel(&mut self, ui: &mut egui::Ui) {
-        self.refresh_mesh();
         let tr = self.lang.tr();
         ui::section(ui, tr.reference_tools);
         if ui::choice(ui, tr.open_reference, false).clicked() {
@@ -321,6 +320,8 @@ impl App {
                 .auto_shrink([false; 2])
                 .show(ui, |ui| self.reference_controls(ui));
         }
+        // Before this frame's views are drawn.
+        self.refresh_mesh();
         // Drawn from here until the views call it themselves; the rectangle
         // is the one laid out last frame.
         self.reference_overlay(ui.ctx(), self.view_rects[REFERENCE]);
