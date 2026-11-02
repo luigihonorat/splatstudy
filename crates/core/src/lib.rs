@@ -8,8 +8,10 @@
 //! touches the platform directly; time arrives as an argument.
 
 mod app;
+pub mod camera;
 pub mod input;
 pub mod render;
+pub mod sculpt;
 pub mod ui;
 
 pub use app::{App, FrameOutput};

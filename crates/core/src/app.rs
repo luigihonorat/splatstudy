@@ -7,8 +7,10 @@ use egui::{
     Align, Align2, Color32, CursorIcon, Frame, Layout, Margin, Rect, RichText, Sense, Stroke,
 };
 
+use crate::camera::OrbitCamera;
 use crate::input::{InputEvent, InputState, PointerKind};
-use crate::render::{self, ViewTarget};
+use crate::render::{self, ViewTarget, clay::ClayPass, clay::GpuMesh};
+use crate::sculpt::{DEFAULT_LEVEL, Mesh};
 use crate::ui::{self, fonts, i18n::Lang, theme::ThemeMode};
 
 /// What the shell should do after a frame.
@@ -21,6 +23,10 @@ pub struct FrameOutput {
 
 const SCULPT: usize = 0;
 const REFERENCE: usize = 1;
+
+/// Navigation speeds: dolly per point dragged, and per point scrolled.
+const DOLLY_DRAG: f32 = 0.005;
+const DOLLY_WHEEL: f32 = 0.0015;
 
 pub struct App {
     device: wgpu::Device,
@@ -38,6 +44,11 @@ pub struct App {
     views: [ViewTarget; 2],
     /// Where each view sits, in points; set by the last layout.
     view_rects: [Rect; 2],
+    cameras: [OrbitCamera; 2],
+    clay: ClayPass,
+    #[expect(dead_code, reason = "the brushes (next step) edit it")]
+    mesh: Mesh,
+    gpu_mesh: GpuMesh,
     dirty: bool,
 }
 
@@ -57,10 +68,16 @@ impl App {
             surface_format,
             egui_wgpu::RendererOptions::default(),
         );
-        let views = [
-            ViewTarget::new(&device, &mut renderer, [1, 1]),
-            ViewTarget::new(&device, &mut renderer, [1, 1]),
+        let mut views = [
+            ViewTarget::new(&device, [1, 1]),
+            ViewTarget::new(&device, [1, 1]),
         ];
+        for view in &mut views {
+            view.register(&device, &mut renderer);
+        }
+        let mesh = Mesh::icosphere(DEFAULT_LEVEL);
+        let gpu_mesh = GpuMesh::new(&device, &mesh);
+        let clay = ClayPass::new(&device);
         Self {
             device,
             queue,
@@ -75,6 +92,10 @@ impl App {
             split: 0.5,
             views,
             view_rects: [Rect::NOTHING; 2],
+            cameras: [OrbitCamera::default(); 2],
+            clay,
+            mesh,
+            gpu_mesh,
             dirty: true,
         }
     }
@@ -138,9 +159,7 @@ impl App {
         let resized = self.fit_views(ppp);
         let palette = self.theme.palette();
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        for view in &self.views {
-            clear(&mut encoder, &view.view, palette.vp_bg);
-        }
+        self.render_views(&mut encoder);
 
         for (id, deltas) in output.textures_delta.set.drain() {
             for delta in deltas {
@@ -199,6 +218,23 @@ impl App {
             cursor: output.platform_output.cursor_icon,
             repaint_after,
         }
+    }
+
+    fn render_views(&self, encoder: &mut wgpu::CommandEncoder) {
+        let p = self.theme.palette();
+        let sculpt = &self.views[SCULPT];
+        self.clay.prepare(
+            &self.queue,
+            &self.cameras[SCULPT],
+            sculpt.aspect(),
+            p.vp_geo,
+        );
+        {
+            let mut pass = sculpt.begin_pass(encoder, p.vp_bg);
+            self.clay.draw(&mut pass, &self.gpu_mesh);
+        }
+        // Nothing loaded in the reference view yet: just its background.
+        drop(self.views[REFERENCE].begin_pass(encoder, p.vp_bg));
     }
 
     fn fit_views(&mut self, ppp: f32) -> bool {
@@ -271,10 +307,16 @@ impl App {
         let right = Rect::from_x_y_ranges(x + 1.0..=area.right(), area.y_range());
         self.view_rects = [left, right];
 
+        for (index, rect) in [left, right].into_iter().enumerate() {
+            self.navigate(ui, rect, index);
+        }
+
         let painter = ui.painter();
         let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         for (view, rect) in self.views.iter().zip([left, right]) {
-            painter.image(view.egui_id, rect, uv, Color32::WHITE);
+            if let Some(id) = view.egui_id {
+                painter.image(id, rect, uv, Color32::WHITE);
+            }
         }
         painter.hline(area.x_range(), area.top() + 0.5, Stroke::new(1.0, p.border));
         painter.vline(x + 0.5, area.y_range(), Stroke::new(1.0, p.border));
@@ -302,7 +344,32 @@ impl App {
         if self.debug {
             self.debug_hud(ui, left);
         }
-        let _ = (SCULPT, REFERENCE);
+    }
+
+    /// Houdini-style navigation: left drag turns, middle drag pans, right
+    /// drag and the wheel dolly. (In the sculpt view the left button will
+    /// sculpt, with Alt or Space held to navigate.)
+    fn navigate(&mut self, ui: &egui::Ui, rect: Rect, index: usize) {
+        let response = ui.interact(
+            rect,
+            ui.scope_id().with(("view", index)),
+            Sense::click_and_drag(),
+        );
+        let delta = response.drag_delta();
+        let camera = &mut self.cameras[index];
+        if response.dragged_by(egui::PointerButton::Primary) {
+            camera.orbit(delta.x, delta.y);
+        } else if response.dragged_by(egui::PointerButton::Middle) {
+            camera.pan(delta.x, delta.y, rect.height());
+        } else if response.dragged_by(egui::PointerButton::Secondary) {
+            camera.dolly((delta.y * DOLLY_DRAG).exp());
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                camera.dolly((-scroll * DOLLY_WHEEL).exp());
+            }
+        }
     }
 
     fn debug_hud(&self, ui: &egui::Ui, rect: Rect) {
@@ -332,20 +399,4 @@ impl App {
             p.text,
         );
     }
-}
-
-fn clear(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, color: Color32) {
-    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("clear view"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(render::clear_color(color)),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        ..Default::default()
-    });
 }

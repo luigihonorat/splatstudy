@@ -7,29 +7,85 @@
 //! Every format is non-sRGB: colours are written as they should appear, and
 //! shaders do any conversion explicitly.
 
-pub const VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+pub mod clay;
 
-/// An offscreen colour target for one 3D view, registered with egui.
+pub const VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub const SAMPLES: u32 = 4;
+
+/// The render targets of one 3D view: multisampled colour and depth, and the
+/// resolved texture that egui shows.
 pub struct ViewTarget {
-    pub texture: wgpu::Texture,
-    pub view: wgpu::TextureView,
+    pub resolved: wgpu::Texture,
+    pub resolved_view: wgpu::TextureView,
+    pub msaa_view: wgpu::TextureView,
+    pub depth_view: wgpu::TextureView,
     pub size: [u32; 2],
-    pub egui_id: egui::TextureId,
+    pub egui_id: Option<egui::TextureId>,
 }
 
 impl ViewTarget {
-    pub fn new(device: &wgpu::Device, renderer: &mut egui_wgpu::Renderer, size: [u32; 2]) -> Self {
-        let (texture, view) = create(device, size);
-        let egui_id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Nearest);
-        Self {
-            texture,
-            view,
+    pub fn new(device: &wgpu::Device, size: [u32; 2]) -> Self {
+        let size = [size[0].max(1), size[1].max(1)];
+        let resolved = texture(
+            device,
             size,
-            egui_id,
+            1,
+            VIEW_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+        );
+        let msaa = texture(
+            device,
+            size,
+            SAMPLES,
+            VIEW_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let depth = texture(
+            device,
+            size,
+            SAMPLES,
+            DEPTH_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        Self {
+            resolved_view: resolved.create_view(&Default::default()),
+            resolved,
+            msaa_view: msaa.create_view(&Default::default()),
+            depth_view: depth.create_view(&Default::default()),
+            size,
+            egui_id: None,
         }
     }
 
-    /// Recreates the texture when the panel changed size. Returns true if it did.
+    /// Shows this target in egui, registering it the first time.
+    pub fn register(
+        &mut self,
+        device: &wgpu::Device,
+        renderer: &mut egui_wgpu::Renderer,
+    ) -> egui::TextureId {
+        let filter = wgpu::FilterMode::Nearest;
+        match self.egui_id {
+            Some(id) => {
+                renderer.update_egui_texture_from_wgpu_texture(
+                    device,
+                    &self.resolved_view,
+                    filter,
+                    id,
+                );
+                id
+            }
+            None => {
+                let id = renderer.register_native_texture(device, &self.resolved_view, filter);
+                self.egui_id = Some(id);
+                id
+            }
+        }
+    }
+
+    /// Recreates the textures when the panel changed size. Returns true if it did.
     pub fn fit(
         &mut self,
         device: &wgpu::Device,
@@ -40,22 +96,55 @@ impl ViewTarget {
         if size == self.size {
             return false;
         }
-        let (texture, view) = create(device, size);
-        renderer.update_egui_texture_from_wgpu_texture(
-            device,
-            &view,
-            wgpu::FilterMode::Nearest,
-            self.egui_id,
-        );
-        self.texture = texture;
-        self.view = view;
-        self.size = size;
+        let id = self.egui_id;
+        *self = ViewTarget::new(device, size);
+        self.egui_id = id;
+        self.register(device, renderer);
         true
+    }
+
+    pub fn aspect(&self) -> f32 {
+        self.size[0] as f32 / self.size[1] as f32
+    }
+
+    /// A render pass that clears to `background` and resolves into the shown texture.
+    pub fn begin_pass<'e>(
+        &self,
+        encoder: &'e mut wgpu::CommandEncoder,
+        background: egui::Color32,
+    ) -> wgpu::RenderPass<'e> {
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("view"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.msaa_view,
+                depth_slice: None,
+                resolve_target: Some(&self.resolved_view),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear_color(background)),
+                    store: wgpu::StoreOp::Discard,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        })
     }
 }
 
-fn create(device: &wgpu::Device, size: [u32; 2]) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
+fn texture(
+    device: &wgpu::Device,
+    size: [u32; 2],
+    samples: u32,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
         label: Some("view target"),
         size: wgpu::Extent3d {
             width: size[0],
@@ -63,16 +152,12 @@ fn create(device: &wgpu::Device, size: [u32; 2]) -> (wgpu::Texture, wgpu::Textur
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
-        format: VIEW_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+        format,
+        usage,
         view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
+    })
 }
 
 /// A colour as a wgpu clear value, without any sRGB conversion.
@@ -84,4 +169,17 @@ pub fn clear_color(c: egui::Color32) -> wgpu::Color {
         b: f64::from(b) / 255.0,
         a: f64::from(a) / 255.0,
     }
+}
+
+/// An sRGB-encoded colour as linear RGBA for shader uniforms.
+pub fn linear(c: egui::Color32) -> [f32; 4] {
+    let f = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [f(c.r()), f(c.g()), f(c.b()), f32::from(c.a()) / 255.0]
 }
