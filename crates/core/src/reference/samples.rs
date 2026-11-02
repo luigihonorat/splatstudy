@@ -18,8 +18,36 @@ pub struct Sample {
     pub url: &'static str,
 }
 
-/// None yet: samples are added once their licences are checked.
-pub const SAMPLES: &[Sample] = &[];
+/// Plaster casts of the kind art schools draw and model from, scanned by
+/// SMK (the National Gallery of Denmark) from its Royal Cast Collection and
+/// released into the public domain. Converted from SMK's STL to binary PLY
+/// and stood upright; nothing else changed.
+pub const SAMPLES: &[Sample] = &[
+    Sample {
+        id: "brutus",
+        file: "brutus.ply",
+        title: "Brutus, plaster cast after Michelangelo (KAS105)",
+        author: "SMK – National Gallery of Denmark, The Royal Cast Collection",
+        licence: "CC0 1.0",
+        url: "https://open.smk.dk/artwork/image/KAS105",
+    },
+    Sample {
+        id: "venus",
+        file: "venus-de-milo.ply",
+        title: "Venus de Milo, plaster cast (KAS434)",
+        author: "SMK – National Gallery of Denmark, The Royal Cast Collection",
+        licence: "CC0 1.0",
+        url: "https://open.smk.dk/artwork/image/KAS434",
+    },
+    Sample {
+        id: "david",
+        file: "head-of-david.ply",
+        title: "Head of David, plaster cast after Michelangelo (KAS2232)",
+        author: "SMK – National Gallery of Denmark, The Royal Cast Collection",
+        licence: "CC0 1.0",
+        url: "https://open.smk.dk/artwork/image/KAS2232",
+    },
+];
 
 impl Sample {
     pub fn by_id(id: &str) -> Option<&'static Sample> {

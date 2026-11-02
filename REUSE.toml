@@ -34,3 +34,12 @@ path = ["crates/core/assets/fonts/NotoSansJP-UI.ttf", "crates/core/assets/fonts/
 precedence = "override"
 SPDX-FileCopyrightText = "2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'"
 SPDX-License-Identifier = "OFL-1.1"
+
+# Bundled sample references: plaster casts from the Royal Cast Collection,
+# scanned and released into the public domain by SMK. Converted from SMK's
+# STL to binary PLY, stood upright (Z up to Y up); nothing else changed.
+[[annotations]]
+path = "web/samples/*.ply"
+precedence = "override"
+SPDX-FileCopyrightText = "SMK – National Gallery of Denmark (Statens Museum for Kunst), The Royal Cast Collection"
+SPDX-License-Identifier = "CC0-1.0"
