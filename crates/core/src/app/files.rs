@@ -46,6 +46,8 @@ pub(super) struct FileState {
     reference_key: Option<(FileAddress, BlobKey)>,
     /// The checkpoints and log as last saved, to encode only what is new.
     history: HistoryCache,
+    /// The scene came from the autosave: worth keeping even unchanged.
+    restored: bool,
 }
 
 /// Where a file's bytes are, and how many: tells it apart from any other
@@ -163,6 +165,7 @@ impl App {
         let complete = self.show_scene(scene);
         self.files.name = Some(name.to_owned());
         self.files.saved = Some(bytes);
+        self.files.restored = false;
         if !complete {
             self.notify(self.lang.tr().files.timelapse_lost);
         }
@@ -414,6 +417,7 @@ impl App {
         self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
         self.files.name = None;
         self.files.saved = None;
+        self.files.restored = false;
         self.files.replaced();
         self.reset_view();
     }
@@ -442,16 +446,36 @@ impl App {
         !stroking && (leaving || !self.exporting())
     }
 
+    /// False for a fresh sphere: nothing sculpted, no reference, not from
+    /// a file or the autosave, and the clay as the session started.
+    fn worth_keeping(&self) -> bool {
+        let sculpt = &self.sculpt;
+        let changed = || {
+            sculpt.checkpoints().first().is_none_or(|start| {
+                *start.positions != *sculpt.mesh.positions
+                    || start
+                        .triangles
+                        .as_deref()
+                        .is_some_and(|t| t != sculpt.mesh.triangles.as_slice())
+            })
+        };
+        !sculpt.log().is_empty()
+            || self.scene_reference().is_some()
+            || self.files.name.is_some()
+            || self.files.restored
+            || changed()
+    }
+
     /// The scene to autosave, with the reference file apart so the shell
     /// stores it once (see [`crate::scene::autosave`]). Nothing in it is
     /// deflated: it is written often, and kept only until the next one.
     /// `None` when there is nothing worth keeping: a fresh sphere with no
     /// reference. The first call after a new reference hashes its file.
     pub fn autosave_bytes(&mut self) -> Option<Autosave> {
-        let sculpted = !self.sculpt.log().is_empty();
-        if !sculpted && self.scene_reference().is_none() && self.files.name.is_none() {
+        if !self.worth_keeping() {
             return None;
         }
+        let sculpted = !self.sculpt.log().is_empty();
         let reference = self.scene_reference().map(|r| r.source.bytes.clone());
         let reference = reference.map(|bytes| (self.files.key_of(&bytes), bytes));
         Some(Autosave {
@@ -492,6 +516,7 @@ impl App {
         });
         self.files.name = None;
         self.files.saved = None;
+        self.files.restored = true;
         let tr = self.lang.tr();
         self.notify(match (lost, complete) {
             (true, _) => tr.files.restored_without_reference,

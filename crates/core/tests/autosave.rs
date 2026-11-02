@@ -267,6 +267,37 @@ fn a_first_checkpoint_with_no_triangles_starts_a_new_history_too() {
 }
 
 #[test]
+fn a_restored_clay_is_kept_even_with_no_history() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping autosave test");
+        return;
+    };
+    let mut first = Shell::new(&gpu);
+    first.stroke();
+    let full = first.app.autosave_bytes().expect("a session").scene;
+    let clay = scene::Scene::read(&full).unwrap();
+    // The sculpted clay, its log damaged: it opens without a history.
+    let mut w = scene::SceneWriter::stored();
+    w.mesh(&clay.mesh)
+        .checkpoints(&clay.checkpoints)
+        .chunk(scene::LOG, false, b"damaged");
+    let damaged = w.finish();
+    let mut second = Shell::new(&gpu);
+    assert!(second.app.restore_autosave(&damaged, None));
+    second.app.apply_url_options("view=grid");
+    let kept = second
+        .app
+        .autosave_bytes()
+        .expect("the restored clay is kept");
+    let kept = scene::Scene::read(&kept.scene).unwrap();
+    assert_eq!(kept.mesh.positions, clay.mesh.positions);
+
+    // A new scene after it has nothing to keep again.
+    second.ctrl(Key::N);
+    assert!(second.app.autosave_bytes().is_none());
+}
+
+#[test]
 fn a_scene_file_restores_too_and_a_new_scene_clears() {
     let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter; skipping autosave test");
