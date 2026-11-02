@@ -164,6 +164,7 @@ pub struct App {
     files: files::FileState,
     #[allow(dead_code)] // until the export part fills it
     export: export::ExportState,
+    help: help::HelpState,
     /// Asked for since the last frame; handed to the shell with it.
     requests: Vec<Request>,
     /// A short message at the bottom of the views, and when it was posted.
@@ -229,6 +230,7 @@ impl App {
             study: Default::default(),
             files: Default::default(),
             export: Default::default(),
+            help: Default::default(),
             requests: Vec::new(),
             notice: None,
             now: 0.0,

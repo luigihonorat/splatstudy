@@ -5,6 +5,10 @@
 use super::App;
 use crate::ui::menu;
 
+/// Getting started and options from the URL.
+#[derive(Default)]
+pub(super) struct HelpState {}
+
 impl App {
     /// Help items between shortcuts and report issue.
     pub(super) fn help_items(&mut self, ui: &mut egui::Ui) {
