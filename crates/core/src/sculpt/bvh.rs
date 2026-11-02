@@ -92,6 +92,10 @@ impl Bvh {
     /// Recomputes every box from the current vertex positions. Children are
     /// always stored after their parent, so a reverse pass sees them first.
     pub fn refit(&mut self, mesh: &Mesh) {
+        // No triangles: the root is an empty leaf that looks like an inner node.
+        if self.order.is_empty() {
+            return;
+        }
         for i in (0..self.nodes.len()).rev() {
             let node = self.nodes[i];
             let (min, max) = if node.count > 0 {
@@ -117,6 +121,9 @@ impl Bvh {
 
     /// The nearest triangle hit by the ray `origin + t * dir`.
     pub fn raycast(&self, mesh: &Mesh, origin: Vec3, dir: Vec3) -> Option<Hit> {
+        if self.order.is_empty() {
+            return None;
+        }
         let inv = dir.recip();
         let mut best: Option<Hit> = None;
         let mut stack = vec![0u32];
@@ -157,6 +164,9 @@ impl Bvh {
         out: &mut Vec<u32>,
     ) {
         stamp.next();
+        if self.order.is_empty() {
+            return;
+        }
         let r2 = radius * radius;
         let mut stack = vec![0u32];
         while let Some(i) = stack.pop() {

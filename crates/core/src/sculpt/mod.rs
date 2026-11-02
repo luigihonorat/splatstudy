@@ -15,7 +15,7 @@ use glam::Vec3;
 
 pub use bvh::{Bvh, Hit};
 pub use mesh::{Mesh, Stamp, Vertex};
-pub use record::{Entry, Event, Replay};
+pub use record::{Checkpoint, Entry, Event, Replay};
 
 /// Subdivision level of the default sphere: 163,842 vertices, 327,680
 /// triangles; enough for a head study, light enough for the browser.
@@ -23,6 +23,11 @@ pub const DEFAULT_LEVEL: u32 = 7;
 
 /// Vertices per GPU upload page.
 pub const PAGE: usize = 4096;
+
+/// Sculpting time between checkpoints of the positions, in seconds: a
+/// timelapse snaps back to them, so a replay that drifts (another machine
+/// rounding differently) recovers.
+pub const CHECKPOINT_EVERY: f64 = 600.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Brush {
@@ -56,7 +61,7 @@ impl Brush {
 }
 
 /// One touch of the brush on the surface, in world units.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dab {
     pub brush: Brush,
     pub centre: Vec3,
@@ -79,6 +84,15 @@ struct Edit {
     after: Vec<Vec3>,
 }
 
+/// One step on the undo or redo stack.
+enum Step {
+    Move(Edit),
+    /// The mesh was replaced (remesh, import): the other mesh, to swap
+    /// back. Strokes before a topology change can't be undone, so this is
+    /// always alone on its stack.
+    Topology(Box<Mesh>),
+}
+
 pub struct Sculpt {
     pub mesh: Mesh,
     bvh: Bvh,
@@ -99,13 +113,19 @@ pub struct Sculpt {
     /// Move brush: grabbed vertices, their start positions, weights, and
     /// whether they belong to the mirrored side.
     grabbed: Vec<(u32, Vec3, f32, bool)>,
-    undo: Vec<Edit>,
-    redo: Vec<Edit>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     /// Every call that changed the clay, for replay.
     log: Vec<Entry>,
+    /// The meshes a replay starts from or snaps to; the first is the start.
+    checkpoints: Vec<Checkpoint>,
     recording: bool,
     /// Time stamped on new log entries, in seconds.
     clock: f64,
+    /// The clock at the last checkpoint.
+    last_checkpoint: f64,
+    /// The mesh was replaced since the GPU buffers were last made for it.
+    topology_changed: bool,
 }
 
 /// Smooth bump: 1 at the centre, 0 at the rim, flat at both ends.
@@ -125,7 +145,17 @@ fn tangent(v: Vec3, n: Vec3) -> Vec3 {
 }
 
 impl Sculpt {
+    /// A sculpt starting from `mesh`, which becomes the first checkpoint.
     pub fn new(mesh: Mesh) -> Sculpt {
+        let mut sculpt = Sculpt::bare(mesh);
+        sculpt
+            .checkpoints
+            .push(Checkpoint::of(&sculpt.mesh, 0, 0.0, true));
+        sculpt
+    }
+
+    /// A sculpt with no checkpoints: for replay, or to restore a saved one.
+    fn bare(mesh: Mesh) -> Sculpt {
         let n = mesh.positions.len();
         Sculpt {
             bvh: Bvh::build(&mesh),
@@ -145,10 +175,95 @@ impl Sculpt {
             undo: Vec::new(),
             redo: Vec::new(),
             log: Vec::new(),
+            checkpoints: Vec::new(),
             recording: true,
             clock: 0.0,
+            last_checkpoint: 0.0,
+            topology_changed: false,
             mesh,
         }
+    }
+
+    /// A saved sculpt: its current mesh (in the saved vertex order, see
+    /// [`Mesh::from_ordered`]), its log and checkpoints. Undo starts empty.
+    pub fn with_history(mesh: Mesh, log: Vec<Entry>, checkpoints: Vec<Checkpoint>) -> Sculpt {
+        Sculpt {
+            log,
+            checkpoints,
+            ..Sculpt::bare(mesh)
+        }
+    }
+
+    /// The meshes a replay of [`Sculpt::log`] starts from and snaps to.
+    pub fn checkpoints(&self) -> &[Checkpoint] {
+        &self.checkpoints
+    }
+
+    /// True once after the mesh was replaced (remesh, import, undoing
+    /// either, or a replay jumping to a checkpoint): its GPU buffers have
+    /// to be made again rather than updated.
+    pub fn take_topology_changed(&mut self) -> bool {
+        std::mem::take(&mut self.topology_changed)
+    }
+
+    /// Replaces the whole mesh (a remesh or an import). The log and the
+    /// clock go on; the new mesh is saved as a checkpoint for replay.
+    /// Strokes made before can no longer be undone, but this can: undo
+    /// brings the previous mesh back.
+    pub fn replace_mesh(&mut self, mesh: Mesh) {
+        let old = self.swap_mesh(mesh);
+        self.undo.clear();
+        self.redo.clear();
+        self.undo.push(Step::Topology(Box::new(old)));
+        self.checkpoint(true);
+    }
+
+    /// Puts `mesh` in place and rebuilds everything sized by it; returns
+    /// the mesh it replaced.
+    fn swap_mesh(&mut self, mut mesh: Mesh) -> Mesh {
+        if self.stroke_open {
+            self.end_stroke();
+        }
+        // Normals as a replay rebuilds them from a checkpoint.
+        mesh.recompute_normals();
+        let n = mesh.positions.len();
+        self.bvh = Bvh::build(&mesh);
+        self.bvh_stale = false;
+        self.stamp = Stamp::new(n);
+        self.unique = Stamp::new(n);
+        self.touched = Stamp::new(n);
+        self.dirty_pages = vec![true; n.div_ceil(PAGE)];
+        self.grabbed.clear();
+        self.stroke_indices.clear();
+        self.stroke_before.clear();
+        self.topology_changed = true;
+        std::mem::replace(&mut self.mesh, mesh)
+    }
+
+    /// Logs a checkpoint of the mesh as it is now: the whole mesh after a
+    /// topology change, or only the positions.
+    fn checkpoint(&mut self, topology: bool) {
+        if !self.recording {
+            return;
+        }
+        let index = self.checkpoints.len() as u32;
+        self.record(Event::Checkpoint(index));
+        let checkpoint = Checkpoint::of(&self.mesh, self.log.len(), self.clock, topology);
+        self.checkpoints.push(checkpoint);
+        self.last_checkpoint = self.clock;
+    }
+
+    /// Sets every position, as a checkpoint of the positions holds them.
+    fn snap_positions(&mut self, positions: &[Vec3]) {
+        if positions.len() != self.mesh.positions.len() {
+            return;
+        }
+        if self.mesh.positions != positions {
+            self.mesh.positions.copy_from_slice(positions);
+            self.bvh_stale = true;
+        }
+        self.mesh.recompute_normals();
+        self.dirty_pages.iter_mut().for_each(|d| *d = true);
     }
 
     /// Sets the time that the next log entries carry, in seconds.
@@ -221,15 +336,27 @@ impl Sculpt {
         }
         let indices = std::mem::take(&mut self.stroke_indices);
         let before = std::mem::take(&mut self.stroke_before);
+        self.push_edit(indices, before);
+        if self.recording && self.clock - self.last_checkpoint >= CHECKPOINT_EVERY {
+            // The replay recomputes the normals when it snaps: so does this.
+            self.mesh.recompute_normals();
+            self.dirty_pages.iter_mut().for_each(|d| *d = true);
+            self.checkpoint(false);
+        }
+    }
+
+    /// Makes the move of `indices` from `before` to where they are now one
+    /// undo step.
+    fn push_edit(&mut self, indices: Vec<u32>, before: Vec<Vec3>) {
         let after = indices
             .iter()
             .map(|&v| self.mesh.positions[v as usize])
             .collect();
-        self.undo.push(Edit {
+        self.undo.push(Step::Move(Edit {
             indices,
             before,
             after,
-        });
+        }));
         self.redo.clear();
     }
 
@@ -242,18 +369,39 @@ impl Sculpt {
     }
 
     pub fn undo(&mut self) {
-        if let Some(edit) = self.undo.pop() {
-            self.record(Event::Undo);
-            self.apply_positions(&edit.indices, &edit.before);
-            self.redo.push(edit);
+        match self.undo.pop() {
+            Some(Step::Move(edit)) => {
+                self.record(Event::Undo);
+                self.apply_positions(&edit.indices, &edit.before);
+                self.redo.push(Step::Move(edit));
+            }
+            Some(Step::Topology(mesh)) => {
+                // Logged as a checkpoint of the mesh it brings back.
+                let current = self.swap_mesh(*mesh);
+                self.undo.clear();
+                self.redo.clear();
+                self.redo.push(Step::Topology(Box::new(current)));
+                self.checkpoint(true);
+            }
+            None => {}
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(edit) = self.redo.pop() {
-            self.record(Event::Redo);
-            self.apply_positions(&edit.indices, &edit.after);
-            self.undo.push(edit);
+        match self.redo.pop() {
+            Some(Step::Move(edit)) => {
+                self.record(Event::Redo);
+                self.apply_positions(&edit.indices, &edit.after);
+                self.undo.push(Step::Move(edit));
+            }
+            Some(Step::Topology(mesh)) => {
+                let current = self.swap_mesh(*mesh);
+                self.undo.clear();
+                self.redo.clear();
+                self.undo.push(Step::Topology(Box::new(current)));
+                self.checkpoint(true);
+            }
+            None => {}
         }
     }
 
@@ -513,6 +661,67 @@ impl Sculpt {
             self.moved.push(v);
         }
         self.after_move();
+    }
+
+    /// Copies one half of the clay onto the other, across the X = 0 plane:
+    /// the +X half onto the −X half if `to_negative`, else the other way.
+    /// The topology stays: each vertex of the other half moves to the
+    /// mirror image of the surface found along its own (mirrored) normal.
+    /// One undo step.
+    pub fn mirror(&mut self, to_negative: bool) {
+        if self.stroke_open {
+            self.end_stroke();
+        }
+        self.refresh();
+        self.record(Event::Mirror { to_negative });
+        // The side that changes, as a sign of x.
+        let side = if to_negative { -1.0 } else { 1.0 };
+        // Rays start this far behind the mirrored point, so a surface
+        // passing right through it is found too.
+        let back = 0.05;
+        // Farther than this, the surface found belongs to another part of
+        // the form: the vertex stays.
+        let reach = 0.25;
+        let mut indices = Vec::new();
+        let mut targets = Vec::new();
+        for v in 0..self.mesh.positions.len() {
+            let p = self.mesh.positions[v];
+            if p.x * side <= 0.0 {
+                continue;
+            }
+            let d = mirror(self.mesh.normals[v]);
+            // A hair to the side: on a symmetric mesh the ray would pass
+            // exactly through a vertex and might slip between its triangles.
+            let m = mirror(p) + d.any_orthonormal_vector() * 1e-5;
+            // Signed offsets along `d` of the surface on the kept side.
+            let ahead = self
+                .raycast(m - d * back, d)
+                .map(|h| (h.distance - back, h.point));
+            let behind = self
+                .raycast(m + d * back, -d)
+                .map(|h| (back - h.distance, h.point));
+            let nearest = [ahead, behind]
+                .into_iter()
+                .flatten()
+                .filter(|(offset, _)| offset.abs() <= reach)
+                .min_by(|a, b| a.0.abs().total_cmp(&b.0.abs()));
+            if let Some((_, q)) = nearest {
+                let target = mirror(q);
+                if target != p {
+                    indices.push(v as u32);
+                    targets.push(target);
+                }
+            }
+        }
+        if indices.is_empty() {
+            return;
+        }
+        let before = indices
+            .iter()
+            .map(|&v| self.mesh.positions[v as usize])
+            .collect();
+        self.apply_positions(&indices, &targets);
+        self.push_edit(indices, before);
     }
 }
 
@@ -798,5 +1007,87 @@ mod tests {
         assert!(moved.z > 0.25, "{moved:?}");
         s.undo();
         assert_eq!(s.mesh.positions[centre], start);
+    }
+
+    #[test]
+    fn mirror_copies_one_half_onto_the_other_and_undoes() {
+        let mut s = sculpt();
+        // A lump on the +X side only.
+        let at = Vec3::new(0.6, 0.2, 0.75).normalize();
+        s.begin_stroke();
+        for _ in 0..6 {
+            s.dab(dab(Brush::Clay, at));
+            s.refresh();
+        }
+        s.end_stroke();
+        s.refresh();
+        // How far the surface is from where the mirror image of each +X
+        // vertex says it should be, at its worst.
+        let asymmetry = |s: &Sculpt| {
+            (0..s.mesh.positions.len())
+                .filter(|&v| s.mesh.positions[v].x > 0.05)
+                .map(|v| {
+                    let m = mirror(s.mesh.positions[v]);
+                    let n = mirror(s.mesh.normals[v]);
+                    // A little to the side: a ray right through a vertex
+                    // may slip between its triangles.
+                    let aside = n.any_orthonormal_vector() * 1e-3;
+                    s.raycast(m + n * 0.1 + aside, -n)
+                        .map_or(1.0, |h| (h.distance - 0.1).abs())
+                })
+                .fold(0.0, f32::max)
+        };
+        let before = s.mesh.positions.clone();
+        assert!(asymmetry(&s) > 0.02, "the lump is one-sided");
+        s.mirror(true);
+        s.refresh();
+        assert!(asymmetry(&s) < 0.005, "{}", asymmetry(&s));
+        // The kept half didn't move.
+        for (now, was) in s.mesh.positions.iter().zip(&before) {
+            if was.x >= 0.0 {
+                assert_eq!(now, was);
+            }
+        }
+        s.undo();
+        assert_eq!(s.mesh.positions, before);
+    }
+
+    #[test]
+    fn replacing_the_mesh_resizes_everything_and_undo_brings_it_back() {
+        let mut s = sculpt();
+        let small = s.mesh.positions.len();
+        stroke(&mut s, Brush::Clay, Vec3::new(0.0, 0.3, 0.9), 4);
+        let sculpted = s.mesh.positions.clone();
+        s.replace_mesh(Mesh::icosphere(5));
+        assert!(s.take_topology_changed());
+        assert!(!s.take_topology_changed());
+        let large = s.mesh.positions.len();
+        assert!(large > small);
+        assert_eq!(s.take_dirty(), vec![0..large]);
+        // Sculpting works on the new mesh, all the way to its last vertex.
+        stroke(&mut s, Brush::Inflate, Vec3::new(0.0, -0.3, 0.9), 4);
+        stroke(&mut s, Brush::Smooth, Vec3::new(0.0, 0.0, -1.0), 2);
+        s.begin_stroke();
+        s.grab(Vec3::Y, 0.3, true);
+        s.drag(Vec3::Y * 0.1);
+        s.end_stroke();
+        // Undo walks back the strokes, then the mesh.
+        for _ in 0..3 {
+            s.undo();
+        }
+        assert_eq!(s.mesh.positions.len(), large);
+        s.undo();
+        assert!(s.take_topology_changed());
+        assert_eq!(s.mesh.positions, sculpted);
+        assert!(!s.can_undo(), "strokes before the remesh are gone");
+        s.redo();
+        assert_eq!(s.mesh.positions.len(), large);
+        let topology = s
+            .log()
+            .iter()
+            .filter(|e| matches!(e.event, Event::Checkpoint(_)))
+            .count();
+        assert_eq!(topology, 3);
+        assert_eq!(s.checkpoints().len(), 4);
     }
 }

@@ -10,6 +10,7 @@ use glam::{Vec2, Vec3};
 use super::{App, Drag, Request, SCULPT};
 use crate::input::PointerKind;
 use crate::meshio;
+use crate::render::clay::GpuMesh;
 use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh};
 use crate::ui::{self, i18n::Tr, menu, theme};
 
@@ -131,7 +132,23 @@ impl App {
         menu::action(ui, false, tr.mirror_sculpt, "");
     }
 
+    /// Makes the clay's GPU buffers again after its mesh was replaced (a
+    /// remesh, an import, or undoing one, from the panel, the keys or the
+    /// edit menu). The panel runs after the menus and before the frame
+    /// uploads the clay, so checking here catches every case.
+    pub(super) fn sync_clay(&mut self) {
+        if self.sculpt.take_topology_changed() {
+            self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
+            self.sculpt.take_dirty();
+            // A stroke in progress held vertices of the old mesh.
+            if !matches!(self.drags[SCULPT], Some(Drag::Navigate { .. })) {
+                self.drags[SCULPT] = None;
+            }
+        }
+    }
+
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
+        self.sync_clay();
         if self.playback.is_some() {
             self.playback_panel(ui);
             return;
@@ -187,6 +204,7 @@ impl App {
             self.start_playback();
         }
         self.sculpt.refresh();
+        self.sync_clay();
     }
 
     fn pressure(&self) -> f32 {

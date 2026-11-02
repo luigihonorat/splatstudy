@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Watching the timelapse in the sculpt view.
 
-use super::sculpting::start_mesh;
 use super::{App, SCULPT};
 use crate::render::clay::GpuMesh;
 use crate::sculpt::Replay;
@@ -28,13 +27,14 @@ pub(super) struct Playback {
 }
 
 impl App {
-    /// Plays the session back from the first stroke on a separate copy of
-    /// the clay; the live sculpt waits untouched.
+    /// Plays the session back from its first checkpoint on a separate copy
+    /// of the clay; the live sculpt waits untouched.
     pub(super) fn start_playback(&mut self) {
         // An open stroke would be logged half done.
         self.sculpt.end_stroke();
         self.drags[SCULPT] = None;
-        let replay = Replay::new(start_mesh(), self.sculpt.log().to_vec());
+        let mut replay = Replay::of(&self.sculpt);
+        replay.sculpt.take_topology_changed();
         self.playback = Some(Playback {
             gpu_mesh: GpuMesh::new(&self.device, &replay.sculpt.mesh),
             replay,
@@ -59,6 +59,12 @@ impl App {
         }
         p.last = self.now;
         let caught_up = p.replay.seek(p.head, REPLAY_BUDGET);
+        // Past a remesh, or back to the start: other triangles.
+        let sculpt = &mut p.replay.sculpt;
+        if sculpt.take_topology_changed() {
+            p.gpu_mesh = GpuMesh::new(&self.device, &sculpt.mesh);
+            sculpt.take_dirty();
+        }
         if p.playing || !caught_up {
             ui.ctx().request_repaint();
         }
