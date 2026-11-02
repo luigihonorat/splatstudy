@@ -3,11 +3,13 @@
 //! Exporting the timelapse: frames composed offscreen, then encoded as an
 //! MP4 video, or saved as PNG images when no video encoder is there.
 
+pub mod compositor;
 pub mod layout;
 pub mod mp4;
 pub mod video;
 pub mod zip;
 
+pub use compositor::{Compositor, EndCard, Overlay};
 pub use layout::{Layout, Placement, PxRect, Shape, place};
 pub use video::{EncodedFrame, Support, VideoConfig, VideoEncoder};
 
