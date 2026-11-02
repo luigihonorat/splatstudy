@@ -306,22 +306,25 @@ fn vertex_faces(vertex_count: usize, triangles: &[[u32; 3]]) -> Adjacency {
     Adjacency { offsets, items }
 }
 
+/// The vertices around each vertex, in the order its triangles first
+/// reach them. A stamp keeps each ring free of repeats in time linear in
+/// its size, even around a crafted vertex with a million triangles.
 fn neighbours(mesh: &Mesh) -> Adjacency {
     let n = mesh.positions.len();
     let mut offsets = Vec::with_capacity(n + 1);
     let mut items = Vec::with_capacity(n * 6);
     offsets.push(0);
-    let mut ring = Vec::with_capacity(12);
+    let mut seen = Stamp::new(n);
     for v in 0..n as u32 {
-        ring.clear();
+        seen.next();
+        seen.mark(v);
         for &f in mesh.vertex_faces.of(v) {
             for u in mesh.triangles[f as usize] {
-                if u != v && !ring.contains(&u) {
-                    ring.push(u);
+                if seen.mark(u) {
+                    items.push(u);
                 }
             }
         }
-        items.extend_from_slice(&ring);
         offsets.push(items.len() as u32);
     }
     Adjacency { offsets, items }
@@ -388,6 +391,25 @@ mod tests {
             assert!(n == 5 || n == 6);
             assert_eq!(mesh.vertex_faces.of(v).len(), n);
         }
+    }
+
+    #[test]
+    fn a_huge_fan_builds_quickly_with_each_neighbour_once() {
+        // 200k triangles around one vertex: the ring is built in linear time.
+        let count = 200_000u32;
+        let mut positions = vec![Vec3::ZERO];
+        positions.extend((0..count).map(|i| {
+            let a = i as f32 / count as f32 * std::f32::consts::TAU;
+            Vec3::new(a.cos(), a.sin(), 0.0)
+        }));
+        let triangles: Vec<[u32; 3]> = (0..count)
+            .map(|i| [0, 1 + i, 1 + (i + 1) % count])
+            .collect();
+        let mesh = Mesh::from_ordered(positions, triangles);
+        let ring = mesh.neighbours.of(0);
+        assert_eq!(ring.len(), count as usize);
+        assert_eq!(&ring[..3], &[1, 2, 3]);
+        assert_eq!(mesh.neighbours.of(5), &[0, 4, 6]);
     }
 
     #[test]
