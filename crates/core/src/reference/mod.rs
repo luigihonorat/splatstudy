@@ -9,6 +9,8 @@
 //! lives in. The two views can then share one camera, the ghost lines up
 //! with the clay, and clay made from the reference comes out the right size.
 
+pub mod load;
+
 use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
