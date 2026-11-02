@@ -7,8 +7,9 @@ use std::sync::Arc;
 use egui::{Key, Pos2, Rect, Stroke};
 use glam::{Vec2, Vec3};
 
-use super::{App, Drag, SCULPT};
+use super::{App, Drag, Request, SCULPT};
 use crate::input::PointerKind;
+use crate::meshio;
 use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh};
 use crate::ui::{self, i18n::Tr, menu, theme};
 
@@ -103,10 +104,25 @@ impl App {
         self.cannot_open(name);
     }
 
-    /// Mesh formats in the file → export menu.
+    /// Mesh formats in the file → export menu. Always the live clay, even
+    /// while the timelapse is showing.
     pub(super) fn mesh_export_items(&mut self, ui: &mut egui::Ui) {
-        menu::action(ui, false, "OBJ…", "");
-        menu::action(ui, false, "STL…", "");
+        if menu::action(ui, true, "OBJ…", "") {
+            let bytes = meshio::obj::write(&self.sculpt.mesh);
+            self.request(Request::SaveFile {
+                name: "sculpt.obj".into(),
+                mime: "model/obj",
+                bytes,
+            });
+        }
+        if menu::action(ui, true, "STL…", "") {
+            let bytes = meshio::stl::write(&self.sculpt.mesh);
+            self.request(Request::SaveFile {
+                name: "sculpt.stl".into(),
+                mime: "model/stl",
+                bytes,
+            });
+        }
     }
 
     /// Whole-mesh edits in the edit menu.
