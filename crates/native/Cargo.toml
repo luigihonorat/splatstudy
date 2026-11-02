@@ -1,0 +1,21 @@
+[package]
+name = "splatstudy-native"
+description = "SplatStudy on the desktop: the SDL3 shell around splatstudy-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "splatstudy"
+path = "src/main.rs"
+
+[dependencies]
+splatstudy-core.workspace = true
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
+log.workspace = true
+pollster.workspace = true
+# SDL3 for pen pressure on every desktop OS; built from source (needs CMake).
+sdl3 = { version = "0.21", features = ["raw-window-handle", "build-from-source-static"] }
+wgpu = { workspace = true, features = ["dx12", "vulkan", "metal"] }

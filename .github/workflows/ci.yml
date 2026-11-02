@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core-and-web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo test -p splatstudy-core
+      - run: cargo clippy -p splatstudy-core -p xtask -- -D warnings
+      - run: cargo clippy -p splatstudy-web --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo xtask web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: splatstudy-web
+          path: dist
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: SDL3 build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libx11-dev libxext-dev libxrandr-dev             libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev             libwayland-dev wayland-protocols libegl-dev libdrm-dev libgbm-dev             libpulse-dev libasound2-dev libudev-dev libdbus-1-dev
+      - run: cargo clippy -p splatstudy-native -- -D warnings
+      - run: cargo build -p splatstudy-native --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: splatstudy-${{ runner.os }}
+          path: |
+            target/release/splatstudy
+            target/release/splatstudy.exe

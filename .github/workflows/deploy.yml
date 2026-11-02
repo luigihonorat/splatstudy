@@ -1,0 +1,55 @@
+# Builds the browser version and uploads it to the web server behind
+# splatstudy.com on every push to main.
+#
+# Repository secrets:
+#   DEPLOY_SSH_KEY      private key of a deploy-only user (no passphrase)
+#   DEPLOY_KNOWN_HOSTS  output of `ssh-keyscan -p PORT HOST` for the server
+#   DEPLOY_HOST         server address
+#   DEPLOY_PORT         SSH port (optional, default 22)
+#   DEPLOY_USER         the deploy user
+#   DEPLOY_PATH         web root, e.g. /var/www/splatstudy
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARYEN: version_133
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-opt
+        run: |
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN}/binaryen-${BINARYEN}-x86_64-linux.tar.gz" | tar xz
+          mkdir -p tools && mv "binaryen-${BINARYEN}" tools/binaryen
+      - run: cargo xtask web
+      - name: Upload to the server
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          PORT: ${{ secrets.DEPLOY_PORT }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          DEST: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          rsync -rlz --delete --chmod=D755,F644 \
+            -e "ssh -i ~/.ssh/deploy -p ${PORT:-22}" \
+            dist/ "${USER}@${HOST}:${DEST}/"

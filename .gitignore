@@ -1,0 +1,24 @@
+# Build output
+/target/
+/dist/
+
+# Local tools (binaryen, etc.) and local reference files
+/tools/
+/samples/
+*.local.*
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+id_*
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code: personal settings stay local; shared .claude/ files are committed
+.claude/settings.local.json

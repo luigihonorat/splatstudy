@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>splatstudy</title>
+  <meta name="description" content="3Dの参照（ガウシアンスプラット・3Dスキャン・画像）を横に置いて塑像するためのデジタル彫刻ツール。">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <style>
+    :root { color-scheme: light dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #F7F7F7; color: #111111; }
+    body { font: 300 15px/1.85 system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; touch-action: none; outline: none; }
+    #message, #error { display: none; position: fixed; inset: 0; padding: 72px 40px; max-width: 640px; }
+    #message h1 { font-weight: 300; font-size: 36px; line-height: 1.2; margin: 0 0 18px; }
+    #message p { color: #666666; margin: 0 0 8px; }
+    #error { white-space: pre-wrap; color: #D0473F; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <canvas id="splatstudy" tabindex="0"></canvas>
+  <div id="message"><h1>splatstudy</h1></div>
+  <div id="error"></div>
+  <script type="module">
+    const texts = {
+      ja: ["このブラウザでは WebGPU が使えません。", "Chrome または Edge の最新版、Safari 26 以降でお試しください。"],
+      en: ["This browser can't use WebGPU.", "Please try the latest Chrome or Edge, or Safari 26 or later."],
+      fr: ["Ce navigateur ne prend pas en charge WebGPU.", "Essayez la dernière version de Chrome ou d’Edge, ou Safari 26 ou plus récent."],
+    };
+    function unsupported() {
+      const lang = (navigator.language || "ja").slice(0, 2);
+      const box = document.getElementById("message");
+      for (const line of texts[lang] || texts.ja) {
+        const p = document.createElement("p");
+        p.textContent = line;
+        box.append(p);
+      }
+      document.getElementById("splatstudy").style.display = "none";
+      box.style.display = "block";
+    }
+    const adapter = navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null);
+    if (!adapter) {
+      unsupported();
+    } else {
+      const { default: init } = await import("./splatstudy_web.js?v=__BUILD__");
+      await init({ module_or_path: "./splatstudy_web_bg.wasm?v=__BUILD__" });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.ttf binary
+*.png binary
+*.jpg binary
+*.ply binary
+*.spz binary
+*.splat binary
+*.glb binary
+*.stl binary
+crates/core/assets/** linguist-vendored

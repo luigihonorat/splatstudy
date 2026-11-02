@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/native", "crates/web", "xtask"]
+default-members = ["crates/native"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "GPL-3.0-or-later WITH AdditionRef-SplatStudy-app-store-exception"
+publish = false
+
+[workspace.dependencies]
+splatstudy-core = { path = "crates/core" }
+bytemuck = { version = "1.25", features = ["derive"] }
+egui = { version = "0.37", default-features = false }
+egui-wgpu = { version = "0.37", default-features = false }
+glam = { version = "0.34", features = ["bytemuck"] }
+log = "0.4"
+pollster = "1"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true
+
+# Web build: size first. Compare with opt-level 3 once the splat sort exists.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+
+# Keep debug builds fast enough to sculpt and load real splats.
+[profile.dev.package."*"]
+opt-level = 2
