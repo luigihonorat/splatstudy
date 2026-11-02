@@ -3,9 +3,8 @@
 //! Mesh files in and out: the clay as OBJ or STL for other programs, and
 //! meshes from them to sculpt on.
 //!
-//! The readers are deliberately small: positions and triangles only, which
-//! is all the clay keeps. Reading returns an error for anything malformed
-//! and never panics.
+//! Reading uses the reference loaders ([`crate::reference::load`]); this
+//! module writes, and prepares what was read for sculpting.
 
 pub mod obj;
 pub mod stl;
@@ -14,7 +13,7 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 
-pub use crate::io::ReadError;
+use crate::reference::load::{LoadError, load_obj, load_stl};
 
 /// Positions and counter-clockwise triangles, as read from a file.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -27,19 +26,20 @@ pub struct Soup {
 pub const EXTENSIONS: &[&str] = &["obj", "stl"];
 
 /// Reads a mesh file, going by its name's extension.
-pub fn read(name: &str, bytes: &[u8]) -> Result<Soup, ReadError> {
+pub fn read(name: &str, bytes: &[u8]) -> Result<Soup, LoadError> {
     let ext = name
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    match ext.as_str() {
-        "obj" => obj::read(bytes),
-        "stl" => stl::read(bytes),
-        _ => Err(ReadError::Invalid {
-            offset: 0,
-            what: "not a mesh format the clay reads",
-        }),
-    }
+    let mesh = match ext.as_str() {
+        "obj" => load_obj(bytes)?,
+        "stl" => load_stl(bytes)?,
+        _ => return Err(LoadError::Unsupported("not a mesh format the clay reads")),
+    };
+    Ok(Soup {
+        positions: mesh.positions,
+        triangles: mesh.triangles,
+    })
 }
 
 impl Soup {
@@ -123,29 +123,6 @@ fn bounds(positions: &[Vec3]) -> (Vec3, Vec3) {
         .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &p| {
             (lo.min(p), hi.max(p))
         })
-}
-
-/// Parses a decimal number from ASCII, for the text formats.
-fn number<T: std::str::FromStr>(word: &[u8], offset: usize) -> Result<T, ReadError> {
-    std::str::from_utf8(word)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .ok_or(ReadError::Invalid {
-            offset,
-            what: "not a number",
-        })
-}
-
-/// Finite numbers only: a NaN or infinite coordinate would poison the clay.
-fn finite(p: Vec3, offset: usize) -> Result<Vec3, ReadError> {
-    if p.is_finite() {
-        Ok(p)
-    } else {
-        Err(ReadError::Invalid {
-            offset,
-            what: "a coordinate that isn't a finite number",
-        })
-    }
 }
 
 #[cfg(test)]

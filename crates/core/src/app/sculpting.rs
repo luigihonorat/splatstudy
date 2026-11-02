@@ -10,7 +10,7 @@ use glam::{Vec2, Vec3};
 use super::{App, Drag, Request, SCULPT};
 use crate::input::{FilePurpose, PointerKind};
 use crate::meshio::{self, Soup};
-use crate::reference::Reference;
+use crate::reference::Content;
 use crate::render::clay::GpuMesh;
 use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh};
 use crate::ui::{self, i18n::Tr, menu, theme};
@@ -65,6 +65,7 @@ pub(super) struct ToolSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pending {
     Remesh,
+    FromReference,
 }
 
 impl Default for ToolSettings {
@@ -201,39 +202,20 @@ impl App {
         self.sync_clay();
     }
 
-    /// The controls for making clay from the reference, for the reference
-    /// panel: the threshold (for splats) and the button, enabled when a
-    /// reference is `loaded`. True when the button was clicked: the caller
-    /// then hands the reference to [`App::clay_from_reference`].
-    #[allow(dead_code)] // until the reference panel shows them
-    pub(super) fn reference_to_clay_controls(&mut self, ui: &mut egui::Ui, loaded: bool) -> bool {
+    /// Replaces the clay with the shape of the loaded reference (inside its
+    /// crop box), at the remesh resolution. Undo brings the previous clay
+    /// back.
+    fn clay_from_reference(&mut self) {
         let tr = self.lang.tr();
-        let live = self.playback.is_none();
-        ui.add_enabled_ui(loaded && live, |ui| {
-            ui::slider(
-                ui,
-                tr.mesh.threshold,
-                &mut self.tool.threshold,
-                0.05..=1.0,
-                |v| format!("{:.0}%", v * 100.0),
-            );
-            ui::choice(ui, tr.mesh.from_reference, false).clicked()
-        })
-        .inner
-    }
-
-    /// Replaces the clay with the shape of the reference, at the remesh
-    /// resolution. Undo brings the previous clay back. The reference lives
-    /// in the reference part's state, so take it out to call this:
-    /// `if let Some(r) = state.take() { self.clay_from_reference(&r); state = Some(r) }`.
-    #[allow(dead_code)] // until the reference panel calls it
-    pub(super) fn clay_from_reference(&mut self, reference: &Reference) {
-        let tr = self.lang.tr();
+        let Some(reference) = &self.reference.current else {
+            return;
+        };
         let resolution = self.tool.resolution.round() as u32;
         match voxel::clay_from_reference(reference, resolution, self.tool.threshold) {
             Some(mesh) => {
                 self.playback = None;
                 self.replace_clay(mesh);
+                self.frame_sculpt();
                 self.notify(tr.mesh.made_from_reference);
             }
             None => self.notify(tr.mesh.nothing_left),
@@ -242,10 +224,14 @@ impl App {
 
     /// Remeshes the clay at the next frame, saying so first.
     fn ask_remesh(&mut self) {
+        self.ask(Pending::Remesh, self.lang.tr().mesh.remesh);
+    }
+
+    /// Runs a slow operation at the next frame, after a notice saying so.
+    fn ask(&mut self, pending: Pending, what: &str) {
         if self.playback.is_none() {
-            self.tool.pending = Some(Pending::Remesh);
-            let tr = self.lang.tr();
-            self.notify(format!("{}…", tr.mesh.remesh));
+            self.tool.pending = Some(pending);
+            self.notify(format!("{what}…"));
         }
     }
 
@@ -253,6 +239,7 @@ impl App {
     fn run_pending(&mut self) {
         match self.tool.pending.take() {
             Some(Pending::Remesh) => self.remesh(),
+            Some(Pending::FromReference) => self.clay_from_reference(),
             None => {}
         }
     }
@@ -363,6 +350,25 @@ impl App {
         );
         if ui::choice(ui, tr.mesh.remesh, false).clicked() {
             self.ask_remesh();
+        }
+        // Clay from the reference: the threshold only matters for splats.
+        let loaded = self.has_reference();
+        let splats = matches!(
+            self.reference.current.as_ref().map(|r| &r.content),
+            Some(Content::Splats(_))
+        );
+        if splats {
+            let threshold = &mut self.tool.threshold;
+            ui::slider(ui, tr.mesh.threshold, threshold, 0.05..=1.0, |v| {
+                format!("{:.0}%", v * 100.0)
+            });
+        }
+        if ui
+            .add_enabled_ui(loaded, |ui| ui::choice(ui, tr.mesh.from_reference, false))
+            .inner
+            .clicked()
+        {
+            self.ask(Pending::FromReference, tr.mesh.from_reference);
         }
         ui.add_space(10.0);
         ui::section(ui, tr.history);
