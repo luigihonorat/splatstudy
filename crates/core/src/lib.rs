@@ -9,12 +9,14 @@
 
 mod app;
 pub mod camera;
+pub mod export;
 pub mod input;
 pub mod io;
 pub mod meshio;
 pub mod navigation;
 pub mod reference;
 pub mod render;
+pub mod scene;
 pub mod sculpt;
 pub mod ui;
 pub mod voxel;
