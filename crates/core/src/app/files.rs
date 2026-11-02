@@ -12,6 +12,7 @@ use super::study::Layout as ViewLayout;
 use super::{App, Drag, REFERENCE, Request, SCULPT, WEB};
 use crate::input::FilePurpose;
 use crate::io::Writer;
+use crate::meshio;
 use crate::reference::Reference;
 use crate::reference::load;
 use crate::render::clay::GpuMesh;
@@ -120,6 +121,16 @@ fn extension(name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The extensions a file asked for `purpose` may have.
+fn extensions_for(purpose: FilePurpose) -> &'static [&'static str] {
+    match purpose {
+        FilePurpose::Scene => &[SCENE_EXTENSION],
+        FilePurpose::Reference => REFERENCE_EXTENSIONS,
+        FilePurpose::Sculpt => meshio::EXTENSIONS,
+        FilePurpose::Any => &[],
+    }
+}
+
 /// What a dropped file is for, going by its extension.
 fn purpose_of(name: &str) -> FilePurpose {
     let ext = extension(name);
@@ -133,6 +144,18 @@ fn purpose_of(name: &str) -> FilePurpose {
 }
 
 impl App {
+    /// True if a file named `name`, dropped or picked for `purpose`, may
+    /// be one the app opens. The shells ask before reading it: anything
+    /// else is handed over empty, without reading, and the app says it
+    /// can't open it.
+    pub fn can_open(purpose: FilePurpose, name: &str) -> bool {
+        let purpose = match purpose {
+            FilePurpose::Any => purpose_of(name),
+            purpose => purpose,
+        };
+        extensions_for(purpose).contains(&extension(name).as_str())
+    }
+
     /// A file arrived from the shell: dropped, picked or fetched.
     pub(super) fn on_file(&mut self, purpose: FilePurpose, name: &str, bytes: Arc<[u8]>) {
         let purpose = match purpose {
@@ -714,6 +737,20 @@ mod tests {
         // Only the app's own handle is left: dropping it frees the file.
         assert_eq!(Arc::strong_count(&bytes), 1);
         assert_eq!(Arc::weak_count(&bytes), 0);
+    }
+
+    #[test]
+    fn files_are_checked_by_name_before_they_are_read() {
+        assert!(App::can_open(FilePurpose::Any, "bust.ply"));
+        assert!(App::can_open(FilePurpose::Any, "study.SPLATSTUDY"));
+        assert!(!App::can_open(FilePurpose::Any, "movie.mp4"));
+        assert!(!App::can_open(FilePurpose::Any, "no extension"));
+        assert!(App::can_open(FilePurpose::Reference, "cast.spz"));
+        assert!(!App::can_open(FilePurpose::Reference, "study.splatstudy"));
+        assert!(App::can_open(FilePurpose::Scene, "study.splatstudy"));
+        assert!(!App::can_open(FilePurpose::Scene, "cast.ply"));
+        assert!(App::can_open(FilePurpose::Sculpt, "head.obj"));
+        assert!(!App::can_open(FilePurpose::Sculpt, "photo.png"));
     }
 
     #[test]

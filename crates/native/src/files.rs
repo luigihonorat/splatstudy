@@ -19,7 +19,7 @@ use sdl3::EventSubsystem;
 use sdl3::dialog::{self, DialogError, DialogFileFilter};
 use sdl3::event::EventSender;
 use sdl3::video::Window;
-use splatstudy_core::{FilePurpose, InputEvent, Request};
+use splatstudy_core::{App, FilePurpose, InputEvent, Request};
 
 /// The custom event that wakes the main loop.
 struct Wake;
@@ -70,7 +70,12 @@ impl Inbox {
         let inbox = self.clone();
         let ticket = LATEST.fetch_add(1, Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
-            let read = read(&path);
+            let name = file_name(&path);
+            let read = if App::can_open(purpose, &name) {
+                read(&path)
+            } else {
+                Err(std::io::Error::other("not a file SplatStudy opens"))
+            };
             if LATEST.load(Ordering::SeqCst) != ticket {
                 log::info!("{} was replaced by a newer file", path.display());
                 return;
@@ -88,7 +93,7 @@ impl Inbox {
             };
             inbox.push(InputEvent::File {
                 purpose,
-                name: file_name(&path),
+                name,
                 bytes,
             });
         });
@@ -300,13 +305,19 @@ fn chosen(result: Result<Vec<PathBuf>, DialogError>) -> Option<PathBuf> {
 }
 
 /// Reads a whole file straight into a shared buffer, without a second copy.
-fn read(path: &Path) -> std::io::Result<Arc<[u8]>> {
+/// No memory for it is an error, not an abort.
+pub fn read(path: &Path) -> std::io::Result<Arc<[u8]>> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     if len > MAX_FILE {
         return Err(std::io::Error::other(format!("{len} bytes is too large")));
     }
     let len = usize::try_from(len).map_err(std::io::Error::other)?;
+    // Allocating can't fail without aborting, but reserving can: the room
+    // is reserved (and given back) first, so the buffer then fits in it.
+    Vec::<u8>::new()
+        .try_reserve_exact(len.saturating_add(64))
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
     let mut bytes: Arc<[u8]> = std::iter::repeat_n(0, len).collect();
     file.read_exact(Arc::get_mut(&mut bytes).expect("new buffer"))?;
     Ok(bytes)

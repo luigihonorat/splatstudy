@@ -11,7 +11,6 @@
 //! drawn. Found at start, the restore is only offered.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use splatstudy_core::App;
@@ -49,9 +48,7 @@ fn restore_from(app: &mut App, folder: &Path) -> Option<bool> {
         log::warn!("could not write {}: {e}", flag.display());
     }
     let key = scene::reference_key(&scene).ok().flatten();
-    let reference = key
-        .and_then(|key| std::fs::read(blob_path(folder, key)).ok())
-        .map(Arc::<[u8]>::from);
+    let reference = key.and_then(|key| crate::files::read(&blob_path(folder, key)).ok());
     let with_reference = reference.is_some();
     if app.restore_autosave(&scene, reference) {
         Some(with_reference)

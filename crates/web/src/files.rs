@@ -8,11 +8,12 @@
 //! handling events between slices.
 
 use std::cell::Cell;
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use js_sys::{Array, Uint8Array};
-use splatstudy_core::{FilePurpose, InputEvent, Request};
+use splatstudy_core::{App, FilePurpose, InputEvent, Request};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -48,6 +49,18 @@ fn ticket() -> u64 {
 
 fn is_latest(ticket: u64) -> bool {
     LATEST.with(|l| l.get() == ticket)
+}
+
+/// A buffer of `len` bytes to fill, or `None` when there is no memory for
+/// it. Allocating can't fail without aborting the page, but reserving can:
+/// the room is reserved (and given back) first, so the buffer then fits in
+/// it.
+pub fn buffer(len: usize) -> Option<Arc<[MaybeUninit<u8>]>> {
+    // Room for the shared buffer's counts too.
+    Vec::<u8>::new()
+        .try_reserve_exact(len.checked_add(64)?)
+        .ok()?;
+    Some(Arc::new_uninit_slice(len))
 }
 
 pub struct Files {
@@ -185,6 +198,15 @@ fn read_all(files: Vec<File>, purpose: FilePurpose, deliver: Deliver) {
     wasm_bindgen_futures::spawn_local(async move {
         for file in files {
             let name = file.name();
+            if !App::can_open(purpose, &name) {
+                // Not read at all: the app says it can't open it.
+                deliver(InputEvent::File {
+                    purpose,
+                    name,
+                    bytes: Arc::from([]),
+                });
+                continue;
+            }
             let start = js_sys::Date::now();
             let read = read_blob(&file).await;
             if !is_latest(ticket) {
@@ -246,12 +268,12 @@ async fn fetch_bytes(url: &str) -> Result<Arc<[u8]>, JsValue> {
     if !response.ok() {
         return Err(format!("HTTP {}", response.status()).into());
     }
-    let buffer = JsFuture::from(response.array_buffer()?).await?;
-    let view = Uint8Array::new(&buffer);
+    let body = JsFuture::from(response.array_buffer()?).await?;
+    let view = Uint8Array::new(&body);
     if view.length() as usize > MAX_FILE {
         return Err("file too large".into());
     }
-    let mut bytes = Arc::<[u8]>::new_uninit_slice(view.length() as usize);
+    let mut bytes = buffer(view.length() as usize).ok_or("no memory for the file")?;
     view.copy_to_uninit(Arc::get_mut(&mut bytes).expect("new buffer"));
     // SAFETY: `copy_to_uninit` filled the whole buffer.
     Ok(unsafe { bytes.assume_init() })
@@ -266,7 +288,7 @@ async fn read_blob(blob: &Blob) -> Result<Arc<[u8]>, JsValue> {
     if size > MAX_FILE {
         return Err(format!("{size} bytes is more than the {MAX_FILE} allowed").into());
     }
-    let mut bytes = Arc::<[u8]>::new_uninit_slice(size);
+    let mut bytes = buffer(size).ok_or("no memory for the file")?;
     let out = Arc::get_mut(&mut bytes).expect("new buffer");
     let mut start = 0;
     while start < size {

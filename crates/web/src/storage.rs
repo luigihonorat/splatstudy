@@ -254,12 +254,14 @@ const POLL_MS: i32 = 500;
 /// Room kept free beyond the file itself when deciding whether it fits.
 const ROOM_MARGIN: f64 = 16.0 * 1024.0 * 1024.0;
 
-/// Copies a JS byte array into a buffer of our own.
-fn to_arc(view: &Uint8Array) -> Arc<[u8]> {
-    let mut bytes = Arc::<[u8]>::new_uninit_slice(view.length() as usize);
+/// Copies a JS byte array into a buffer of our own; `None` when there is
+/// no memory for it.
+fn to_arc(view: &Uint8Array) -> Option<Arc<[u8]>> {
+    let len = view.length() as usize;
+    let mut bytes = crate::files::buffer(len)?;
     view.copy_to_uninit(Arc::get_mut(&mut bytes).expect("new buffer"));
     // SAFETY: `copy_to_uninit` filled the whole buffer.
-    unsafe { bytes.assume_init() }
+    Some(unsafe { bytes.assume_init() })
 }
 
 thread_local! {
@@ -322,7 +324,14 @@ async fn read_scene() -> Option<Vec<u8>> {
 /// The reference file a stored scene names, if it is stored.
 async fn read_reference(key: Option<BlobKey>) -> Option<Arc<[u8]>> {
     match idb_blob(&key?.name()).await {
-        Ok(v) => v.dyn_into::<Uint8Array>().ok().map(|view| to_arc(&view)),
+        Ok(v) => {
+            let view = v.dyn_into::<Uint8Array>().ok()?;
+            let bytes = to_arc(&view);
+            if bytes.is_none() {
+                log::warn!("no memory for the autosave's reference");
+            }
+            bytes
+        }
         Err(e) => {
             log::warn!("autosave's reference: {}", error_name(&e));
             None
