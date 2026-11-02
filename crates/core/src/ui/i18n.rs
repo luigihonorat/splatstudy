@@ -12,6 +12,7 @@
 
 pub mod export;
 pub mod files;
+pub mod help;
 pub mod mesh;
 pub mod refs;
 pub mod study;
@@ -136,6 +137,7 @@ pub struct Tr {
     pub mesh: &'static mesh::MeshTr,
     pub files: &'static files::FilesTr,
     pub video: &'static export::ExportTr,
+    pub help: &'static help::HelpTr,
 }
 
 pub const JA: Tr = Tr {
@@ -222,6 +224,7 @@ Alt＋右：拡大",
     mesh: &mesh::JA,
     files: &files::JA,
     video: &export::JA,
+    help: &help::JA,
 };
 
 pub const EN: Tr = Tr {
@@ -308,6 +311,7 @@ Alt + right: zoom",
     mesh: &mesh::EN,
     files: &files::EN,
     video: &export::EN,
+    help: &help::EN,
 };
 
 pub const FR: Tr = Tr {
@@ -394,6 +398,7 @@ Alt + droit : zoomer",
     mesh: &mesh::FR,
     files: &files::FR,
     video: &export::FR,
+    help: &help::FR,
 };
 
 #[cfg(test)]
