@@ -103,6 +103,7 @@ impl App {
                     (tr.study.measure, "D"),
                     (tr.study.lighting, "B"),
                     (tr.mesh.remesh, "Shift+R"),
+                    (tr.mesh.subdivide, "Shift+U"),
                 ] {
                     rows.push((label, key.to_owned()));
                 }
