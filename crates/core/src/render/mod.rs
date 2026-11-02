@@ -9,6 +9,7 @@
 
 pub mod clay;
 pub mod readback;
+pub mod splat;
 
 pub const VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
