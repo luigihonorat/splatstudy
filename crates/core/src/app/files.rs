@@ -18,7 +18,7 @@ use crate::render::clay::GpuMesh;
 use crate::scene::autosave::{Autosave, Trouble};
 use crate::scene::blob::content_hash;
 use crate::scene::reference::write_reference_by_key;
-use crate::scene::{BlobKey, SavedReference, Scene, SceneWriter, StudyView, View};
+use crate::scene::{BlobKey, HistoryCache, SavedReference, Scene, SceneWriter, StudyView, View};
 use crate::sculpt::Sculpt;
 use crate::sculpt::record::starts_with_mesh;
 use crate::ui::menu;
@@ -42,6 +42,8 @@ pub(super) struct FileState {
     /// The reference file's key, worked out once per file: hashing a big
     /// splat takes a moment.
     reference_key: Option<(Weak<[u8]>, BlobKey)>,
+    /// The checkpoints and log as last saved, to encode only what is new.
+    history: HistoryCache,
 }
 
 /// A fingerprint of everything an autosave keeps that can change: which
@@ -194,16 +196,15 @@ impl App {
 
     /// The scene as a file: the clay, its checkpoints (the first is where
     /// the session started), the session, the reference and the views.
-    fn scene_bytes(&self) -> Vec<u8> {
+    fn scene_bytes(&mut self) -> Vec<u8> {
         self.write_scene(SceneWriter::new(), None)
     }
 
     /// The scene, with the reference file inside, or named by `key` and
     /// left out.
-    fn write_scene(&self, mut w: SceneWriter, key: Option<BlobKey>) -> Vec<u8> {
+    fn write_scene(&mut self, mut w: SceneWriter, key: Option<BlobKey>) -> Vec<u8> {
         w.mesh(&self.sculpt.mesh)
-            .checkpoints(self.sculpt.checkpoints())
-            .log(self.sculpt.log());
+            .history(&self.sculpt, &mut self.files.history);
         match (self.scene_reference(), key) {
             (Some(reference), Some(key)) => w.reference_by_key(reference, key),
             (Some(reference), None) => w.reference(reference),

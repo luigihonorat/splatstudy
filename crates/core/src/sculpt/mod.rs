@@ -11,6 +11,7 @@ pub mod record;
 pub mod subdivide;
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use glam::Vec3;
 
@@ -174,6 +175,8 @@ pub struct Sculpt {
     logged_falloff: Falloff,
     /// Reopened with a log, and not changed since (see `with_history`).
     resumed: bool,
+    /// Tells this sculpt from every other made in this run.
+    id: u64,
 }
 
 fn mirror(v: Vec3) -> Vec3 {
@@ -197,8 +200,10 @@ impl Sculpt {
 
     /// A sculpt with no checkpoints: for replay, or to restore a saved one.
     fn bare(mesh: Mesh) -> Sculpt {
+        static MADE: AtomicU64 = AtomicU64::new(0);
         let n = mesh.positions.len();
         Sculpt {
+            id: MADE.fetch_add(1, Ordering::Relaxed),
             bvh: Bvh::build(&mesh),
             bvh_stale: false,
             stamp: Stamp::new(n),
@@ -251,6 +256,11 @@ impl Sculpt {
         if std::mem::take(&mut self.resumed) {
             self.checkpoint(true);
         }
+    }
+
+    /// Tells this sculpt from every other made since the app started.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// How the brushes fade from now on, for dabs and grabs.

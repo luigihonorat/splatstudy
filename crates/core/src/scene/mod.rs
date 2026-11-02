@@ -36,7 +36,7 @@ use crate::camera::OrbitCamera;
 use crate::io::{ReadError, Reader, Writer};
 use crate::reference::Reference;
 use crate::sculpt::record::{read_checkpoints, read_log, write_checkpoints, write_log};
-use crate::sculpt::{Checkpoint, Entry, Mesh};
+use crate::sculpt::{Checkpoint, Entry, Mesh, Sculpt};
 
 pub use blob::BlobKey;
 pub use reference::SavedReference;
@@ -181,6 +181,16 @@ impl SceneWriter {
         self.chunk(LOG, self.pack, &w.finish())
     }
 
+    /// The checkpoints and log of `sculpt`, as [`SceneWriter::checkpoints`]
+    /// and [`SceneWriter::log`] write them, encoding only what was added
+    /// since `cache` last saw this sculpt.
+    pub fn history(&mut self, sculpt: &Sculpt, cache: &mut HistoryCache) -> &mut Self {
+        cache.update(sculpt);
+        let pack = self.pack;
+        self.chunk(CHECKPOINTS, pack, &cache.checkpoints.bytes)
+            .chunk(LOG, pack, &cache.log.bytes)
+    }
+
     /// The reference file is stored as it came: most formats are packed
     /// already, and big ones would take long to deflate.
     pub fn reference(&mut self, reference: &Reference) -> &mut Self {
@@ -231,6 +241,73 @@ impl SceneWriter {
 
     pub fn finish(self) -> Vec<u8> {
         self.out.finish()
+    }
+}
+
+/// A sculpt's checkpoints and log as saved, kept from one save to the
+/// next. Both only ever grow at the end, so a save encodes what is new and
+/// copies the rest, instead of encoding every whole mesh again.
+#[derive(Default)]
+pub struct HistoryCache {
+    /// The sculpt they belong to (see [`Sculpt::id`]).
+    sculpt: Option<u64>,
+    checkpoints: Encoded,
+    log: Encoded,
+}
+
+impl HistoryCache {
+    /// Brings the encodings up to date with `sculpt`.
+    fn update(&mut self, sculpt: &Sculpt) {
+        if self.sculpt != Some(sculpt.id()) {
+            *self = Self {
+                sculpt: Some(sculpt.id()),
+                ..Self::default()
+            };
+        }
+        self.checkpoints
+            .extend(sculpt.checkpoints(), |c, w| c.write(w));
+        self.log.extend(sculpt.log(), |e, w| e.write(w));
+    }
+}
+
+/// A list as written: its length, then each item.
+struct Encoded {
+    /// How many items are in `bytes`.
+    count: usize,
+    bytes: Vec<u8>,
+}
+
+impl Default for Encoded {
+    fn default() -> Self {
+        let mut w = Writer::new();
+        w.len(0);
+        Self {
+            count: 0,
+            bytes: w.finish(),
+        }
+    }
+}
+
+impl Encoded {
+    /// Encodes the items past those already in, and the new length.
+    fn extend<T>(&mut self, items: &[T], write: impl Fn(&T, &mut Writer)) {
+        if items.len() < self.count {
+            // Not the list it was: start over.
+            *self = Self::default();
+        }
+        if items.len() == self.count {
+            return;
+        }
+        let mut w = Writer::new();
+        for item in &items[self.count..] {
+            write(item, &mut w);
+        }
+        self.bytes.extend_from_slice(&w.finish());
+        self.count = items.len();
+        let mut w = Writer::new();
+        w.len(self.count);
+        let len = w.finish();
+        self.bytes[..len.len()].copy_from_slice(&len);
     }
 }
 
@@ -685,13 +762,50 @@ mod tests {
     }
 
     #[test]
+    fn the_history_cache_writes_what_a_whole_encoding_writes() {
+        let whole = |s: &Sculpt| {
+            let mut w = SceneWriter::new();
+            w.checkpoints(s.checkpoints()).log(s.log());
+            w.finish()
+        };
+        let cached = |s: &Sculpt, cache: &mut HistoryCache| {
+            let mut w = SceneWriter::new();
+            w.history(s, cache);
+            w.finish()
+        };
+        let mut cache = HistoryCache::default();
+        let mut live = Sculpt::new(Mesh::icosphere(2));
+        assert_eq!(cached(&live, &mut cache), whole(&live), "empty log");
+        for k in 0..3 {
+            live.set_clock(k as f64);
+            live.begin_stroke();
+            live.dab(Dab {
+                brush: Brush::Inflate,
+                centre: Vec3::new(0.2 * k as f32, 0.1, 1.0).normalize(),
+                radius: 0.4,
+                strength: 0.5,
+                invert: false,
+                symmetry: false,
+                direction: Vec3::ZERO,
+            });
+            live.end_stroke();
+            live.refresh();
+            assert_eq!(cached(&live, &mut cache), whole(&live), "stroke {k}");
+        }
+        live.replace_mesh(Mesh::icosphere(1));
+        assert_eq!(cached(&live, &mut cache), whole(&live), "a new mesh");
+        // Another sculpt, even one as long, is encoded afresh.
+        let other = session();
+        assert_eq!(cached(&other, &mut cache), whole(&other), "another sculpt");
+        assert_eq!(cached(&live, &mut cache), whole(&live), "and back");
+    }
+
+    #[test]
     fn an_autosave_is_stored_undeflated_and_reads_the_same() {
         let live = session();
+        let mut cache = HistoryCache::default();
         let mut w = SceneWriter::stored();
-        w.mesh(&live.mesh)
-            .checkpoints(live.checkpoints())
-            .log(live.log())
-            .view(&view());
+        w.mesh(&live.mesh).history(&live, &mut cache).view(&view());
         let stored = w.finish();
         let mut r = Reader::new(&stored[MAGIC.len() + 4..]);
         while !r.is_empty() {
