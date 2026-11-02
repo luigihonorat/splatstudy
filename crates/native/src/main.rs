@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autosave;
 mod config;
 mod files;
 mod text;
@@ -99,6 +100,9 @@ fn run() -> Result<(), String> {
         .skip(1)
         .filter_map(|a| a.strip_prefix("--").map(str::to_owned))
         .collect();
+    // The last session first, unless `--fresh`.
+    let fresh = options.iter().any(|o| o == "fresh");
+    let (mut autosave, options) = autosave::Autosave::restore(&mut app, &options, fresh);
     app.apply_url_options(&options.join("&"));
     app.set_first_run(config::first_run());
     if let Some(saved) = config::load_preferences() {
@@ -130,7 +134,10 @@ fn run() -> Result<(), String> {
         };
         for event in first.into_iter().chain(events.poll_iter()) {
             match event {
-                Event::Quit { .. } => return Ok(()),
+                Event::Quit { .. } => {
+                    autosave.tick(&mut app, true);
+                    return Ok(());
+                }
                 Event::Window {
                     win_event: WindowEvent::PixelSizeChanged(..),
                     ..
@@ -162,6 +169,8 @@ fn run() -> Result<(), String> {
                 Some(&window),
             );
         }
+        // The loop wakes at least twice a second, so this sees quiet moments.
+        autosave.tick(&mut app, false);
 
         let due = redraw_at.is_some_and(|t| Instant::now() >= t);
         if !app.needs_frame() && !due {
@@ -210,6 +219,7 @@ fn run() -> Result<(), String> {
             eprintln!("could not open {url}: {e}");
         }
         if out.quit {
+            autosave.tick(&mut app, true);
             return Ok(());
         }
     }

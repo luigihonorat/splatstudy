@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 /// The app's own folder for settings, created on first use.
-fn folder() -> Option<PathBuf> {
+pub fn folder() -> Option<PathBuf> {
     match sdl3::filesystem::get_pref_path("", "splatstudy") {
         Ok(path) => Some(path),
         Err(e) => {
