@@ -10,6 +10,7 @@ use glam::{Vec2, Vec3};
 use super::{App, Drag, Request, SCULPT};
 use crate::input::{FilePurpose, PointerKind};
 use crate::meshio::{self, Soup};
+use crate::reference::Reference;
 use crate::render::clay::GpuMesh;
 use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh};
 use crate::ui::{self, i18n::Tr, menu, theme};
@@ -53,6 +54,8 @@ pub(super) struct ToolSettings {
     pub(super) pressure_size: bool,
     /// Remesh resolution: cells across the clay's longest side.
     pub(super) resolution: f32,
+    /// Clay from splats: the density that counts as material, 0..1.
+    pub(super) threshold: f32,
     /// Asked for in this frame, done at the start of the next, so the
     /// notice saying so shows while it runs.
     pending: Option<Pending>,
@@ -73,6 +76,7 @@ impl Default for ToolSettings {
             symmetry: true,
             pressure_size: false,
             resolution: voxel::DEFAULT_RESOLUTION as f32,
+            threshold: voxel::DEFAULT_THRESHOLD,
             pending: None,
         }
     }
@@ -195,6 +199,45 @@ impl App {
     pub(super) fn replace_clay(&mut self, mesh: Mesh) {
         self.sculpt.replace_mesh(mesh);
         self.sync_clay();
+    }
+
+    /// The controls for making clay from the reference, for the reference
+    /// panel: the threshold (for splats) and the button, enabled when a
+    /// reference is `loaded`. True when the button was clicked: the caller
+    /// then hands the reference to [`App::clay_from_reference`].
+    #[allow(dead_code)] // until the reference panel shows them
+    pub(super) fn reference_to_clay_controls(&mut self, ui: &mut egui::Ui, loaded: bool) -> bool {
+        let tr = self.lang.tr();
+        let live = self.playback.is_none();
+        ui.add_enabled_ui(loaded && live, |ui| {
+            ui::slider(
+                ui,
+                tr.mesh.threshold,
+                &mut self.tool.threshold,
+                0.05..=1.0,
+                |v| format!("{:.0}%", v * 100.0),
+            );
+            ui::choice(ui, tr.mesh.from_reference, false).clicked()
+        })
+        .inner
+    }
+
+    /// Replaces the clay with the shape of the reference, at the remesh
+    /// resolution. Undo brings the previous clay back. The reference lives
+    /// in the reference part's state, so take it out to call this:
+    /// `if let Some(r) = state.take() { self.clay_from_reference(&r); state = Some(r) }`.
+    #[allow(dead_code)] // until the reference panel calls it
+    pub(super) fn clay_from_reference(&mut self, reference: &Reference) {
+        let tr = self.lang.tr();
+        let resolution = self.tool.resolution.round() as u32;
+        match voxel::clay_from_reference(reference, resolution, self.tool.threshold) {
+            Some(mesh) => {
+                self.playback = None;
+                self.replace_clay(mesh);
+                self.notify(tr.mesh.made_from_reference);
+            }
+            None => self.notify(tr.mesh.nothing_left),
+        }
     }
 
     /// Remeshes the clay at the next frame, saying so first.
