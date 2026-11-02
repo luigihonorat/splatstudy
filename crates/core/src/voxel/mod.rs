@@ -249,7 +249,7 @@ mod tests {
     #[ignore]
     fn remesh_timing() {
         let sphere = Mesh::icosphere(crate::sculpt::DEFAULT_LEVEL);
-        for resolution in [64, 128, 192, 256] {
+        for resolution in [64, 128, 160, 192, 256] {
             let start = std::time::Instant::now();
             let mut lap = {
                 let mut last = start;

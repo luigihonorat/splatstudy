@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
-use super::{Brush, DEFAULT_LEVEL, Dab, Mesh, Sculpt};
+use super::{Brush, DEFAULT_LEVEL, Dab, Falloff, Mesh, Sculpt};
 use crate::io::{ReadError, Reader, Writer};
 
 /// Pauses longer than this, in seconds, are shortened to it in playback.
@@ -40,6 +40,9 @@ pub enum Event {
     Mirror {
         to_negative: bool,
     },
+    /// The brushes fade this way from the next dab or grab on (see
+    /// `Sculpt::set_falloff`). Every checkpoint goes back to the default.
+    Falloff(Falloff),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -153,6 +156,7 @@ mod tag {
     pub const REFRESH: u8 = 7;
     pub const CHECKPOINT: u8 = 8;
     pub const MIRROR: u8 = 9;
+    pub const FALLOFF: u8 = 10;
 }
 
 impl Entry {
@@ -203,6 +207,9 @@ impl Entry {
             Event::Mirror { to_negative } => {
                 w.u8(tag::MIRROR).u8(u8::from(to_negative));
             }
+            Event::Falloff(f) => {
+                w.u8(tag::FALLOFF).u8(f as u8);
+            }
         }
     }
 
@@ -248,6 +255,11 @@ impl Entry {
             tag::MIRROR => Event::Mirror {
                 to_negative: flag(r)?,
             },
+            tag::FALLOFF => Event::Falloff(
+                *Falloff::ALL
+                    .get(r.u8()? as usize)
+                    .ok_or_else(|| r.invalid("unknown falloff"))?,
+            ),
             _ => return Err(r.invalid("unknown log event")),
         };
         Ok(Entry { time, event })
@@ -311,6 +323,7 @@ impl Sculpt {
             Event::Refresh => self.refresh(),
             Event::Checkpoint(_) => {}
             Event::Mirror { to_negative } => self.mirror(to_negative),
+            Event::Falloff(falloff) => self.falloff = falloff,
         }
     }
 }
@@ -389,6 +402,8 @@ impl Replay {
         let Some(checkpoint) = self.checkpoints.get(n as usize) else {
             return;
         };
+        // As a replay starting here would have it.
+        self.sculpt.falloff = Falloff::Smooth;
         if checkpoint.triangles.is_none() {
             self.sculpt.snap_positions(&checkpoint.positions);
         } else if let Some(mesh) = checkpoint.mesh() {
@@ -457,6 +472,7 @@ mod tests {
             clock += 1.5;
             s.set_clock(clock);
             let at = Vec3::new(0.3 - k as f32 * 0.1, 0.2 + shift, 0.9).normalize();
+            s.set_falloff(Falloff::ALL[k % Falloff::ALL.len()]);
             s.begin_stroke();
             if brush == Brush::Move {
                 s.grab(at, 0.3, true);

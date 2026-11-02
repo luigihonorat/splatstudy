@@ -8,6 +8,7 @@
 pub mod bvh;
 pub mod mesh;
 pub mod record;
+pub mod subdivide;
 
 use std::ops::Range;
 
@@ -58,6 +59,40 @@ impl Brush {
         Brush::Crease,
         Brush::Pinch,
     ];
+}
+
+/// How a brush's effect fades from its centre to its rim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Falloff {
+    /// A soft dome: full at the centre, flat at both ends.
+    #[default]
+    Smooth,
+    /// A cone: fades evenly to the rim.
+    Linear,
+    /// A narrow peak: most of the effect near the centre.
+    Sharp,
+}
+
+impl Falloff {
+    /// Every falloff, in the order the panel lists them.
+    pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Linear, Falloff::Sharp];
+
+    /// The weight at `distance` from the centre of a brush of `radius`:
+    /// 1 at the centre, 0 at the rim and beyond.
+    pub fn weight(self, distance: f32, radius: f32) -> f32 {
+        let t = (distance / radius).min(1.0);
+        match self {
+            Falloff::Smooth => {
+                let s = 1.0 - t * t;
+                s * s
+            }
+            Falloff::Linear => 1.0 - t,
+            Falloff::Sharp => {
+                let s = 1.0 - t;
+                s * s * s
+            }
+        }
+    }
 }
 
 /// One touch of the brush on the surface, in world units.
@@ -126,13 +161,11 @@ pub struct Sculpt {
     last_checkpoint: f64,
     /// The mesh was replaced since the GPU buffers were last made for it.
     topology_changed: bool,
-}
-
-/// Smooth bump: 1 at the centre, 0 at the rim, flat at both ends.
-fn falloff(distance: f32, radius: f32) -> f32 {
-    let t = (distance / radius).min(1.0);
-    let s = 1.0 - t * t;
-    s * s
+    /// How the brushes fade towards their rim.
+    falloff: Falloff,
+    /// The falloff a replay of the log would have reached: a change is
+    /// logged before the next dab or grab that differs from it.
+    logged_falloff: Falloff,
 }
 
 fn mirror(v: Vec3) -> Vec3 {
@@ -180,6 +213,8 @@ impl Sculpt {
             clock: 0.0,
             last_checkpoint: 0.0,
             topology_changed: false,
+            falloff: Falloff::Smooth,
+            logged_falloff: Falloff::Smooth,
             mesh,
         }
     }
@@ -187,11 +222,45 @@ impl Sculpt {
     /// A saved sculpt: its current mesh (in the saved vertex order, see
     /// [`Mesh::from_ordered`]), its log and checkpoints. Undo starts empty.
     pub fn with_history(mesh: Mesh, log: Vec<Entry>, checkpoints: Vec<Checkpoint>) -> Sculpt {
+        // What a replay of the log has at its end: the last falloff logged
+        // since the last checkpoint.
+        let logged_falloff = log
+            .iter()
+            .rev()
+            .find_map(|e| match e.event {
+                Event::Falloff(f) => Some(f),
+                Event::Checkpoint(_) => Some(Falloff::Smooth),
+                _ => None,
+            })
+            .unwrap_or_default();
         Sculpt {
             log,
             checkpoints,
+            logged_falloff,
             ..Sculpt::bare(mesh)
         }
+    }
+
+    /// How the brushes fade from now on, for dabs and grabs.
+    pub fn set_falloff(&mut self, falloff: Falloff) {
+        self.falloff = falloff;
+    }
+
+    pub fn falloff(&self) -> Falloff {
+        self.falloff
+    }
+
+    /// Logs the falloff if a replay would not have it yet.
+    fn log_falloff(&mut self) {
+        if self.recording && self.falloff != self.logged_falloff {
+            self.record(Event::Falloff(self.falloff));
+            self.logged_falloff = self.falloff;
+        }
+    }
+
+    /// The weight of a brush's effect at `distance` from its centre.
+    fn weight(&self, distance: f32, radius: f32) -> f32 {
+        self.falloff.weight(distance, radius)
     }
 
     /// The meshes a replay of [`Sculpt::log`] starts from and snaps to.
@@ -248,6 +317,8 @@ impl Sculpt {
         }
         let index = self.checkpoints.len() as u32;
         self.record(Event::Checkpoint(index));
+        // A replay that starts or snaps here starts with the default.
+        self.logged_falloff = Falloff::Smooth;
         let checkpoint = Checkpoint::of(&self.mesh, self.log.len(), self.clock, topology);
         self.checkpoints.push(checkpoint);
         self.last_checkpoint = self.clock;
@@ -301,6 +372,28 @@ impl Sculpt {
 
     pub fn raycast(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
         self.bvh.raycast(&self.mesh, origin, dir)
+    }
+
+    /// The surface's normal at a hit: its triangle's vertex normals,
+    /// blended by where the hit lies in it, so it turns smoothly from one
+    /// triangle to the next.
+    pub fn normal_at(&self, hit: &Hit) -> Vec3 {
+        let Some(&t) = self.mesh.triangles.get(hit.triangle as usize) else {
+            return Vec3::Y;
+        };
+        let [a, b, c] = t.map(|v| self.mesh.positions[v as usize]);
+        let [na, nb, nc] = t.map(|v| self.mesh.normals[v as usize]);
+        // Barycentric weights from the areas of the three sub-triangles.
+        let n = (b - a).cross(c - a);
+        let area = n.length_squared();
+        if area <= 0.0 {
+            return na;
+        }
+        let p = hit.point;
+        let wa = (c - b).cross(p - b).dot(n) / area;
+        let wb = (a - c).cross(p - c).dot(n) / area;
+        let wc = 1.0 - wa - wb;
+        (na * wa + nb * wb + nc * wc).normalize_or(n.normalize_or(Vec3::Y))
     }
 
     /// Takes the vertex ranges that changed since the last call, for upload.
@@ -444,6 +537,7 @@ impl Sculpt {
 
     /// Applies a dab of any brush but Move (and its mirror image).
     pub fn dab(&mut self, dab: Dab) {
+        self.log_falloff();
         self.record(Event::Dab(dab));
         self.moved.clear();
         self.dab_at(dab);
@@ -488,7 +582,7 @@ impl Sculpt {
         let (mut normal, mut position, mut weight) = (Vec3::ZERO, Vec3::ZERO, 0.0);
         for &v in found {
             let p = self.mesh.positions[v as usize];
-            let w = falloff(p.distance(dab.centre), dab.radius);
+            let w = self.weight(p.distance(dab.centre), dab.radius);
             normal += self.mesh.normals[v as usize] * w;
             position += p * w;
             weight += w;
@@ -523,7 +617,7 @@ impl Sculpt {
                 continue;
             }
             let lift = (height - above).min(2.0 * height)
-                * falloff(p.distance(dab.centre), dab.radius)
+                * self.weight(p.distance(dab.centre), dab.radius)
                 * 0.3;
             self.place(v, p + n * (sign * lift));
         }
@@ -542,7 +636,7 @@ impl Sculpt {
             let p = self.mesh.positions[v as usize];
             let above = (p - origin).dot(n);
             if (above > 0.0) != dab.invert && above != 0.0 {
-                let w = falloff(p.distance(dab.centre), dab.radius) * dab.strength * 0.3;
+                let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength * 0.3;
                 self.place(v, p - n * (above * w));
             }
         }
@@ -560,7 +654,7 @@ impl Sculpt {
                 .map(|&u| self.mesh.positions[u as usize])
                 .sum::<Vec3>()
                 / ring.len() as f32;
-            let w = falloff(p.distance(dab.centre), dab.radius) * dab.strength;
+            let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength;
             self.smoothed.push(p + (average - p) * w);
         }
         for (i, &v) in found.iter().enumerate() {
@@ -573,7 +667,7 @@ impl Sculpt {
         for &v in found {
             let p = self.mesh.positions[v as usize];
             let step =
-                dab.radius * 0.05 * falloff(p.distance(dab.centre), dab.radius) * dab.strength;
+                dab.radius * 0.05 * self.weight(p.distance(dab.centre), dab.radius) * dab.strength;
             self.place(v, p + self.mesh.normals[v as usize] * (sign * step));
         }
     }
@@ -591,7 +685,7 @@ impl Sculpt {
                 continue;
             }
             let p = self.mesh.positions[v as usize];
-            let w = falloff(p.distance(dab.centre), dab.radius);
+            let w = self.weight(p.distance(dab.centre), dab.radius);
             // Squared falloff: a narrow cut rather than a dent.
             let cut = -n * (sign * depth * w * w);
             // The sides drawn in towards the line keep the groove sharp.
@@ -612,7 +706,7 @@ impl Sculpt {
             }
             let p = self.mesh.positions[v as usize];
             // Along the surface only, and a fraction of the way: never past the centre.
-            let w = falloff(p.distance(dab.centre), dab.radius) * dab.strength * 0.2;
+            let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength * 0.2;
             self.place(v, p + tangent(dab.centre - p, n) * (sign * w));
         }
     }
@@ -620,6 +714,7 @@ impl Sculpt {
     /// Move brush, at the start of a stroke: takes hold of the surface
     /// around `centre` (and its mirror image).
     pub fn grab(&mut self, centre: Vec3, radius: f32, symmetry: bool) {
+        self.log_falloff();
         self.record(Event::Grab {
             centre,
             radius,
@@ -640,7 +735,7 @@ impl Sculpt {
                 if self.unique.mark(v) {
                     let p = self.mesh.positions[v as usize];
                     self.grabbed
-                        .push((v, p, falloff(p.distance(c), radius), mirrored));
+                        .push((v, p, self.falloff.weight(p.distance(c), radius), mirrored));
                 }
             }
         }

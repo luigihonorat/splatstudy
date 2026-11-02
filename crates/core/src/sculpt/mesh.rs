@@ -31,6 +31,20 @@ impl Adjacency {
         let i = i as usize;
         &self.items[self.offsets[i] as usize..self.offsets[i + 1] as usize]
     }
+
+    /// Where the items of `i` start among all the items.
+    pub fn start(&self, i: u32) -> usize {
+        self.offsets[i as usize] as usize
+    }
+
+    /// All the items of every list together.
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
 
 #[derive(Clone)]
@@ -390,6 +404,70 @@ mod tests {
         mesh.recompute_normals();
         for (a, b) in local.iter().zip(&mesh.normals) {
             assert!(a.distance(*b) < 1e-5);
+        }
+    }
+
+    /// Where [`Mesh::new`] spends its time, on a remeshed sphere.
+    /// `cargo test --release -p splatstudy-core mesh_new_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn mesh_new_timing() {
+        use std::time::Instant;
+        let sphere = Mesh::icosphere(crate::sculpt::DEFAULT_LEVEL);
+        // Surface nets' output, in the grid's order, as a remesh gives it.
+        let raw = {
+            use crate::voxel::{nets, sdf};
+            let mut field = sdf::signed_distance(&sphere.positions, &sphere.triangles, 160, 0);
+            let field = field.as_mut().unwrap();
+            nets::untangle(field);
+            let (positions, triangles) = nets::surface_nets(field);
+            nets::keep_largest(&positions, &triangles)
+        };
+        for (name, positions, triangles) in [
+            (
+                "icosphere",
+                sphere.positions.clone(),
+                sphere.triangles.clone(),
+            ),
+            ("remeshed at 160", raw.0, raw.1),
+        ] {
+            let mut best = [f64::MAX; 5];
+            for _ in 0..5 {
+                let ms = |since: Instant| since.elapsed().as_secs_f64() * 1e3;
+                let start = Instant::now();
+                let (p, t) = spatial_order(positions.clone(), triangles.clone());
+                let order = ms(start);
+                let start = Instant::now();
+                let faces = vertex_faces(p.len(), &t);
+                let t_faces = ms(start);
+                let mut m = Mesh {
+                    normals: vec![Vec3::ZERO; p.len()],
+                    vertex_faces: faces,
+                    neighbours: Adjacency::default(),
+                    positions: p,
+                    triangles: t,
+                };
+                let start = Instant::now();
+                m.neighbours = neighbours(&m);
+                let t_ring = ms(start);
+                let start = Instant::now();
+                m.recompute_normals();
+                let t_normals = ms(start);
+                let start = Instant::now();
+                std::hint::black_box(Mesh::new(positions.clone(), triangles.clone()));
+                let t_all = ms(start);
+                for (b, t) in best
+                    .iter_mut()
+                    .zip([order, t_faces, t_ring, t_normals, t_all])
+                {
+                    *b = b.min(t);
+                }
+            }
+            let [order, faces, ring, normals, all] = best;
+            println!(
+                "{name}, {} vertices: Mesh::new {all:.1} ms = order {order:.1}                  + faces {faces:.1} + neighbours {ring:.1} + normals {normals:.1}",
+                positions.len()
+            );
         }
     }
 }
