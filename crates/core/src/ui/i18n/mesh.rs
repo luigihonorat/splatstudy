@@ -42,6 +42,8 @@ pub struct MeshTr {
     pub falloff_smooth: &'static str,
     pub falloff_linear: &'static str,
     pub falloff_sharp: &'static str,
+    /// Notice when a mesh has too many vertices or triangles to sculpt.
+    pub too_heavy: &'static str,
 }
 
 pub const JA: MeshTr = MeshTr {
@@ -66,6 +68,7 @@ pub const JA: MeshTr = MeshTr {
     falloff_smooth: "なめらか",
     falloff_linear: "直線",
     falloff_sharp: "鋭い",
+    too_heavy: "頂点が多すぎて彫刻できません",
 };
 
 pub const EN: MeshTr = MeshTr {
@@ -90,6 +93,7 @@ pub const EN: MeshTr = MeshTr {
     falloff_smooth: "smooth",
     falloff_linear: "linear",
     falloff_sharp: "sharp",
+    too_heavy: "too many vertices to sculpt",
 };
 
 pub const FR: MeshTr = MeshTr {
@@ -114,4 +118,5 @@ pub const FR: MeshTr = MeshTr {
     falloff_smooth: "douce",
     falloff_linear: "linéaire",
     falloff_sharp: "vive",
+    too_heavy: "trop de sommets pour sculpter",
 };

@@ -13,7 +13,9 @@ use crate::input::{FilePurpose, PointerKind};
 use crate::meshio::{self, Soup};
 use crate::reference::Content;
 use crate::render::clay::GpuMesh;
-use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Falloff, Hit, Mesh, subdivide};
+use crate::sculpt::{
+    Brush, DEFAULT_LEVEL, Dab, Falloff, Hit, MAX_TRIANGLES, MAX_VERTICES, Mesh, subdivide,
+};
 use crate::ui::{self, i18n::Tr, menu, theme};
 use crate::voxel;
 
@@ -267,8 +269,10 @@ impl App {
         let Some(mesh) = mesh else {
             return self.cannot_open(name);
         };
+        if !self.replace_clay(mesh) {
+            return;
+        }
         self.playback = None;
-        self.replace_clay(mesh);
         self.frame_sculpt();
         let tr = self.lang.tr();
         let done = if remeshed {
@@ -280,10 +284,16 @@ impl App {
     }
 
     /// Puts a new mesh in place of the clay, as one undoable step, and
-    /// makes its GPU buffers.
-    pub(super) fn replace_clay(&mut self, mesh: Mesh) {
+    /// makes its GPU buffers. Refuses, with a notice, a mesh too heavy to
+    /// sculpt or to fit the GPU's buffers; true if it was put in place.
+    pub(super) fn replace_clay(&mut self, mesh: Mesh) -> bool {
+        if mesh.positions.len() > MAX_VERTICES || mesh.triangles.len() > MAX_TRIANGLES {
+            self.notify(self.lang.tr().mesh.too_heavy);
+            return false;
+        }
         self.sculpt.replace_mesh(mesh);
         self.sync_clay();
+        true
     }
 
     /// Replaces the clay with the shape of the loaded reference (inside its
@@ -297,10 +307,11 @@ impl App {
         let resolution = self.tool.resolution.round() as u32;
         match voxel::clay_from_reference(reference, resolution, self.tool.threshold) {
             Some(mesh) => {
-                self.playback = None;
-                self.replace_clay(mesh);
-                self.frame_sculpt();
-                self.notify(tr.mesh.made_from_reference);
+                if self.replace_clay(mesh) {
+                    self.playback = None;
+                    self.frame_sculpt();
+                    self.notify(tr.mesh.made_from_reference);
+                }
             }
             None => self.notify(tr.mesh.nothing_left),
         }
@@ -335,9 +346,10 @@ impl App {
         match voxel::remesh(&self.sculpt.mesh, self.tool.resolution.round() as u32) {
             Some(mesh) => {
                 let count = mesh.positions.len();
-                self.replace_clay(mesh);
-                let m = tr.mesh;
-                self.notify(format!("{} ({count} {})", m.remeshed, m.vertices));
+                if self.replace_clay(mesh) {
+                    let m = tr.mesh;
+                    self.notify(format!("{} ({count} {})", m.remeshed, m.vertices));
+                }
             }
             None => self.notify(tr.mesh.nothing_left),
         }
@@ -360,9 +372,10 @@ impl App {
     pub(super) fn subdivide(&mut self) {
         let mesh = subdivide::subdivide(&self.sculpt.mesh);
         let count = mesh.positions.len();
-        self.replace_clay(mesh);
-        let m = self.lang.tr().mesh;
-        self.notify(format!("{} ({count} {})", m.subdivided, m.vertices));
+        if self.replace_clay(mesh) {
+            let m = self.lang.tr().mesh;
+            self.notify(format!("{} ({count} {})", m.subdivided, m.vertices));
+        }
     }
 
     /// Mesh formats in the file → export menu. Always the live clay, even

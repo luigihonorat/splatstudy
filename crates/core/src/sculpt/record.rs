@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
-use super::{Brush, DEFAULT_LEVEL, Dab, Falloff, Mesh, Sculpt};
+use super::{Brush, DEFAULT_LEVEL, Dab, Falloff, MAX_TRIANGLES, MAX_VERTICES, Mesh, Sculpt};
 use crate::io::{ReadError, Reader, Writer};
 
 /// Pauses longer than this, in seconds, are shortened to it in playback.
@@ -116,13 +116,22 @@ impl Checkpoint {
         let log_index = usize::try_from(r.u64()?).map_err(|_| r.invalid("log index too large"))?;
         let time = r.f64()?;
         let n = r.len(12)?;
+        if n > MAX_VERTICES {
+            return Err(r.invalid("too many vertices"));
+        }
         let positions = (0..n)
-            .map(|_| r.vec3())
+            .map(|_| match r.vec3()? {
+                p if p.is_finite() => Ok(p),
+                _ => Err(r.invalid("a position that isn't a finite number")),
+            })
             .collect::<Result<Arc<[Vec3]>, _>>()?;
         let triangles = match r.u8()? {
             0 => None,
             1 => {
                 let count = r.len(12)?;
+                if count > MAX_TRIANGLES {
+                    return Err(r.invalid("too many triangles"));
+                }
                 let mut triangles = Vec::with_capacity(count);
                 for _ in 0..count {
                     let t = [r.u32()?, r.u32()?, r.u32()?];
@@ -681,6 +690,20 @@ mod tests {
                 Replay::new(checkpoints, log).seek(f64::INFINITY, usize::MAX);
             }
         }
+        // A position that isn't a number, or more vertices than the clay
+        // may have: errors.
+        let mut w = Writer::new();
+        let mut bad = Checkpoint::of(&Mesh::icosphere(1), 0, 0.0, true);
+        let mut positions = bad.positions.to_vec();
+        positions[3].y = f32::NAN;
+        bad.positions = positions.into();
+        bad.write(&mut w);
+        assert!(Checkpoint::read(&mut Reader::new(&w.finish())).is_err());
+        let mut w = Writer::new();
+        w.u64(0).f64(0.0).len(MAX_VERTICES + 1);
+        let mut bytes = w.finish();
+        bytes.resize(bytes.len() + (MAX_VERTICES + 1) * 12 + 1, 0);
+        assert!(Checkpoint::read(&mut Reader::new(&bytes)).is_err());
         // No checkpoints at all: the default sphere.
         let replay = Replay::new(Vec::new(), Vec::new());
         assert_eq!(replay.sculpt.mesh.positions.len(), 163_842);

@@ -22,6 +22,12 @@ pub use record::{Checkpoint, Entry, Event, Replay};
 /// triangles; enough for a head study, light enough for the browser.
 pub const DEFAULT_LEVEL: u32 = 7;
 
+/// The most vertices and triangles the clay may have, from any source
+/// (import, remesh, subdivision, a saved scene): its GPU buffers (28 and
+/// 12 bytes each) stay well under wgpu's 256 MiB default buffer limit.
+pub const MAX_VERTICES: usize = 4_000_000;
+pub const MAX_TRIANGLES: usize = 8_000_000;
+
 /// Vertices per GPU upload page.
 pub const PAGE: usize = 4096;
 
