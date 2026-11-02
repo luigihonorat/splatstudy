@@ -28,11 +28,32 @@ pub fn start() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
     wasm_bindgen_futures::spawn_local(async {
-        if let Err(err) = run().await {
-            log::error!("splatstudy failed to start: {err:?}");
-            show_error(&format!("{err:?}"));
+        match run().await {
+            Ok(()) => {}
+            // The page already shows the friendly WebGPU message.
+            Err(err) if err.is_undefined() => {}
+            Err(err) => {
+                log::error!("splatstudy failed to start: {err:?}");
+                show_error(&format!("{err:?}"));
+            }
         }
     });
+}
+
+/// The browser has WebGPU but no usable adapter or device: shows the page's
+/// "this browser can't use WebGPU" message, in the page's language, instead
+/// of a raw error. Returns `undefined` when the message is on screen.
+fn no_gpu(detail: &str) -> JsValue {
+    log::error!("WebGPU is not usable: {detail}");
+    let shown = web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &"splatstudyUnsupported".into()).ok())
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .is_some_and(|f| f.call0(&JsValue::NULL).is_ok());
+    if shown {
+        JsValue::UNDEFINED
+    } else {
+        detail.into()
+    }
 }
 
 struct Shell {
@@ -70,7 +91,7 @@ async fn run() -> Result<(), JsValue> {
             ..Default::default()
         })
         .await
-        .map_err(|e| format!("adapter: {e}"))?;
+        .map_err(|e| no_gpu(&format!("adapter: {e}")))?;
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("splatstudy"),
@@ -78,7 +99,7 @@ async fn run() -> Result<(), JsValue> {
             ..Default::default()
         })
         .await
-        .map_err(|e| format!("device: {e}"))?;
+        .map_err(|e| no_gpu(&format!("device: {e}")))?;
 
     let caps = surface.get_capabilities(&adapter);
     let format = caps

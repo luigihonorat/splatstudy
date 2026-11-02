@@ -27,10 +27,19 @@
       en: ["This browser can't use WebGPU.", "Please try the latest Chrome or Edge, or Safari 26 or later."],
       fr: ["Ce navigateur ne prend pas en charge WebGPU.", "Essayez la dernière version de Chrome ou d’Edge, ou Safari 26 ou plus récent."],
     };
+    // The same choice as the app: ?lang= first, then the browser, else Japanese.
+    function language() {
+      const tag = new URLSearchParams(location.search).get("lang") || navigator.language || "ja";
+      const primary = tag.split(/[-_]/)[0].toLowerCase();
+      return primary in texts ? primary : "ja";
+    }
+    // Also called by the app when the GPU device can't be created.
     function unsupported() {
-      const lang = (navigator.language || "ja").slice(0, 2);
+      const lang = language();
       const box = document.getElementById("message");
-      for (const line of texts[lang] || texts.ja) {
+      if (box.style.display === "block") return;
+      document.documentElement.lang = lang;
+      for (const line of texts[lang]) {
         const p = document.createElement("p");
         p.textContent = line;
         box.append(p);
@@ -38,6 +47,7 @@
       document.getElementById("splatstudy").style.display = "none";
       box.style.display = "block";
     }
+    window.splatstudyUnsupported = unsupported;
     const adapter = navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null);
     if (!adapter) {
       unsupported();
