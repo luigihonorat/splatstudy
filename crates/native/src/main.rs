@@ -101,6 +101,10 @@ fn run() -> Result<(), String> {
         .collect();
     app.apply_url_options(&options.join("&"));
     app.set_first_run(config::first_run());
+    if let Some(saved) = config::load_preferences() {
+        app.apply_preferences(saved.trim());
+    }
+    let mut preferences = app.preferences();
 
     let event_subsystem = sdl.event().map_err(|e| e.to_string())?;
     let mut files = files::Files::new(&event_subsystem);
@@ -176,6 +180,11 @@ fn run() -> Result<(), String> {
             ppp,
         );
         queue.present(texture);
+        let now_preferences = app.preferences();
+        if now_preferences != preferences {
+            config::save_preferences(&now_preferences);
+            preferences = now_preferences;
+        }
         redraw_at = out
             .repaint_after
             .map(|s| Instant::now() + Duration::from_secs_f64(s));

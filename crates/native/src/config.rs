@@ -30,3 +30,17 @@ pub fn first_run() -> bool {
     }
     true
 }
+
+/// The preferences saved last, if any.
+pub fn load_preferences() -> Option<String> {
+    std::fs::read_to_string(folder()?.join("preferences")).ok()
+}
+
+pub fn save_preferences(preferences: &str) {
+    let Some(path) = folder().map(|f| f.join("preferences")) else {
+        return;
+    };
+    if let Err(e) = std::fs::write(&path, preferences) {
+        log::warn!("could not write {}: {e}", path.display());
+    }
+}

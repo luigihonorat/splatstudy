@@ -67,6 +67,8 @@ struct Shell {
     /// Seconds (performance clock) at which the app asked to be redrawn.
     redraw_at: Option<f64>,
     cursor: CursorIcon,
+    /// The preferences as last stored.
+    preferences: String,
 }
 
 async fn run() -> Result<(), JsValue> {
@@ -131,8 +133,16 @@ async fn run() -> Result<(), JsValue> {
     app.set_debug(query_value(&search, "debug").is_some());
     app.set_mac(is_mac());
     app.set_video_encoder(Box::new(video::WebVideo::new()));
+    // Saved preferences beat the browser's language; `?lang=` beats both.
+    if let Some(saved) = storage::get(storage::PREFERENCES) {
+        app.apply_preferences(&saved);
+    }
+    if let Some(tag) = query_value(&search, "lang") {
+        app.apply_preferences(&format!("lang={tag}"));
+    }
     app.apply_url_options(&search);
     app.set_first_run(storage::first_run());
+    let preferences = app.preferences();
 
     let shell = Rc::new(RefCell::new(Shell {
         app,
@@ -144,6 +154,7 @@ async fn run() -> Result<(), JsValue> {
         modifiers: Modifiers::default(),
         redraw_at: None,
         cursor: CursorIcon::Default,
+        preferences,
     }));
     listen(&shell, &canvas)?;
     let deliver: files::Deliver = {
@@ -388,6 +399,11 @@ impl Shell {
         let size = [self.config.width, self.config.height];
         let out = self.app.frame(now, &view, size, ppp);
         self.queue.present(texture);
+        let preferences = self.app.preferences();
+        if preferences != self.preferences {
+            storage::set(storage::PREFERENCES, &preferences);
+            self.preferences = preferences;
+        }
         self.redraw_at = out.repaint_after.map(|after| now + after);
         if out.cursor != self.cursor {
             self.cursor = out.cursor;

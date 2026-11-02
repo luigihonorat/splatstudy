@@ -8,6 +8,8 @@
 
 use web_sys::Storage;
 
+/// The app's preferences string (language, theme, navigation).
+pub const PREFERENCES: &str = "splatstudy.preferences";
 /// Set after the first visit.
 const SEEN: &str = "splatstudy.seen";
 

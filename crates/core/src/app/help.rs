@@ -10,7 +10,10 @@ use super::sculpting::{BRUSHES, brush_name};
 use super::study::Layout;
 use super::{App, Request, SCULPT};
 use crate::input::FilePurpose;
+use crate::navigation::NavStyle;
 use crate::reference::samples::Sample;
+use crate::ui::i18n::Lang;
+use crate::ui::theme::ThemeMode;
 use crate::ui::{self, menu, theme};
 
 /// The getting started window and what the URL asked for.
@@ -62,6 +65,53 @@ impl App {
                         if !self.apply_view(&name.to_ascii_lowercase()) {
                             log::warn!("no view {name:?}");
                         }
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// The preferences that outlive a session, as `key=value` pairs joined
+    /// by `&`: `lang=ja&theme=dark&nav=zbrush`. The shells store this
+    /// string as is (localStorage on the web, a file on desktop) and hand it
+    /// back to [`App::apply_preferences`] at start.
+    pub fn preferences(&self) -> String {
+        let lang = match self.lang {
+            Lang::Ja => "ja",
+            Lang::En => "en",
+            Lang::Fr => "fr",
+        };
+        let theme = match self.theme {
+            ThemeMode::Light => "light",
+            ThemeMode::Dark => "dark",
+        };
+        let nav = self.nav.name().to_ascii_lowercase();
+        format!("lang={lang}&theme={theme}&nav={nav}")
+    }
+
+    /// Restores preferences saved from [`App::preferences`]. Unknown keys
+    /// and values are skipped, so an older or newer string still loads.
+    pub fn apply_preferences(&mut self, saved: &str) {
+        for (key, value) in query_pairs(saved) {
+            match key {
+                "lang" if !value.is_empty() => self.lang = Lang::from_tag(value),
+                "theme" => {
+                    let theme = match value {
+                        "light" => ThemeMode::Light,
+                        "dark" => ThemeMode::Dark,
+                        _ => continue,
+                    };
+                    self.theme = theme;
+                    theme::apply(&self.ctx, theme);
+                }
+                "nav" => {
+                    if let Some(nav) = NavStyle::ALL
+                        .into_iter()
+                        .find(|n| n.name().eq_ignore_ascii_case(value))
+                    {
+                        self.nav = nav;
                     }
                 }
                 _ => {}
