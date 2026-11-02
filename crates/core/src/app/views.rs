@@ -3,9 +3,10 @@
 //! The two views side by side: layout, the divider, pointer input,
 //! navigation and viewpoints.
 
-use egui::{Align2, Color32, CursorIcon, Key, PointerButton, Rect, Sense, Stroke};
+use egui::{Align2, Color32, CursorIcon, Key, PointerButton, Pos2, Rect, Sense, Stroke};
 use glam::Vec3;
 
+use super::study::Layout;
 use super::{App, Drag, REFERENCE, SCULPT};
 use crate::camera::OrbitCamera;
 use crate::input::{Button, Modifiers, PointerKind, PointerPhase};
@@ -28,6 +29,49 @@ pub(super) fn viewpoints(tr: &Tr) -> [(&'static str, Option<Key>, f32, f32); 6] 
         (tr.top, Some(Key::Num7), 0.0, FRAC_PI_2),
         (tr.three_quarter, None, FRAC_PI_4, 0.3),
     ]
+}
+
+/// Where the sculpt and reference views sit in `area` (indexed by `SCULPT`
+/// and `REFERENCE`), and the divider's x when both show. `split` is the
+/// share of the width given to the sculpt view, wherever it sits. A hidden
+/// view gets an empty rectangle.
+pub(super) fn layout(
+    area: Rect,
+    split: f32,
+    layout: Layout,
+    swapped: bool,
+) -> ([Rect; 2], Option<f32>) {
+    let hidden = Rect::from_min_size(area.min, egui::Vec2::ZERO);
+    match layout {
+        Layout::Sculpt => ([area, hidden], None),
+        Layout::Reference => ([hidden, area], None),
+        Layout::Both => {
+            let first = if swapped { 1.0 - split } else { split };
+            let x = area.left() + (area.width() * first).round();
+            let left = Rect::from_x_y_ranges(area.left()..=x, area.y_range());
+            let right = Rect::from_x_y_ranges(x + 1.0..=area.right(), area.y_range());
+            let rects = if swapped {
+                [right, left]
+            } else {
+                [left, right]
+            };
+            (rects, Some(x))
+        }
+    }
+}
+
+/// Reflects `pos` about the vertical centre line of `rect` when `on`.
+fn mirror_x(rect: Rect, pos: Pos2, on: bool) -> Pos2 {
+    if on {
+        egui::pos2(rect.left() + rect.right() - pos.x, pos.y)
+    } else {
+        pos
+    }
+}
+
+/// A view is shown when it has an area.
+pub(super) fn shown(rect: Rect) -> bool {
+    rect.width() > 0.0 && rect.height() > 0.0
 }
 
 impl App {
@@ -59,41 +103,68 @@ impl App {
             .map(|p| p.distance(centre))
             .fold(0.0, f32::max);
         self.cameras[SCULPT].frame(centre, radius);
+        self.follow_camera(SCULPT);
+    }
+
+    /// With the cameras linked, gives the other view the camera of view
+    /// `index`, which just moved. Both views share the clay's space, so a
+    /// plain copy lines them up.
+    pub(super) fn follow_camera(&mut self, index: usize) {
+        if self.study.link {
+            self.cameras[1 - index] = self.cameras[index];
+        }
     }
 
     pub(super) fn views_ui(&mut self, ui: &mut egui::Ui) {
         let p = self.theme.palette();
         let tr = self.lang.tr();
         let area = ui.max_rect();
+        let study = &self.study;
+        let (rects, divider) = layout(area, self.split, study.layout, study.swapped);
 
         // The divider between the two views, draggable.
-        let x = area.left() + (area.width() * self.split).round();
-        let handle = Rect::from_x_y_ranges(x - 4.0..=x + 4.0, area.y_range());
-        let handle = ui.interact(handle, ui.scope_id().with("split"), Sense::drag());
-        if handle.dragged()
-            && let Some(pos) = handle.interact_pointer_pos()
-        {
-            self.split = ((pos.x - area.left()) / area.width()).clamp(0.2, 0.8);
-        }
-        if handle.hovered() || handle.dragged() {
-            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        if let Some(x) = divider {
+            let handle = Rect::from_x_y_ranges(x - 4.0..=x + 4.0, area.y_range());
+            let handle = ui.interact(handle, ui.scope_id().with("split"), Sense::drag());
+            if handle.dragged()
+                && let Some(pos) = handle.interact_pointer_pos()
+            {
+                let t = (pos.x - area.left()) / area.width();
+                let t = if self.study.swapped { 1.0 - t } else { t };
+                self.split = t.clamp(0.2, 0.8);
+            }
+            if handle.hovered() || handle.dragged() {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            }
         }
 
-        let left = Rect::from_x_y_ranges(area.left()..=x, area.y_range());
-        let right = Rect::from_x_y_ranges(x + 1.0..=area.right(), area.y_range());
-        self.view_rects = [left, right];
-        self.view_input(ui, left, SCULPT);
-        self.view_input(ui, right, REFERENCE);
+        self.view_rects = rects;
+        for index in [SCULPT, REFERENCE] {
+            if shown(rects[index]) {
+                self.view_input(ui, rects[index], index);
+            }
+        }
 
         let painter = ui.painter();
-        let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        for (view, rect) in self.views.iter().zip([left, right]) {
-            if let Some(id) = view.egui_id {
+        // The mirror view flips the images; what is drawn over them is not.
+        let uv = if self.study.mirror {
+            Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
+        } else {
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+        };
+        for (view, rect) in self.views.iter().zip(rects) {
+            if let Some(id) = view.egui_id
+                && shown(rect)
+            {
                 painter.image(id, rect, uv, Color32::WHITE);
             }
         }
         painter.hline(area.x_range(), area.top() + 0.5, Stroke::new(1.0, p.border));
-        painter.vline(x + 0.5, area.y_range(), Stroke::new(1.0, p.border));
+        if let Some(x) = divider {
+            painter.vline(x + 0.5, area.y_range(), Stroke::new(1.0, p.border));
+        }
+        self.guides(ui, rects);
+        let painter = ui.painter();
 
         let label_font = fonts::regular(12.0);
         let sculpt_label = if self.playback.is_some() {
@@ -101,28 +172,43 @@ impl App {
         } else {
             tr.sculpt
         };
-        for (rect, text) in [(left, sculpt_label), (right, tr.reference)] {
-            painter.text(
-                rect.left_top() + egui::vec2(14.0, 12.0),
-                Align2::LEFT_TOP,
-                text,
-                label_font.clone(),
+        for (rect, text) in rects.into_iter().zip([sculpt_label, tr.reference]) {
+            if shown(rect) {
+                painter.text(
+                    rect.left_top() + egui::vec2(14.0, 12.0),
+                    Align2::LEFT_TOP,
+                    text,
+                    label_font.clone(),
+                    theme::VIEW_TEXT,
+                );
+            }
+        }
+        // Empty reference view: say what can go there.
+        let right = rects[REFERENCE];
+        if shown(right) {
+            painter.with_clip_rect(right).text(
+                right.center(),
+                Align2::CENTER_CENTER,
+                tr.drop_hint,
+                fonts::light(16.0),
                 theme::VIEW_TEXT,
             );
         }
-        // Empty reference view: say what can go there.
-        painter.with_clip_rect(right).text(
-            right.center(),
-            Align2::CENTER_CENTER,
-            tr.drop_hint,
-            fonts::light(16.0),
-            theme::VIEW_TEXT,
-        );
 
-        self.tool_cursor(ui, left);
-        if self.debug {
-            self.debug_hud(ui, left);
+        let left = rects[SCULPT];
+        if shown(left) {
+            self.tool_cursor(ui, left);
+            if self.debug {
+                self.debug_hud(ui, left);
+            }
         }
+    }
+
+    /// The point of the rendered view under `pos`, a point of the screen in
+    /// the view's `rect`. The mirror view shows the image flipped, so there
+    /// x reflects about the view's centre.
+    pub(super) fn view_pos(&self, rect: Rect, pos: Pos2) -> Pos2 {
+        mirror_x(rect, pos, self.study.mirror)
     }
 
     /// Pointer input in one view: the navigation preset decides what each
@@ -149,6 +235,16 @@ impl App {
                 i.smooth_scroll_delta.y,
             )
         });
+        // In the mirror view the image is flipped: the pointer is reflected
+        // into the rendered view, and sideways drags turn the other way so
+        // the clay still follows the hand.
+        let pointer = pointer.map(|pos| self.view_pos(rect, pos));
+        let delta = if self.study.mirror {
+            egui::vec2(-delta.x, delta.y)
+        } else {
+            delta
+        };
+        let camera_before = self.cameras[index];
 
         if self.drags[index].is_none() && response.hovered() {
             for (button, ours) in [
@@ -202,7 +298,10 @@ impl App {
                         matches!(s.phase, PointerPhase::Move | PointerPhase::Down)
                             && s.pressure > 0.0
                     })
-                    .map(|s| (egui::pos2(s.pos[0], s.pos[1]), s.pressure))
+                    .map(|s| {
+                        let pos = self.view_pos(rect, egui::pos2(s.pos[0], s.pos[1]));
+                        (pos, s.pressure)
+                    })
                     .collect();
                 for (pos, pressure) in samples {
                     self.stroke_to(rect, pos, pressure);
@@ -229,6 +328,9 @@ impl App {
         if response.hovered() && scroll != 0.0 {
             self.cameras[index].dolly((-scroll * DOLLY_WHEEL).exp());
         }
+        if self.cameras[index] != camera_before {
+            self.follow_camera(index);
+        }
         if index == SCULPT {
             self.sculpt.refresh();
         }
@@ -254,5 +356,55 @@ impl App {
             fonts::regular(12.0),
             theme::VIEW_INK,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn area() -> Rect {
+        Rect::from_min_size(egui::pos2(200.0, 30.0), egui::vec2(1000.0, 600.0))
+    }
+
+    #[test]
+    fn swapping_keeps_each_view_its_share() {
+        let ([sculpt, reference], x) = layout(area(), 0.3, Layout::Both, false);
+        assert_eq!(x, Some(500.0));
+        assert_eq!(sculpt.left(), 200.0);
+        assert_eq!(sculpt.width(), 300.0);
+        assert!(reference.left() > sculpt.right());
+
+        let ([sculpt, reference], x) = layout(area(), 0.3, Layout::Both, true);
+        assert_eq!(x, Some(900.0));
+        assert_eq!(reference.left(), 200.0);
+        assert_eq!(sculpt.right(), 1200.0);
+        assert!(
+            (sculpt.width() - 299.0).abs() < 1e-3,
+            "less the 1px divider"
+        );
+    }
+
+    #[test]
+    fn the_mirror_reflects_a_point_and_back() {
+        let rect = area();
+        let pos = egui::pos2(260.0, 100.0);
+        let mirrored = mirror_x(rect, pos, true);
+        assert_eq!(mirrored, egui::pos2(1140.0, 100.0));
+        assert_eq!(mirror_x(rect, mirrored, true), pos);
+        assert_eq!(mirror_x(rect, rect.center(), true), rect.center());
+        assert_eq!(mirror_x(rect, pos, false), pos);
+    }
+
+    #[test]
+    fn a_single_view_fills_the_area_and_hides_the_other() {
+        for swapped in [false, true] {
+            let ([sculpt, reference], x) = layout(area(), 0.5, Layout::Sculpt, swapped);
+            assert_eq!((sculpt, x), (area(), None));
+            assert!(!shown(reference));
+            let ([sculpt, reference], _) = layout(area(), 0.5, Layout::Reference, swapped);
+            assert_eq!(reference, area());
+            assert!(!shown(sculpt));
+        }
     }
 }
