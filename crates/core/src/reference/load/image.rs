@@ -9,11 +9,29 @@ use crate::reference::RefImage;
 /// The longest side kept; larger pictures are reduced.
 pub const MAX_SIDE: u32 = 4096;
 
+/// The longest side read at all. A header alone can declare any size, and
+/// the pixels are allocated before they are read, so larger pictures are
+/// refused up front.
+pub const MAX_READ_SIDE: u32 = 16_384;
+/// The most pixels read: 64 megapixels, 256 MiB once in RGBA.
+pub const MAX_READ_PIXELS: u64 = 64 << 20;
+
+/// Refuses sizes over [`MAX_READ_SIDE`] or [`MAX_READ_PIXELS`].
+fn check_size(width: u32, height: u32) -> Result<(), LoadError> {
+    if width.max(height) > MAX_READ_SIDE || u64::from(width) * u64::from(height) > MAX_READ_PIXELS {
+        Err(LoadError::Unsupported("picture too large"))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn load_png(bytes: &[u8]) -> Result<RefImage, LoadError> {
     let bad = |_| LoadError::Invalid("broken PNG");
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(bad)?;
+    let header = reader.info();
+    check_size(header.width, header.height)?;
     let size = reader
         .output_buffer_size()
         .ok_or(LoadError::Invalid("PNG too large"))?;
@@ -41,8 +59,17 @@ pub fn load_jpeg(bytes: &[u8]) -> Result<RefImage, LoadError> {
     use zune_jpeg::zune_core::{
         bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions,
     };
-    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let side = MAX_READ_SIDE as usize;
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(ColorSpace::RGBA)
+        .set_max_width(side)
+        .set_max_height(side);
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    decoder
+        .decode_headers()
+        .map_err(|_| LoadError::Invalid("broken JPEG"))?;
+    let header = decoder.info().ok_or(LoadError::Invalid("broken JPEG"))?;
+    check_size(u32::from(header.width), u32::from(header.height))?;
     let rgba = decoder
         .decode()
         .map_err(|_| LoadError::Invalid("broken JPEG"))?;
@@ -226,5 +253,39 @@ pub(crate) mod tests {
         assert!(load_jpeg(&jpeg[..20]).is_err());
         assert!(load_png(b"\x89PNG\r\n\x1a\n garbage").is_err());
         assert!(load_jpeg(b"\xFF\xD8 garbage").is_err());
+    }
+
+    /// A PNG of a few dozen bytes declaring `width` × `height`: its header,
+    /// then the start of some pixel data.
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        let start = miniz_oxide::deflate::compress_to_vec_zlib(&[0; 64], 6);
+        writer.write_chunk(png::chunk::IDAT, &start).unwrap();
+        drop(writer);
+        out
+    }
+
+    #[test]
+    fn huge_sizes_are_refused_before_reading() {
+        for (w, h) in [(30_000, 30_000), (20_000, 1), (9_000, 9_000)] {
+            assert_eq!(
+                load_png(&png_header(w, h)).err(),
+                Some(LoadError::Unsupported("picture too large")),
+                "{w} × {h}"
+            );
+        }
+        assert!(check_size(MAX_READ_SIDE, 4096).is_ok());
+        // A JPEG whose frame says 9000 × 9000.
+        let mut jpeg = jpeg_flat([128, 128, 128]);
+        let frame = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+        jpeg[frame + 5..frame + 9].copy_from_slice(&[0x23, 0x28, 0x23, 0x28]);
+        assert_eq!(
+            load_jpeg(&jpeg).err(),
+            Some(LoadError::Unsupported("picture too large"))
+        );
     }
 }
