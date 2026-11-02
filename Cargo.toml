@@ -16,9 +16,13 @@ bytemuck = { version = "1.25", features = ["derive"] }
 egui = { version = "0.37", default-features = false }
 egui-wgpu = { version = "0.37", default-features = false }
 glam = { version = "0.34", features = ["bytemuck"] }
+# Inflating .spz splats; the same version png uses.
+miniz_oxide = "0.8"
 log = "0.4"
+png = "0.18"
 pollster = "1"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"] }
+zune-jpeg = "0.5"
 
 [profile.release]
 codegen-units = 1

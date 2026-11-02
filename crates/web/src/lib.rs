@@ -3,6 +3,10 @@
 //! The browser shell: a full-window canvas, WebGPU through wgpu, and the DOM's
 //! Pointer Events (with pen pressure) translated into core input events.
 
+mod files;
+mod storage;
+mod video;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 

@@ -13,7 +13,10 @@ egui.workspace = true
 egui-wgpu.workspace = true
 glam.workspace = true
 log.workspace = true
+miniz_oxide.workspace = true
+png.workspace = true
 wgpu.workspace = true
+zune-jpeg.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true

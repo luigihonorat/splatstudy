@@ -7,6 +7,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod files;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
