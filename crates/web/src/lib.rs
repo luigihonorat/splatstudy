@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use splatstudy_core::{
     App, Button, CursorIcon, InputEvent, Key, Lang, Modifiers, PointerEvent, PointerKind,
-    PointerPhase,
+    PointerPhase, Request,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -98,7 +98,8 @@ async fn run() -> Result<(), JsValue> {
         color_space: Default::default(),
     };
 
-    // `?lang=fr` overrides the browser's language; `?debug` shows pen data.
+    // `?lang=fr` overrides the browser's language; `?debug` shows pen data;
+    // the app reads the rest (`?sample=`, `?view=`).
     let search = window.location().search().unwrap_or_default();
     let lang = query_value(&search, "lang")
         .or_else(|| window.navigator().language())
@@ -108,6 +109,8 @@ async fn run() -> Result<(), JsValue> {
     app.set_debug(query_value(&search, "debug").is_some());
     app.set_mac(is_mac());
     app.set_video_encoder(Box::new(video::WebVideo::new()));
+    app.apply_url_options(&search);
+    app.set_first_run(storage::first_run());
 
     let shell = Rc::new(RefCell::new(Shell {
         app,
@@ -121,7 +124,12 @@ async fn run() -> Result<(), JsValue> {
         cursor: CursorIcon::Default,
     }));
     listen(&shell, &canvas)?;
-    animate(shell);
+    let deliver: files::Deliver = {
+        let s = shell.clone();
+        Rc::new(move |e| s.borrow_mut().app.push_event(e))
+    };
+    let files = files::Files::new(&document, deliver)?;
+    animate(shell, files);
     let _ = canvas.focus();
     Ok(())
 }
@@ -332,20 +340,22 @@ impl Shell {
         ppp
     }
 
-    fn frame(&mut self, now: f64) {
+    /// Draws a frame if one is needed and returns what the app asked the
+    /// shell to do.
+    fn frame(&mut self, now: f64) -> Vec<Request> {
         let ppp = self.fit_canvas();
         let due = self.redraw_at.is_some_and(|t| now >= t);
         if !self.app.needs_frame() && !due {
-            return;
+            return Vec::new();
         }
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return Vec::new();
             }
-            _ => return,
+            _ => return Vec::new(),
         };
         let view = texture.texture.create_view(&Default::default());
         let size = [self.config.width, self.config.height];
@@ -364,19 +374,25 @@ impl Shell {
         {
             let _ = window.open_with_url_and_target(&url, "_blank");
         }
+        out.requests
     }
 }
 
 type FrameCallback = Closure<dyn FnMut()>;
 
-fn animate(shell: Rc<RefCell<Shell>>) {
+/// Runs a frame on every animation frame, then the app's requests, outside
+/// the shell's borrow: files hand events back to it.
+fn animate(shell: Rc<RefCell<Shell>>, files: files::Files) {
     let callback: Rc<RefCell<Option<FrameCallback>>> = Rc::new(RefCell::new(None));
     let next = callback.clone();
     *callback.borrow_mut() = Some(Closure::new(move || {
         let now = web_sys::window()
             .and_then(|w| w.performance())
             .map_or(0.0, |p| p.now() / 1000.0);
-        shell.borrow_mut().frame(now);
+        let requests = shell.borrow_mut().frame(now);
+        for request in requests {
+            files.handle(request);
+        }
         request_frame(next.borrow().as_ref().expect("frame callback"));
     }));
     request_frame(callback.borrow().as_ref().expect("frame callback"));
