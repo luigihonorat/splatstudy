@@ -2,10 +2,135 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Strings for exporting the timelapse.
 
-pub struct ExportTr {}
+pub struct ExportTr {
+    /// The export window's title.
+    pub title: &'static str,
+    /// In the file → export menu.
+    pub menu_item: &'static str,
+    /// In the timelapse panel.
+    pub panel_item: &'static str,
+    pub layout: &'static str,
+    pub side_by_side: &'static str,
+    pub stacked: &'static str,
+    pub sculpt_only: &'static str,
+    /// The frame's proportions.
+    pub frame: &'static str,
+    pub wide: &'static str,
+    pub square: &'static str,
+    pub tall: &'static str,
+    pub speed: &'static str,
+    /// Before the video's length, as "length 0:42".
+    pub length: &'static str,
+    pub file: &'static str,
+    pub video: &'static str,
+    pub images: &'static str,
+    /// While the browser is asked whether it can encode video.
+    pub checking: &'static str,
+    pub no_video: &'static str,
+    pub images_zip: &'static str,
+    pub images_folder: &'static str,
+    /// Starts the export.
+    pub start: &'static str,
+    pub cancel: &'static str,
+    /// After the counts, as "120 / 900 frames".
+    pub frames: &'static str,
+    pub exported: &'static str,
+    pub images_written: &'static str,
+    pub failed: &'static str,
+    pub nothing_recorded: &'static str,
+    /// The end card's last line, before the site's address.
+    pub made_with: &'static str,
+}
 
-pub const JA: ExportTr = ExportTr {};
+pub const JA: ExportTr = ExportTr {
+    title: "タイムラプスを書き出す",
+    menu_item: "タイムラプス動画…",
+    panel_item: "書き出す…",
+    layout: "レイアウト",
+    side_by_side: "左右",
+    stacked: "上下",
+    sculpt_only: "塑像のみ",
+    frame: "画面",
+    wide: "横 16:9",
+    square: "正方形 1:1",
+    tall: "縦 9:16",
+    speed: "速さ",
+    length: "長さ",
+    file: "ファイル",
+    video: "動画（MP4）",
+    images: "連番画像（PNG）",
+    checking: "動画に対応しているか確認しています…",
+    no_video: "このブラウザーは動画を書き出せません。PNG 画像を ZIP にまとめます（720p・15 fps）",
+    images_zip: "PNG 画像を ZIP にまとめます（720p・15 fps）",
+    images_folder: "選んだフォルダーに PNG 画像を保存します",
+    start: "書き出す",
+    cancel: "キャンセル",
+    frames: "フレーム",
+    exported: "タイムラプスを書き出しました",
+    images_written: "画像を保存しました",
+    failed: "書き出せませんでした",
+    nothing_recorded: "まだ記録がありません",
+    made_with: "splatstudy で制作",
+};
 
-pub const EN: ExportTr = ExportTr {};
+pub const EN: ExportTr = ExportTr {
+    title: "export timelapse",
+    menu_item: "timelapse video…",
+    panel_item: "export…",
+    layout: "layout",
+    side_by_side: "side by side",
+    stacked: "stacked",
+    sculpt_only: "sculpt only",
+    frame: "frame",
+    wide: "wide 16:9",
+    square: "square 1:1",
+    tall: "tall 9:16",
+    speed: "speed",
+    length: "length",
+    file: "file",
+    video: "video (mp4)",
+    images: "images (png)",
+    checking: "checking for video support…",
+    no_video: "this browser can't encode video: the images are saved in a zip (720p, 15 fps)",
+    images_zip: "the images are saved in a zip (720p, 15 fps)",
+    images_folder: "the images are saved into a folder you choose",
+    start: "export",
+    cancel: "cancel",
+    frames: "frames",
+    exported: "timelapse exported",
+    images_written: "images saved",
+    failed: "the export failed",
+    nothing_recorded: "nothing recorded yet",
+    made_with: "made with splatstudy",
+};
 
-pub const FR: ExportTr = ExportTr {};
+pub const FR: ExportTr = ExportTr {
+    title: "exporter l'accéléré",
+    menu_item: "vidéo accélérée…",
+    panel_item: "exporter…",
+    layout: "disposition",
+    side_by_side: "côte à côte",
+    stacked: "l'un sur l'autre",
+    sculpt_only: "sculpture seule",
+    frame: "cadre",
+    wide: "paysage 16:9",
+    square: "carré 1:1",
+    tall: "portrait 9:16",
+    speed: "vitesse",
+    length: "durée",
+    file: "fichier",
+    video: "vidéo (mp4)",
+    images: "images (png)",
+    checking: "vérification de la prise en charge vidéo…",
+    no_video: "ce navigateur ne peut pas encoder de vidéo : les images sont enregistrées dans un zip (720p, 15 i/s)",
+    images_zip: "les images sont enregistrées dans un zip (720p, 15 i/s)",
+    images_folder: "les images sont enregistrées dans le dossier choisi",
+    start: "exporter",
+    cancel: "annuler",
+    frames: "images",
+    exported: "accéléré exporté",
+    images_written: "images enregistrées",
+    failed: "l'export a échoué",
+    nothing_recorded: "rien n'est encore enregistré",
+    made_with: "fait avec splatstudy",
+};

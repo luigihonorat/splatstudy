@@ -127,7 +127,7 @@ impl Job {
     /// Sets up an export of `replay` (not yet played). With a video sink,
     /// starts the encoder.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<'e>(
         device: &wgpu::Device,
         settings: Settings,
         replay: Replay,
@@ -136,7 +136,7 @@ impl Job {
         card: EndCard,
         name: String,
         sink: Sink,
-        encoder: Option<&mut dyn VideoEncoder>,
+        encoder: Option<&mut (dyn VideoEncoder + 'e)>,
     ) -> Result<Job, String> {
         let size = settings.shape.size(settings.short_side);
         if let Sink::Video(_) = sink {

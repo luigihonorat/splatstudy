@@ -156,6 +156,23 @@ impl App {
         });
     }
 
+    /// The mesh the recorded session starts from, for replaying it.
+    pub(super) fn session_start(&mut self) -> Mesh {
+        self.files.start.get_or_insert_with(start_mesh).clone()
+    }
+
+    /// The scene's file name without its extension, for naming exports.
+    pub(super) fn scene_stem(&self) -> String {
+        let name = self
+            .files
+            .name
+            .as_deref()
+            .unwrap_or(self.lang.tr().files.default_name);
+        name.strip_suffix(&format!(".{SCENE_EXTENSION}"))
+            .unwrap_or(name)
+            .to_owned()
+    }
+
     /// Opens the file as it was last opened or saved.
     fn revert_scene(&mut self) {
         if let (Some(name), Some(bytes)) = (self.files.name.clone(), self.files.saved.clone()) {
@@ -175,8 +192,8 @@ impl App {
     // saved, and a saved reference is opened like a dropped file, without
     // its placement and credit.
 
-    /// The loaded reference, to save in the scene.
-    fn scene_reference(&self) -> Option<&Reference> {
+    /// The loaded reference, to save in the scene and credit in exports.
+    pub(super) fn scene_reference(&self) -> Option<&Reference> {
         None
     }
 
