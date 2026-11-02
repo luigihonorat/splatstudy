@@ -17,7 +17,7 @@ pub struct Vertex {
 }
 
 /// Compressed adjacency lists: the items of `i` are `items[offsets[i]..offsets[i + 1]]`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Adjacency {
     offsets: Vec<u32>,
     items: Vec<u32>,
@@ -30,6 +30,7 @@ impl Adjacency {
     }
 }
 
+#[derive(Clone)]
 pub struct Mesh {
     pub positions: Vec<Vec3>,
     pub normals: Vec<Vec3>,

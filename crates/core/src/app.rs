@@ -13,7 +13,7 @@ use crate::camera::OrbitCamera;
 use crate::input::{Button, InputEvent, InputState, Modifiers, PointerKind, PointerPhase};
 use crate::navigation::{NavAction, NavStyle};
 use crate::render::{self, ViewTarget, clay::ClayPass, clay::GpuMesh};
-use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh, Sculpt};
+use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh, Replay, Sculpt};
 use crate::ui::{self, fonts, i18n::Lang, i18n::Tr, menu, theme, theme::ThemeMode};
 
 /// What the shell should do after a frame.
@@ -51,14 +51,45 @@ const DOLLY_WHEEL: f32 = 0.0015;
 const PANEL_WIDTH: f32 = 196.0;
 /// Dabs are placed every this fraction of the tool radius along a stroke.
 const SPACING: f32 = 0.15;
+/// Log entries a timelapse may apply per frame: a fast replay lags behind
+/// rather than stalling the app.
+const REPLAY_BUDGET: usize = 200;
+/// Timelapse speeds, as multiples of the time spent sculpting.
+const REPLAY_SPEEDS: [f64; 3] = [10.0, 60.0, 300.0];
+
+/// Each brush with its shortcut and starting strength, in `Brush::ALL` order.
+/// (F frames the sculpt, so flatten takes T, for trim.)
+const BRUSHES: [(Brush, Key, f32); 7] = [
+    (Brush::Move, Key::M, 1.0),
+    (Brush::Clay, Key::C, 0.5),
+    (Brush::Flatten, Key::T, 0.5),
+    (Brush::Smooth, Key::S, 0.5),
+    (Brush::Inflate, Key::I, 0.5),
+    (Brush::Crease, Key::X, 0.5),
+    (Brush::Pinch, Key::P, 0.5),
+];
+
+fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
+    match brush {
+        Brush::Move => tr.move_,
+        Brush::Clay => tr.clay,
+        Brush::Flatten => tr.flatten,
+        Brush::Smooth => tr.smooth,
+        Brush::Inflate => tr.inflate,
+        Brush::Crease => tr.crease,
+        Brush::Pinch => tr.pinch,
+    }
+}
 
 struct ToolSettings {
     tool: Brush,
     /// Radius on screen, in points.
     radius: f32,
-    /// Strength per tool at full pen pressure, 0..1, in `Brush` order.
-    strength: [f32; 3],
+    /// Strength per tool at full pen pressure, 0..1, in `Brush::ALL` order.
+    strength: [f32; 7],
     symmetry: bool,
+    /// Pen pressure scales the size as well as the strength.
+    pressure_size: bool,
 }
 
 impl Default for ToolSettings {
@@ -66,18 +97,34 @@ impl Default for ToolSettings {
         Self {
             tool: Brush::Clay,
             radius: 48.0,
-            strength: [0.5, 0.5, 1.0],
+            strength: BRUSHES.map(|(_, _, strength)| strength),
             symmetry: true,
+            pressure_size: false,
         }
     }
 }
 
+/// `Brush::ALL` lists the brushes in declaration order.
 fn tool_index(tool: Brush) -> usize {
-    match tool {
-        Brush::Clay => 0,
-        Brush::Smooth => 1,
-        Brush::Move => 2,
-    }
+    tool as usize
+}
+
+/// The clay every scene starts from, and every timelapse.
+fn start_mesh() -> Mesh {
+    Mesh::icosphere(DEFAULT_LEVEL)
+}
+
+/// The timelapse being watched in the sculpt view.
+struct Playback {
+    replay: Replay,
+    gpu_mesh: GpuMesh,
+    playing: bool,
+    /// Playback seconds per second.
+    speed: f64,
+    /// Where the playhead is, in playback seconds; the clay may lag behind it.
+    head: f64,
+    /// The app clock at the last frame.
+    last: f64,
 }
 
 /// Preset viewpoints: label, key, yaw and pitch. Right and left are the
@@ -146,6 +193,9 @@ pub struct App {
     sculpt: Sculpt,
     gpu_mesh: GpuMesh,
     tool: ToolSettings,
+    playback: Option<Playback>,
+    /// The clock passed to the current frame, in seconds.
+    now: f64,
     dirty: bool,
 }
 
@@ -172,7 +222,7 @@ impl App {
         for view in &mut views {
             view.register(&device, &mut renderer);
         }
-        let sculpt = Sculpt::new(Mesh::icosphere(DEFAULT_LEVEL));
+        let sculpt = Sculpt::new(start_mesh());
         let gpu_mesh = GpuMesh::new(&device, &sculpt.mesh);
         let clay = ClayPass::new(&device);
         Self {
@@ -200,6 +250,8 @@ impl App {
             sculpt,
             gpu_mesh,
             tool: ToolSettings::default(),
+            playback: None,
+            now: 0.0,
             dirty: true,
         }
     }
@@ -245,6 +297,8 @@ impl App {
         ppp: f32,
     ) -> FrameOutput {
         self.dirty = false;
+        self.now = now;
+        self.sculpt.set_clock(now);
         let screen = Rect::from_min_size(
             Pos2::ZERO,
             egui::vec2(size_px[0] as f32, size_px[1] as f32) / ppp,
@@ -274,8 +328,15 @@ impl App {
             });
 
         let resized = self.fit_views(ppp);
-        for range in self.sculpt.take_dirty() {
-            self.gpu_mesh.write(&self.queue, &self.sculpt.mesh, range);
+        if let Some(playback) = &mut self.playback {
+            let sculpt = &mut playback.replay.sculpt;
+            for range in sculpt.take_dirty() {
+                playback.gpu_mesh.write(&self.queue, &sculpt.mesh, range);
+            }
+        } else {
+            for range in self.sculpt.take_dirty() {
+                self.gpu_mesh.write(&self.queue, &self.sculpt.mesh, range);
+            }
         }
         let palette = self.theme.palette();
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -352,7 +413,11 @@ impl App {
         );
         {
             let mut pass = sculpt.begin_pass(encoder, theme::VIEW_BG);
-            self.clay.draw(&mut pass, &self.gpu_mesh);
+            let mesh = self
+                .playback
+                .as_ref()
+                .map_or(&self.gpu_mesh, |p| &p.gpu_mesh);
+            self.clay.draw(&mut pass, mesh);
         }
         // Nothing loaded in the reference view yet: just its background.
         drop(self.views[REFERENCE].begin_pass(encoder, theme::VIEW_BG));
@@ -403,10 +468,18 @@ impl App {
     fn shortcuts(&mut self, ui: &egui::Ui) {
         use egui::Modifiers as M;
         let pressed = |m: M, key: Key| ui.input_mut(|i| i.consume_key(m, key));
-        if pressed(M::COMMAND | M::SHIFT, Key::Z) || pressed(M::COMMAND, Key::Y) {
-            self.sculpt.redo();
-        } else if pressed(M::COMMAND, Key::Z) {
-            self.sculpt.undo();
+        // The timelapse shows the clay as it was: no sculpting until it closes.
+        if self.playback.is_none() {
+            if pressed(M::COMMAND | M::SHIFT, Key::Z) || pressed(M::COMMAND, Key::Y) {
+                self.sculpt.redo();
+            } else if pressed(M::COMMAND, Key::Z) {
+                self.sculpt.undo();
+            }
+            for (brush, key, _) in BRUSHES {
+                if pressed(M::NONE, key) {
+                    self.tool.tool = brush;
+                }
+            }
         }
         if pressed(M::NONE, Key::OpenBracket) {
             self.tool.radius = (self.tool.radius / 1.2).max(4.0);
@@ -489,10 +562,16 @@ impl App {
     fn edit_menu(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         ui.set_min_width(menu::MIN_WIDTH);
-        if menu::action(ui, self.sculpt.can_undo(), tr.undo, &self.keys("Z")) {
+        let live = self.playback.is_none();
+        if menu::action(ui, live && self.sculpt.can_undo(), tr.undo, &self.keys("Z")) {
             self.sculpt.undo();
         }
-        if menu::action(ui, self.sculpt.can_redo(), tr.redo, &self.keys("Shift+Z")) {
+        if menu::action(
+            ui,
+            live && self.sculpt.can_redo(),
+            tr.redo,
+            &self.keys("Shift+Z"),
+        ) {
             self.sculpt.redo();
         }
         ui.separator();
@@ -593,11 +672,23 @@ impl App {
             .open(&mut open)
             .show(ui.ctx(), |ui| {
                 let muted = ui.visuals().widgets.inactive.fg_stroke.color;
-                let mut rows = vec![
+                let mut rows: Vec<(&str, String)> = BRUSHES
+                    .iter()
+                    .map(|&(brush, key, _)| {
+                        let keys = if brush == Brush::Smooth {
+                            format!("{} / Shift", key.name())
+                        } else {
+                            key.name().to_owned()
+                        };
+                        (brush_name(tr, brush), keys)
+                    })
+                    .collect();
+                rows.extend([
+                    (tr.invert, "Ctrl".to_owned()),
+                    (tr.size, "[  ]".to_owned()),
                     (tr.undo, self.keys("Z")),
                     (tr.redo, self.keys("Shift+Z")),
-                    (tr.size, "[  ]".to_owned()),
-                ];
+                ]);
                 for (label, key, _, _) in viewpoints(tr) {
                     if let Some(key) = key {
                         rows.push((label, key.name().to_owned()));
@@ -661,7 +752,8 @@ impl App {
 
     /// A fresh sphere seen from the default view.
     fn new_scene(&mut self) {
-        self.sculpt = Sculpt::new(Mesh::icosphere(DEFAULT_LEVEL));
+        self.playback = None;
+        self.sculpt = Sculpt::new(start_mesh());
         self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
         self.reset_view();
     }
@@ -697,15 +789,15 @@ impl App {
     }
 
     fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
+        if self.playback.is_some() {
+            self.playback_panel(ui);
+            return;
+        }
         let tr = self.lang.tr();
         ui::section(ui, tr.tools);
-        for (tool, label) in [
-            (Brush::Clay, tr.clay),
-            (Brush::Smooth, tr.smooth),
-            (Brush::Move, tr.move_),
-        ] {
-            if ui::choice(ui, label, self.tool.tool == tool).clicked() {
-                self.tool.tool = tool;
+        for (brush, _, _) in BRUSHES {
+            if ui::choice(ui, brush_name(tr, brush), self.tool.tool == brush).clicked() {
+                self.tool.tool = brush;
             }
         }
         ui.add_space(10.0);
@@ -719,6 +811,9 @@ impl App {
         ui.add_space(10.0);
         if ui::choice(ui, tr.symmetry, self.tool.symmetry).clicked() {
             self.tool.symmetry = !self.tool.symmetry;
+        }
+        if ui::choice(ui, tr.pressure_size, self.tool.pressure_size).clicked() {
+            self.tool.pressure_size = !self.tool.pressure_size;
         }
         ui.add_space(10.0);
         ui::section(ui, tr.history);
@@ -740,7 +835,99 @@ impl App {
         if ui::choice(ui, tr.new_sphere, false).clicked() {
             self.new_scene();
         }
+        let recorded = !self.sculpt.log().is_empty();
+        if ui
+            .add_enabled_ui(recorded, |ui| ui::choice(ui, tr.watch_timelapse, false))
+            .inner
+            .clicked()
+        {
+            self.start_playback();
+        }
         self.sculpt.refresh();
+    }
+
+    /// Plays the session back from the first stroke on a separate copy of
+    /// the clay; the live sculpt waits untouched.
+    fn start_playback(&mut self) {
+        // An open stroke would be logged half done.
+        self.sculpt.end_stroke();
+        self.drags[SCULPT] = None;
+        let replay = Replay::new(start_mesh(), self.sculpt.log().to_vec());
+        self.playback = Some(Playback {
+            gpu_mesh: GpuMesh::new(&self.device, &replay.sculpt.mesh),
+            replay,
+            playing: true,
+            speed: REPLAY_SPEEDS[1],
+            head: 0.0,
+            last: self.now,
+        });
+    }
+
+    /// Moves the playhead with the clock and brings the clay up to it.
+    fn advance_playback(&mut self, ui: &egui::Ui) {
+        let Some(p) = &mut self.playback else {
+            return;
+        };
+        let duration = p.replay.duration();
+        if p.playing {
+            // A long gap between frames (a hidden tab) doesn't jump ahead.
+            let elapsed = (self.now - p.last).clamp(0.0, 0.1);
+            p.head = (p.head + elapsed * p.speed).min(duration);
+            p.playing = p.head < duration;
+        }
+        p.last = self.now;
+        let caught_up = p.replay.seek(p.head, REPLAY_BUDGET);
+        if p.playing || !caught_up {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn playback_panel(&mut self, ui: &mut egui::Ui) {
+        self.advance_playback(ui);
+        let tr = self.lang.tr();
+        let Some(p) = &mut self.playback else {
+            return;
+        };
+        ui::section(ui, tr.timelapse);
+        let at_end = p.head >= p.replay.duration();
+        if ui::choice(ui, if p.playing { tr.pause } else { tr.play }, false).clicked() {
+            if at_end {
+                p.head = 0.0;
+            }
+            p.playing = !p.playing;
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            for speed in REPLAY_SPEEDS {
+                if ui::choice(ui, format!("×{speed}"), p.speed == speed).clicked() {
+                    p.speed = speed;
+                }
+            }
+        });
+        ui.add_space(6.0);
+        let mut head = p.head as f32;
+        let duration = p.replay.duration() as f32;
+        let clock = |seconds: f32| {
+            let s = seconds.max(0.0) as u32;
+            format!("{}:{:02}", s / 60, s % 60)
+        };
+        // The playhead on the left, the length on the right.
+        if ui::slider(
+            ui,
+            &clock(head),
+            &mut head,
+            0.0..=duration.max(1e-3),
+            |_| clock(duration),
+        )
+        .changed()
+        {
+            p.head = head as f64;
+        }
+        ui.add_space(10.0);
+        if ui::choice(ui, tr.back_to_sculpt, false).clicked() {
+            self.playback = None;
+        }
     }
 
     fn reference_panel(&mut self, ui: &mut egui::Ui) {
@@ -785,7 +972,12 @@ impl App {
         painter.vline(x + 0.5, area.y_range(), Stroke::new(1.0, p.border));
 
         let label_font = fonts::regular(12.0);
-        for (rect, text) in [(left, tr.sculpt), (right, tr.reference)] {
+        let sculpt_label = if self.playback.is_some() {
+            tr.timelapse
+        } else {
+            tr.sculpt
+        };
+        for (rect, text) in [(left, sculpt_label), (right, tr.reference)] {
             painter.text(
                 rect.left_top() + egui::vec2(14.0, 12.0),
                 Align2::LEFT_TOP,
@@ -844,7 +1036,9 @@ impl App {
                     continue;
                 }
                 let hit = match (index, ours, pointer) {
-                    (SCULPT, Button::Primary, Some(pos)) => self.pick(rect, pos).map(|h| (pos, h)),
+                    (SCULPT, Button::Primary, Some(pos)) if self.playback.is_none() => {
+                        self.pick(rect, pos).map(|h| (pos, h))
+                    }
                     _ => None,
                 };
                 match (self.nav.action(ours, m, hit.is_some()), hit) {
@@ -947,7 +1141,7 @@ impl App {
                 pressure,
                 carry: 0.0,
             });
-            self.dab_at(rect, pressure, hit);
+            self.dab_at(rect, pressure, hit, Vec3::ZERO);
         }
     }
 
@@ -964,11 +1158,17 @@ impl App {
         };
         let spacing = (self.tool.radius * SPACING).max(1.0);
         let length = last.distance(to);
+        // The way the pointer heads, in the view plane; brushes that follow
+        // the stroke take its part along the surface.
+        let (right, up) = self.cameras[SCULPT].right_up();
+        let d = to - last;
+        let direction = (right * d.x - up * d.y).normalize_or_zero();
         let mut along = spacing - carry;
         while along <= length {
             let t = along / length.max(1e-6);
             if let Some(hit) = self.pick(rect, last.lerp(to, t)) {
-                self.dab_at(rect, last_pressure + (pressure - last_pressure) * t, hit);
+                let pressure = last_pressure + (pressure - last_pressure) * t;
+                self.dab_at(rect, pressure, hit, direction);
             }
             along += spacing;
         }
@@ -980,19 +1180,28 @@ impl App {
         });
     }
 
-    /// One dab: pen pressure scales the tool's strength.
-    fn dab_at(&mut self, rect: Rect, pressure: f32, hit: Hit) {
+    /// One dab: pen pressure scales the tool's strength, and its size too if
+    /// that is on.
+    fn dab_at(&mut self, rect: Rect, pressure: f32, hit: Hit, direction: Vec3) {
         let (ctrl, shift) = self.ctx.input(|i| (i.modifiers.ctrl, i.modifiers.shift));
         let tool = if shift { Brush::Smooth } else { self.tool.tool };
-        let strength = self.tool.strength[tool_index(tool)] * pressure.clamp(0.0, 1.0);
+        let pressure = pressure.clamp(0.0, 1.0);
+        let strength = self.tool.strength[tool_index(tool)] * pressure;
+        let size = if self.tool.pressure_size {
+            // Never quite vanishing, so a light touch still shows.
+            0.1 + 0.9 * pressure
+        } else {
+            1.0
+        };
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
         self.sculpt.dab(Dab {
             brush: tool,
             centre: hit.point,
-            radius: self.tool.radius * scale,
+            radius: self.tool.radius * size * scale,
             strength,
             invert: ctrl,
             symmetry: self.tool.symmetry,
+            direction,
         });
     }
 
@@ -1014,7 +1223,7 @@ impl App {
         else {
             return;
         };
-        if matches!(self.drags[SCULPT], Some(Drag::Navigate { .. })) {
+        if self.playback.is_some() || matches!(self.drags[SCULPT], Some(Drag::Navigate { .. })) {
             return;
         }
         let ink = theme::VIEW_INK.gamma_multiply(0.6);
