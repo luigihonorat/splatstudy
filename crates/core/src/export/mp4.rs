@@ -79,8 +79,10 @@ impl Mp4 {
     }
 
     /// The decoder configuration, as WebCodecs gives it in
-    /// `decoderConfig.description`.
-    pub fn set_config(&mut self, avcc: Vec<u8>) {
+    /// `decoderConfig.description`, with its level lowered to the lowest
+    /// the video meets (see [`lower_level`]).
+    pub fn set_config(&mut self, mut avcc: Vec<u8>) {
+        lower_level(&mut avcc, self.width, self.height, self.fps);
         self.config = Some(avcc);
     }
 
@@ -278,6 +280,146 @@ impl Mp4 {
         b.close(); // trak
         b.close(); // moov
         b.finish()
+    }
+}
+
+/// H.264 levels from 4.0 up (ISO/IEC 14496-10, table A-1): `level_idc`,
+/// then the most macroblocks per frame, per second, and in the decoded
+/// picture buffer. Lower levels are left out: from 4.0 the bitrate limit
+/// (25 Mbit/s for High) is above anything the exporter asks for.
+const LEVELS: [(u8, u32, u32, u32); 6] = [
+    (40, 8_192, 245_760, 32_768),
+    (41, 8_192, 245_760, 32_768),
+    (42, 8_704, 522_240, 34_816),
+    (50, 22_080, 589_824, 110_400),
+    (51, 36_864, 983_040, 184_320),
+    (52, 36_864, 2_073_600, 184_320),
+];
+
+/// Lowers the level an `avcC` record and its first SPS announce to the
+/// lowest the video meets, never raising it. Returns the new level, or
+/// `None` when the record is left alone (already low enough, or not
+/// understood).
+///
+/// Chromium's WebCodecs encoder (Edge on Windows, checked 2026-11) marks
+/// 1080p30 as level 5.0 even when asked for `avc1.640028` (4.0), though
+/// its stream, one reference frame at 1080p30, fits 4.0 easily. Players
+/// and hardware decoders that stop at 4.0 or 4.1 may refuse a 5.0 file
+/// without trying, so the level is put back where the stream really is.
+/// Only the level bytes change; the stream itself is the same.
+pub fn lower_level(avcc: &mut [u8], width: u16, height: u16, fps: u32) -> Option<u8> {
+    // avcC: version, profile, compatibility, level, length size, SPS count,
+    // then the first SPS's length and bytes.
+    if avcc.len() < 8 || avcc[0] != 1 || avcc[5] & 0x1F == 0 {
+        return None;
+    }
+    let sps_len = usize::from(u16::from_be_bytes([avcc[6], avcc[7]]));
+    let sps = avcc.get(8..8 + sps_len)?;
+    // The SPS: NAL header, profile, constraint flags, level.
+    if sps.len() < 4 || sps[0] & 0x1F != 7 || sps[3] != avcc[3] {
+        return None;
+    }
+    let refs = max_num_ref_frames(sps)?;
+    let mbs = u32::from(width).div_ceil(16) * u32::from(height).div_ceil(16);
+    let (level, ..) = LEVELS
+        .iter()
+        .copied()
+        .find(|&(_, fs, mbps, dpb)| mbs <= fs && mbs * fps <= mbps && mbs * refs.max(1) <= dpb)?;
+    if level >= avcc[3] {
+        return None;
+    }
+    avcc[3] = level;
+    avcc[8 + 3] = level;
+    Some(level)
+}
+
+/// Reads `max_num_ref_frames` from an SPS NAL unit (7.3.2.1.1); `None`
+/// when the SPS has scaling matrices or is cut short.
+fn max_num_ref_frames(sps: &[u8]) -> Option<u32> {
+    let mut b = BitReader::new(&sps[1..]);
+    let profile = b.bits(8)?;
+    b.bits(16)?; // constraint flags, level
+    b.ue()?; // seq_parameter_set_id
+    if [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].contains(&profile) {
+        if b.ue()? == 3 {
+            b.bits(1)?; // separate_colour_plane_flag
+        }
+        b.ue()?; // bit_depth_luma_minus8
+        b.ue()?; // bit_depth_chroma_minus8
+        b.bits(1)?; // qpprime_y_zero_transform_bypass_flag
+        if b.bits(1)? == 1 {
+            return None; // seq_scaling_matrix_present_flag: not worth parsing
+        }
+    }
+    b.ue()?; // log2_max_frame_num_minus4
+    match b.ue()? {
+        0 => {
+            b.ue()?; // log2_max_pic_order_cnt_lsb_minus4
+        }
+        1 => {
+            b.bits(1)?;
+            b.ue()?; // offset_for_non_ref_pic (signed; only skipped)
+            b.ue()?; // offset_for_top_to_bottom_field
+            for _ in 0..b.ue()?.min(255) {
+                b.ue()?;
+            }
+        }
+        _ => {}
+    }
+    b.ue()
+}
+
+/// Reads an H.264 RBSP bit by bit, dropping emulation prevention bytes.
+struct BitReader<'a> {
+    data: &'a [u8],
+    byte: usize,
+    bit: u8,
+    zeros: u8,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            byte: 0,
+            bit: 0,
+            zeros: 0,
+        }
+    }
+
+    fn bit(&mut self) -> Option<u32> {
+        if self.bit == 0 {
+            // 00 00 03: the 03 is only there to avoid a start code.
+            if self.zeros >= 2 && self.data.get(self.byte) == Some(&3) {
+                self.byte += 1;
+                self.zeros = 0;
+            }
+            let byte = *self.data.get(self.byte)?;
+            self.zeros = if byte == 0 { self.zeros + 1 } else { 0 };
+        }
+        let value = (self.data[self.byte] >> (7 - self.bit)) & 1;
+        self.bit += 1;
+        if self.bit == 8 {
+            self.bit = 0;
+            self.byte += 1;
+        }
+        Some(u32::from(value))
+    }
+
+    fn bits(&mut self, n: u32) -> Option<u32> {
+        (0..n).try_fold(0, |v, _| Some((v << 1) | self.bit()?))
+    }
+
+    /// An unsigned Exp-Golomb number.
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.bit()? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        Some((1u32 << zeros) - 1 + self.bits(zeros)?)
     }
 }
 
@@ -551,6 +693,54 @@ pub(crate) mod tests {
         assert_eq!(be32(&d, mdhd.start + 16), 70 * 3000);
         let mvhd = path(&d, &[b"moov", b"mvhd"]);
         assert_eq!(be32(&d, mvhd.start + 16), 2333, "milliseconds");
+    }
+
+    /// The `avcC` Edge's WebCodecs gave for a 1920×1080 30 fps export:
+    /// High profile, level 5.0, one reference frame.
+    const EDGE_AVCC: &str = "01640032ffe1001967640032ac2b403c0113f2e022000007d00001d4c01e3855\
+                             4001000468ee3cb0fdf8f800";
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_level_comes_down_to_what_the_stream_needs() {
+        let original = unhex(EDGE_AVCC);
+        assert_eq!(max_num_ref_frames(&original[8..8 + 25]), Some(1));
+        let mut avcc = original.clone();
+        assert_eq!(lower_level(&mut avcc, 1920, 1080, 30), Some(40));
+        assert_eq!((avcc[3], avcc[8 + 3]), (40, 40), "the record and its SPS");
+        // Nothing else changes.
+        let changed: Vec<usize> = (0..avcc.len())
+            .filter(|&i| avcc[i] != original[i])
+            .collect();
+        assert_eq!(changed, [3, 11]);
+        // Through the muxer too.
+        let mut mp4 = Mp4::new(1080, 1920, 30);
+        mp4.set_config(original.clone());
+        assert_eq!(mp4.config.as_deref().map(|c| c[3]), Some(40));
+
+        // Never raised: 4K needs 5.1, more than the 5.0 announced.
+        let mut big = original.clone();
+        assert_eq!(lower_level(&mut big, 3840, 2160, 30), None);
+        assert_eq!(big, original);
+        // 1080p at 60 fps needs 4.2.
+        let mut fast = original.clone();
+        assert_eq!(lower_level(&mut fast, 1920, 1080, 60), Some(42));
+        // Records it doesn't understand are left alone, without panicking.
+        for len in 0..original.len() {
+            let mut cut = original[..len].to_vec();
+            lower_level(&mut cut, 1920, 1080, 30);
+        }
+        let mut odd = original.clone();
+        odd[3] = 41; // the record and the SPS disagree
+        assert_eq!(lower_level(&mut odd, 1920, 1080, 30), None);
+        let mut fake = vec![1, 0x64, 0, 0x28, 0xFF, 0xE1, 0, 0, 1, 0, 0];
+        assert_eq!(lower_level(&mut fake, 1920, 1080, 30), None);
     }
 
     #[test]
