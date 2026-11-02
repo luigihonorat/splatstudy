@@ -53,7 +53,7 @@ struct Uniforms {
 struct SortParams {
     row: [f32; 4],
     lo: f32,
-    scale: f32,
+    span: f32,
     count: u32,
     stride: u32,
 }
@@ -66,6 +66,39 @@ const RESORT_COS: f32 = 0.999_85;
 const SORT_GROUP: u32 = 256;
 /// Depth steps of the sort, as in `splat_sort.wgsl`.
 const BUCKETS: u64 = 1 << 16;
+/// Keys kept at each end for depths outside the depth box, as in
+/// `splat_sort.wgsl`: the outer sixteenth of the keys on either side.
+const BAND: f32 = 4096.0;
+/// Keys per doubling of the distance outside the box, measured in box
+/// depths, as in `splat_sort.wgsl`: 16 doublings fill a band.
+const PER_DOUBLING: f32 = 256.0;
+
+/// The sort key of view depth `z` (more negative is farther), for a depth
+/// box from `lo` (its farthest) to `lo + span`: farther sorts first.
+/// Depths inside the box share out the keys between the two bands
+/// evenly. Those beyond it (an unbounded capture's background, floaters)
+/// take a band of keys at that end, coarser the farther out, so they keep
+/// their order instead of piling up in one key. `splat_sort.wgsl` keys
+/// the same way.
+pub fn depth_key(z: f32, lo: f32, span: f32) -> u16 {
+    let inner = 65_535.0 - 2.0 * BAND;
+    let outside = |d: f32| (1.0 + (d / span).min(1e9)).log2() * PER_DOUBLING;
+    let hi = lo + span;
+    let key = if z < lo {
+        (BAND - outside(lo - z)).floor().max(0.0)
+    } else if z > hi {
+        (65_536.0 - BAND + outside(z - hi).floor()).min(65_535.0)
+    } else {
+        BAND + ((z - lo) / span * inner).floor()
+    };
+    key as u16
+}
+
+/// The depth box's span along a view, never zero, so keys never divide by
+/// zero: a flat box keys everything off it by distance in file units.
+fn safe_span(lo: f32, hi: f32) -> f32 {
+    if hi > lo { hi - lo } else { 1.0 }
+}
 
 /// Where splats are put in depth order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,9 +195,9 @@ pub struct SplatPass {
     colours: wgpu::Buffer,
     /// Centres in file coordinates, for sorting.
     centres: Vec<Vec3>,
-    /// Where nearly all centres lie, in file coordinates. The GPU sort's
-    /// depth steps span it; the few beyond (floaters) clamp to its ends,
-    /// still on the right side of everything inside.
+    /// Where nearly all centres lie, in file coordinates. The sort's
+    /// depth steps span it evenly; the few beyond (floaters, a background)
+    /// get coarser steps at either end, see [`depth_key`].
     depth_box: Aabb,
     /// File coordinates to the clay's space, and the crop box.
     placement: Cell<(Mat4, Option<Aabb>)>,
@@ -467,13 +500,13 @@ impl SplatPass {
             .sorted_for
             .is_some_and(|last| last.dot(direction) > RESORT_COS);
         if !fresh {
+            let (lo, hi) = depth_range(self.depth_box, row.truncate());
             match (&self.gpu_sort, &state.sort) {
                 (Some(sort), Some((params, bind_group))) => {
-                    let (lo, hi) = depth_range(self.depth_box, row.truncate());
                     let now = SortParams {
                         row: row.to_array(),
                         lo,
-                        scale: if hi > lo { 65_535.0 / (hi - lo) } else { 0.0 },
+                        span: safe_span(lo, hi),
                         count: self.centres.len() as u32,
                         stride: sort.groups[2],
                     };
@@ -485,7 +518,7 @@ impl SplatPass {
                 }
                 _ => {
                     let mut sorter = self.scratch.borrow_mut();
-                    let order = sorter.back_to_front(&self.centres, row.truncate());
+                    let order = sorter.sort(&self.centres, row.truncate(), (lo, hi));
                     queue.write_buffer(&state.order, 0, bytemuck::cast_slice(order));
                 }
             }
@@ -799,12 +832,8 @@ pub struct Sorter {
 impl Sorter {
     /// Indices of `points` from the farthest to the nearest along a view
     /// whose depth is `dot(depth_row, p)` (view-space z: more negative is
-    /// farther). Depths are bucketed into 65 536 steps between the nearest
-    /// and the farthest point.
+    /// farther), with the nearest and the farthest point as the depth box.
     pub fn back_to_front(&mut self, points: &[Vec3], depth_row: Vec3) -> &[u32] {
-        let n = points.len();
-        self.keys.clear();
-        self.keys.reserve(n);
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for p in points {
             let z = depth_row.dot(*p);
@@ -813,12 +842,22 @@ impl Sorter {
                 hi = hi.max(z);
             }
         }
-        let scale = if hi > lo { 65_535.0 / (hi - lo) } else { 0.0 };
-        self.keys.extend(points.iter().map(|p| {
-            let z = depth_row.dot(*p);
-            // Farthest (lowest z) gets key 0 and draws first.
-            ((z - lo) * scale).clamp(0.0, 65_535.0) as u16
-        }));
+        self.sort(points, depth_row, (lo, hi))
+    }
+
+    /// [`back_to_front`](Self::back_to_front) with the depth box from
+    /// `range.0` (farthest) to `range.1`, keyed by [`depth_key`] as the GPU
+    /// sort keys them. Points with the same key keep their own order.
+    pub fn sort(&mut self, points: &[Vec3], depth_row: Vec3, range: (f32, f32)) -> &[u32] {
+        let n = points.len();
+        let (lo, span) = (range.0, safe_span(range.0, range.1));
+        self.keys.clear();
+        self.keys.reserve(n);
+        self.keys.extend(
+            points
+                .iter()
+                .map(|p| depth_key(depth_row.dot(*p), lo, span)),
+        );
         self.counts.clear();
         self.counts.resize(1 << 16, 0);
         for &k in &self.keys {
@@ -909,6 +948,47 @@ mod tests {
             // The target was left alone and still holds that ghost.
             assert_eq!(prepare(&camera, [80, 48], &flat), 6, "the same ghost again");
         }
+    }
+
+    #[test]
+    fn depths_beyond_the_box_keep_their_order() {
+        let (lo, span) = (-2.0, 4.0);
+        assert_eq!(depth_key(lo, lo, span), 4096);
+        assert_eq!(depth_key(lo + span, lo, span), 61_439);
+        assert_eq!(depth_key(0.0, lo, span), 32_767);
+        let out = [0.001, 0.5, 1.0, 3.0, 10.0, 100.0, 1e4, 1e30];
+        // Beyond the far side: each farther depth (in box spans) sorts
+        // before the nearer one, down to the end of the band.
+        let far: Vec<u16> = out
+            .iter()
+            .map(|d| depth_key(lo - d * span, lo, span))
+            .collect();
+        assert!(far.windows(2).all(|w| w[0] > w[1]), "{far:?}");
+        assert_eq!((far[0], far[far.len() - 1]), (4095, 0), "{far:?}");
+        // And the near side, mirrored.
+        let near: Vec<u16> = out
+            .iter()
+            .map(|d| depth_key(lo + span + d * span, lo, span))
+            .collect();
+        assert!(near.windows(2).all(|w| w[0] < w[1]), "{near:?}");
+        assert_eq!((near[0], near[near.len() - 1]), (61_440, 65_535));
+        // One doubling of the distance out is 256 keys.
+        assert_eq!(depth_key(lo - span, lo, span), 4096 - 256);
+        assert_eq!(depth_key(lo - 3.0 * span, lo, span), 4096 - 512);
+    }
+
+    #[test]
+    fn far_points_sort_by_depth_on_the_cpu() {
+        // A box from -1 to 1, and points far behind it given nearest first.
+        let points: Vec<Vec3> = [0.5, -0.5, -10.0, -20.0, -40.0, 30.0]
+            .iter()
+            .map(|&z| Vec3::new(0.0, 0.0, z))
+            .collect();
+        let mut sorter = Sorter::default();
+        assert_eq!(
+            sorter.sort(&points, Vec3::Z, (-1.0, 1.0)),
+            &[4, 3, 2, 1, 0, 5]
+        );
     }
 
     #[test]

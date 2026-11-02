@@ -3,22 +3,26 @@
 // Sorting splats back to front on the GPU: a one-pass counting sort on a
 // 16-bit depth key, in three dispatches.
 //
-// 1. `depth_keys`: each splat's view depth, bucketed into 65 536 steps
-//    between `lo` (the farthest, key 0) and the nearest, and counted.
+// 1. `depth_keys`: each splat's view depth as one of 65 536 keys, farthest
+//    first, and counted. The depth box (from `lo`, its farthest, over
+//    `span`) shares out the keys between two bands evenly; depths beyond
+//    it take the band at that end, coarser the farther out. `depth_key` in
+//    `splat.rs` keys the same way, for the CPU sort.
 // 2. `prefix`: one workgroup turns the counts into each bucket's first
 //    place in the order.
 // 3. `place`: each splat takes the next place in its bucket.
 //
 // Splats in one bucket come out in no particular order. They lie within
-// 1/65 536 of the depth range of each other, too close for the order
-// between them to show.
+// 1/57 344 of the depth box of each other (or 0.3 % of their distance
+// beyond it), too close for the order between them to show.
 
 struct Params {
     // View depth is dot(row.xyz, p) for a splat centre p in file units.
     row: vec4<f32>,
-    // The depth of key 0, and keys per unit of depth.
+    // The depth box along the view: its farthest depth, and how deep it
+    // is (never zero).
     lo: f32,
-    scale: f32,
+    span: f32,
     count: u32,
     // Invocations per row of a two-dimensional dispatch.
     stride: u32,
@@ -32,6 +36,29 @@ struct Params {
 
 const BUCKETS: u32 = 65536u;
 const GROUP: u32 = 256u;
+// Keys at each end for depths beyond the box, and keys per doubling of
+// the distance out, in box depths.
+const BAND: f32 = 4096.0;
+const PER_DOUBLING: f32 = 256.0;
+
+// How far out `d` (in file units) is, in keys of the band.
+fn outside(d: f32) -> f32 {
+    return log2(1.0 + min(d / params.span, 1e9)) * PER_DOUBLING;
+}
+
+fn depth_key(z: f32) -> u32 {
+    let lo = params.lo;
+    let hi = lo + params.span;
+    var key: f32;
+    if z < lo {
+        key = max(floor(BAND - outside(lo - z)), 0.0);
+    } else if z > hi {
+        key = min(65536.0 - BAND + floor(outside(z - hi)), 65535.0);
+    } else {
+        key = BAND + floor((z - lo) / params.span * (65535.0 - 2.0 * BAND));
+    }
+    return min(u32(key), BUCKETS - 1u);
+}
 
 @compute @workgroup_size(256)
 fn depth_keys(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -41,9 +68,7 @@ fn depth_keys(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let p = vec3<f32>(positions[3u * i], positions[3u * i + 1u], positions[3u * i + 2u]);
     let z = dot(params.row.xyz, p);
-    // Beyond the range (floaters) clamps to its ends, still on the right
-    // side of everything inside it.
-    let key = min(u32(clamp((z - params.lo) * params.scale, 0.0, 65535.0)), BUCKETS - 1u);
+    let key = depth_key(z);
     keys[i] = key;
     atomicAdd(&counts[key], 1u);
 }

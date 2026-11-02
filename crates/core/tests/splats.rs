@@ -405,6 +405,47 @@ fn the_gpu_sorts_like_the_cpu() {
     assert!(covered > (SIZE * SIZE / 4) as usize, "{covered}");
 }
 
+#[test]
+fn splats_far_beyond_the_rest_still_sort_by_depth() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping render test");
+        return;
+    };
+    // A small cluster to the left sets the depth box. Far behind it, three
+    // splats line up on one spot of the screen, given nearest first: red,
+    // then green, then blue, all well beyond the box.
+    let mut list: Vec<_> = (0..400)
+        .map(|i| {
+            let t = i as f32 / 400.0;
+            let p = Vec3::new(
+                -0.8 + 0.2 * (t * 37.0).sin(),
+                0.2 * (t * 53.0).sin(),
+                0.2 * (t * 71.0).cos(),
+            );
+            (p, 0.03, [128, 128, 128, 255])
+        })
+        .collect();
+    let camera = 5.4;
+    for (z, colour) in [(-10.0, RED), (-20.0, [30, 220, 40, 255]), (-40.0, BLUE)] {
+        let distance = camera - z;
+        list.push((Vec3::new(0.12 * distance, 0.0, z), 0.04 * distance, colour));
+    }
+    let s = splats(&list);
+    for sort in [SortOn::Gpu, SortOn::Cpu] {
+        let data = render(
+            &device,
+            &queue,
+            &Scene {
+                sort,
+                ..Scene::new(&s)
+            },
+        );
+        // Where the three overlap, the nearest one covers.
+        let p = pixel(&data, SIZE / 2 + 18, SIZE / 2);
+        assert!(close(p, RED, 40), "{sort:?}: {p:?}");
+    }
+}
+
 /// A 3DGS capture's worth of splats: a lumpy shell of radius about 1 with
 /// a few floaters, small turned splats, every colour.
 fn capture(n: usize) -> Splats {
