@@ -2,14 +2,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! The reference: what is loaded in the right view, its panel and drawing.
 
+use std::sync::Arc;
+
 use super::App;
 use crate::ui::{self, menu};
+
+/// Files that open as a reference (lowercase, no dot).
+pub(super) const REFERENCE_EXTENSIONS: &[&str] =
+    &["ply", "splat", "spz", "obj", "stl", "png", "jpg", "jpeg"];
 
 /// The reference and how it is shown.
 #[derive(Default)]
 pub(super) struct ReferenceState {}
 
 impl App {
+    /// Loads a file as the reference. Not written yet.
+    pub(super) fn load_reference(&mut self, name: &str, _bytes: Arc<[u8]>) {
+        self.cannot_open(name);
+    }
+
     pub(super) fn reference_panel(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         ui::section(ui, tr.reference_tools);

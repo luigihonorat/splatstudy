@@ -32,7 +32,7 @@ use egui::{CursorIcon, Frame, Key, Margin, PointerButton, Pos2, Rect};
 use glam::Vec3;
 
 use crate::camera::OrbitCamera;
-use crate::input::{InputEvent, InputState};
+use crate::input::{FilePurpose, InputEvent, InputState};
 use crate::navigation::{NavAction, NavStyle};
 use crate::render::{self, ViewTarget, clay::ClayPass, clay::GpuMesh};
 use crate::sculpt::Sculpt;
@@ -48,7 +48,38 @@ pub struct FrameOutput {
     pub quit: bool,
     /// A link the shell should open in the browser.
     pub open_url: Option<String>,
+    /// Things only the shell can do, in the order they were asked for.
+    pub requests: Vec<Request>,
 }
+
+/// Something only the shell can do: pick, save and fetch files.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    /// Let the user pick a file with one of these extensions (lowercase, no
+    /// dot). It comes back as [`InputEvent::File`] with this purpose.
+    OpenFile {
+        purpose: FilePurpose,
+        extensions: &'static [&'static str],
+    },
+    /// Save bytes under a suggested name: a save dialog on desktop, a
+    /// download on the web.
+    SaveFile {
+        name: String,
+        mime: &'static str,
+        bytes: Vec<u8>,
+    },
+    /// Let the user pick a folder (desktop). It comes back as
+    /// [`InputEvent::Folder`].
+    PickFolder,
+    /// Write a file into a picked folder (desktop).
+    WriteFile { path: String, bytes: Vec<u8> },
+    /// Fetch a file shipped with the web build, such as a sample, by its
+    /// path next to the page. It comes back as [`InputEvent::File`].
+    Fetch { url: String, purpose: FilePurpose },
+}
+
+/// How long a notice stays on screen, in seconds.
+const NOTICE_SECONDS: f64 = 4.0;
 
 /// The browser keeps a tab open and owns some shortcuts (Ctrl+N), so the
 /// web build leaves those items out.
@@ -131,6 +162,10 @@ pub struct App {
     files: files::FileState,
     #[allow(dead_code)] // until the export part fills it
     export: export::ExportState,
+    /// Asked for since the last frame; handed to the shell with it.
+    requests: Vec<Request>,
+    /// A short message at the bottom of the views, and when it was posted.
+    notice: Option<(String, f64)>,
     /// The clock passed to the current frame, in seconds.
     now: f64,
     dirty: bool,
@@ -192,6 +227,8 @@ impl App {
             study: Default::default(),
             files: Default::default(),
             export: Default::default(),
+            requests: Vec::new(),
+            notice: None,
             now: 0.0,
             dirty: true,
         }
@@ -208,6 +245,16 @@ impl App {
     }
 
     pub fn push_event(&mut self, event: InputEvent) {
+        self.dirty = true;
+        match event {
+            InputEvent::File {
+                purpose,
+                name,
+                bytes,
+            } => return self.on_file(purpose, &name, bytes),
+            InputEvent::Folder { path } => return self.on_folder(path),
+            _ => {}
+        }
         if let InputEvent::Focus(focused) = event {
             self.focused = focused;
         }
@@ -220,7 +267,6 @@ impl App {
             self.debug = !self.debug;
         }
         self.input.translate(event, &mut self.events);
-        self.dirty = true;
     }
 
     /// True if a frame should be drawn now (input arrived or a redraw was asked for).
@@ -341,7 +387,22 @@ impl App {
             repaint_after,
             quit: std::mem::take(&mut self.quit),
             open_url,
+            requests: std::mem::take(&mut self.requests),
         }
+    }
+
+    /// Asks the shell for something it alone can do; it goes out with the
+    /// next frame.
+    #[allow(dead_code)] // until the first part asks for a file
+    fn request(&mut self, request: Request) {
+        self.requests.push(request);
+        self.dirty = true;
+    }
+
+    /// Shows a short message at the bottom of the views for a few seconds.
+    fn notify(&mut self, text: impl Into<String>) {
+        self.notice = Some((text.into(), self.now));
+        self.dirty = true;
     }
 
     fn render_views(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -404,5 +465,30 @@ impl App {
             .show(ui, |ui| self.reference_panel(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| self.views_ui(ui));
         self.windows(ui);
+        self.notice_ui(ui);
+    }
+
+    fn notice_ui(&mut self, ui: &egui::Ui) {
+        let Some((text, posted)) = &self.notice else {
+            return;
+        };
+        let left = NOTICE_SECONDS - (self.now - posted);
+        if left <= 0.0 {
+            self.notice = None;
+            return;
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        let p = self.theme.palette();
+        egui::Area::new(egui::Id::unique("notice"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                Frame::NONE
+                    .fill(p.bg)
+                    .stroke(egui::Stroke::new(1.0, p.border))
+                    .inner_margin(Margin::symmetric(14, 8))
+                    .show(ui, |ui| ui.label(text.as_str()));
+            });
     }
 }

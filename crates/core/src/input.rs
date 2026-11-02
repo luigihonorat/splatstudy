@@ -4,6 +4,8 @@
 //! translate into these types; the core turns them into egui input and keeps
 //! the raw pen samples (with pressure) for sculpting.
 
+use std::sync::Arc;
+
 /// Positions are in logical points, origin at the top-left of the window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointerEvent {
@@ -68,6 +70,27 @@ pub enum InputEvent {
     Text(String),
     Modifiers(Modifiers),
     Focus(bool),
+    /// A file the user dropped, picked or the shell fetched, with its name
+    /// (no folders) and contents.
+    File {
+        purpose: FilePurpose,
+        name: String,
+        bytes: Arc<[u8]>,
+    },
+    /// The folder picked after [`Request::PickFolder`](crate::Request) (desktop).
+    Folder {
+        path: String,
+    },
+}
+
+/// What an opened file is for: the menu item or request that asked for it.
+/// Dropped files are `Any`, and the app goes by their extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilePurpose {
+    Any,
+    Reference,
+    Sculpt,
+    Scene,
 }
 
 impl From<Modifiers> for egui::Modifiers {
@@ -160,6 +183,8 @@ impl InputState {
                 out.push(egui::Event::ModifiersChanged(m.into()));
             }
             InputEvent::Focus(focused) => out.push(egui::Event::WindowFocused(focused)),
+            // The app opens these itself; egui never sees them.
+            InputEvent::File { .. } | InputEvent::Folder { .. } => {}
         }
     }
 }

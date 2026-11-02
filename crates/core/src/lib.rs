@@ -15,7 +15,9 @@ pub mod render;
 pub mod sculpt;
 pub mod ui;
 
-pub use app::{App, FrameOutput};
+pub use app::{App, FrameOutput, Request};
 pub use egui::{CursorIcon, Key};
-pub use input::{Button, InputEvent, Modifiers, PointerEvent, PointerKind, PointerPhase};
+pub use input::{
+    Button, FilePurpose, InputEvent, Modifiers, PointerEvent, PointerKind, PointerPhase,
+};
 pub use ui::i18n::Lang;

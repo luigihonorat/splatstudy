@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Sculpting: the tools, strokes on the clay and the sculpt panel.
 
+use std::sync::Arc;
+
 use egui::{Key, Pos2, Rect, Stroke};
 use glam::{Vec2, Vec3};
 
@@ -94,6 +96,11 @@ impl App {
         if pressed(M::NONE, Key::CloseBracket) {
             self.tool.radius = (self.tool.radius * 1.2).min(400.0);
         }
+    }
+
+    /// Replaces the clay with a mesh from a file. Not written yet.
+    pub(super) fn import_sculpt(&mut self, name: &str, _bytes: Arc<[u8]>) {
+        self.cannot_open(name);
     }
 
     /// Mesh formats in the file → export menu.

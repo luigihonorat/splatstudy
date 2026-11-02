@@ -9,6 +9,9 @@ use super::App;
 pub(super) struct ExportState {}
 
 impl App {
+    /// The folder picked for an image sequence (desktop).
+    pub(super) fn on_folder(&mut self, _path: String) {}
+
     /// Video items in the file → export menu, after the mesh formats.
     pub(super) fn video_export_items(&mut self, _ui: &mut egui::Ui) {}
 
