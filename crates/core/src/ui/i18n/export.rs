@@ -67,6 +67,8 @@ pub struct ExportTr {
     pub zip_too_long: &'static str,
     /// The end card's last line, before the site's address.
     pub made_with: &'static str,
+    /// Before the file and the system's reason, when a save or write failed.
+    pub write_failed: &'static str,
 }
 
 pub const JA: ExportTr = ExportTr {
@@ -111,6 +113,7 @@ pub const JA: ExportTr = ExportTr {
     zip_fewer: "ZIP に収まるよう、1 秒あたりの枚数を減らしました",
     zip_too_long: "画像の ZIP には長すぎます。速さを上げるか、短い長さを選んでください",
     made_with: "SplatStudy で制作",
+    write_failed: "書き出せませんでした",
 };
 
 pub const EN: ExportTr = ExportTr {
@@ -155,6 +158,7 @@ pub const EN: ExportTr = ExportTr {
     zip_fewer: "too many images for one zip: fewer per second",
     zip_too_long: "too long for a zip of images: choose a faster speed or a shorter length",
     made_with: "made with SplatStudy",
+    write_failed: "couldn't write",
 };
 
 pub const FR: ExportTr = ExportTr {
@@ -199,4 +203,5 @@ pub const FR: ExportTr = ExportTr {
     zip_fewer: "trop d'images pour un zip : moins par seconde",
     zip_too_long: "trop long pour un zip d'images : choisissez une vitesse plus rapide ou une durée plus courte",
     made_with: "fait avec SplatStudy",
+    write_failed: "écriture impossible",
 };

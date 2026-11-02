@@ -36,8 +36,6 @@ static LATEST: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 struct Inbox {
     events: Arc<Mutex<Vec<InputEvent>>>,
-    /// Failures to tell the user about, from any thread.
-    errors: Arc<Mutex<Vec<String>>>,
     /// `None` when no custom event could be registered: the loop then picks
     /// results up within its idle timeout.
     wake: Option<Arc<EventSender>>,
@@ -55,14 +53,10 @@ impl Inbox {
         }
     }
 
+    /// A failed save or write, for the app to tell the user.
     fn error(&self, message: String) {
         log::error!("{message}");
-        if let Ok(mut errors) = self.errors.lock() {
-            errors.push(message);
-        }
-        if let Some(sender) = &self.wake {
-            let _ = sender.push_custom_event(Wake);
-        }
+        self.push(InputEvent::WriteFailed { message });
     }
 
     /// Reads a file on a worker thread and delivers it.
@@ -120,7 +114,6 @@ impl Files {
         Self {
             inbox: Inbox {
                 events: Arc::default(),
-                errors: Arc::default(),
                 wake,
             },
             folder: None,
@@ -147,15 +140,6 @@ impl Files {
             }
         }
         events
-    }
-
-    /// Failures since the last call, to show the user.
-    pub fn take_errors(&self) -> Vec<String> {
-        self.inbox
-            .errors
-            .lock()
-            .map(|mut e| std::mem::take(&mut *e))
-            .unwrap_or_default()
     }
 
     /// Does what the app asked for after a frame.
@@ -230,7 +214,7 @@ impl Files {
                 }
                 match std::fs::write(&path, bytes) {
                     Ok(()) => log::info!("saved {}", path.display()),
-                    Err(e) => inbox.error(format!("Could not save {}: {e}", path.display())),
+                    Err(e) => inbox.error(format!("{}: {e}", path.display())),
                 }
             }),
         );
@@ -271,8 +255,7 @@ impl Files {
         };
         if let Err(e) = std::fs::write(&target, bytes) {
             self.write_failed = true;
-            self.inbox
-                .error(format!("Could not write {}: {e}", target.display()));
+            self.inbox.error(format!("{}: {e}", target.display()));
         }
     }
 

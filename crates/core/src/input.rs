@@ -81,6 +81,11 @@ pub enum InputEvent {
     Folder {
         path: String,
     },
+    /// The shell couldn't save or write a file the app asked for: which
+    /// file, and why (in the system's words).
+    WriteFailed {
+        message: String,
+    },
 }
 
 /// What an opened file is for: the menu item or request that asked for it.
@@ -184,7 +189,9 @@ impl InputState {
             }
             InputEvent::Focus(focused) => out.push(egui::Event::WindowFocused(focused)),
             // The app opens these itself; egui never sees them.
-            InputEvent::File { .. } | InputEvent::Folder { .. } => {}
+            InputEvent::File { .. }
+            | InputEvent::Folder { .. }
+            | InputEvent::WriteFailed { .. } => {}
         }
     }
 }

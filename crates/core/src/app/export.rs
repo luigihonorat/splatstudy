@@ -277,6 +277,13 @@ impl App {
     /// The folder picked for an image sequence (desktop). An empty path
     /// means the picker was cancelled: the window goes back to its
     /// settings.
+    /// A save or image write failed in the shell. It arrives a frame after
+    /// the request, so it replaces an "exported" notice shown meanwhile.
+    pub(super) fn on_write_failed(&mut self, message: &str) {
+        let tr = self.lang.tr();
+        self.notify(format!("{} — {message}", tr.video.write_failed));
+    }
+
     pub(super) fn on_folder(&mut self, path: String) {
         if std::mem::take(&mut self.export.waiting_for_folder) && !path.is_empty() {
             self.start_export(Sink::Folder(path), VIDEO_SHORT_SIDE, VIDEO_FPS);

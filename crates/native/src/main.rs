@@ -162,14 +162,6 @@ fn run() -> Result<(), String> {
         for e in files.take() {
             app.push_event(e);
         }
-        for message in files.take_errors() {
-            let _ = sdl3::messagebox::show_simple_message_box(
-                sdl3::messagebox::MessageBoxFlag::ERROR,
-                "SplatStudy",
-                &message,
-                Some(&window),
-            );
-        }
         // The loop wakes at least twice a second, so this sees quiet moments.
         autosave.tick(&mut app, false);
 

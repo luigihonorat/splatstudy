@@ -258,6 +258,7 @@ impl App {
                 bytes,
             } => return self.on_file(purpose, &name, bytes),
             InputEvent::Folder { path } => return self.on_folder(path),
+            InputEvent::WriteFailed { message } => return self.on_write_failed(&message),
             _ => {}
         }
         if let InputEvent::Focus(focused) = event {
