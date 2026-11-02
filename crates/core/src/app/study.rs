@@ -3,10 +3,11 @@
 //! Study aids for comparing the sculpt with the reference: camera link,
 //! silhouette, ghost, mirror view, plumb line, grid and the pose timer.
 
-use egui::{Align2, CursorIcon, Key, Rect, Sense, Stroke, pos2};
+use egui::{Align2, CursorIcon, Key, Pos2, Rect, Sense, Stroke, pos2};
 
 use super::views::shown;
 use super::{App, REFERENCE, SCULPT};
+use crate::input::Modifiers;
 use crate::render::Slot;
 use crate::render::clay::Look;
 use crate::ui::{fonts, menu, theme};
@@ -36,6 +37,8 @@ pub(super) struct StudyState {
     /// Where the plumb line hangs in each view, as a share of its width
     /// (indexed by `SCULPT` and `REFERENCE`).
     pub(super) plumb_x: [f32; 2],
+    /// The view whose plumb line is being moved by its bob.
+    pub(super) plumb_drag: Option<usize>,
     pub(super) grid: bool,
     /// Rows of the grid; its cells are square.
     pub(super) grid_divisions: u32,
@@ -44,6 +47,19 @@ pub(super) struct StudyState {
     /// The reference laid over the sculpt view, see-through.
     pub(super) ghost: bool,
     pub(super) timer: PoseTimer,
+}
+
+/// The plumb line's bob: how high it hangs over the view's bottom edge,
+/// and how near it a press must land to take the line, in points.
+const BOB_LIFT: f32 = 32.0;
+const BOB_REACH: f32 = 9.0;
+
+/// Where the bob of a plumb line hanging at `share` of `rect`'s width is.
+fn bob(rect: Rect, share: f32) -> Pos2 {
+    pos2(
+        (rect.left() + share * rect.width()).round() + 0.5,
+        rect.bottom() - BOB_LIFT,
+    )
 }
 
 /// Round lengths offered, in minutes, and numbers of rounds.
@@ -178,6 +194,7 @@ impl Default for StudyState {
             mirror: false,
             plumb: false,
             plumb_x: [0.5; 2],
+            plumb_drag: None,
             grid: false,
             grid_divisions: 4,
             silhouette: false,
@@ -399,10 +416,42 @@ impl App {
         }
     }
 
+    /// A left press at `screen` in view `index`, before the view sees it:
+    /// returns true if a study aid took it. The plumb line moves by its bob
+    /// alone, and only where the clay is not under it, so a stroke always
+    /// wins on the clay.
+    pub(super) fn study_press(
+        &mut self,
+        rect: Rect,
+        index: usize,
+        screen: Pos2,
+        _m: Modifiers,
+    ) -> bool {
+        if self.on_bob(rect, index, screen) {
+            self.study.plumb_drag = Some(index);
+            return true;
+        }
+        false
+    }
+
+    /// `screen` is on the bob of view `index`'s plumb line, and the bob is
+    /// free to take it: the clay is not under it.
+    fn on_bob(&self, rect: Rect, index: usize, screen: Pos2) -> bool {
+        if !self.study.plumb || screen.distance(bob(rect, self.study.plumb_x[index])) > BOB_REACH {
+            return false;
+        }
+        let sculpting = index == SCULPT && self.playback.is_none();
+        !(sculpting && self.pick(rect, self.view_pos(rect, screen)).is_some())
+    }
+
     /// The plumb line and the grid over each shown view. They are drawn in
     /// screen space, so the mirror view does not flip them, and the grid's
     /// square cells match from view to view whatever their widths.
     pub(super) fn guides(&mut self, ui: &egui::Ui, rects: [Rect; 2]) {
+        let (pointer, held) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
+        if !held {
+            self.study.plumb_drag = None;
+        }
         for (index, rect) in rects.into_iter().enumerate() {
             if !shown(rect) {
                 continue;
@@ -414,25 +463,24 @@ impl App {
             if !self.study.plumb {
                 continue;
             }
-            // Dragged sideways by a band around the line.
-            let at = |share: f32| (rect.left() + share * rect.width()).round();
-            let x = at(self.study.plumb_x[index]);
-            let band = Rect::from_x_y_ranges(x - 5.0..=x + 5.0, rect.y_range());
-            let id = ui.scope_id().with(("plumb", index));
-            let response = ui.interact(band, id, Sense::click_and_drag());
-            if response.dragged()
-                && let Some(pos) = response.interact_pointer_pos()
-            {
+            let dragged = self.study.plumb_drag == Some(index);
+            if dragged && let Some(pos) = pointer {
                 let share = (pos.x - rect.left()) / rect.width();
                 self.study.plumb_x[index] = share.clamp(0.0, 1.0);
             }
-            if response.hovered() || response.dragged() {
+            let hovered = !dragged
+                && self.drags[index].is_none()
+                && pointer.is_some_and(|pos| rect.contains(pos) && self.on_bob(rect, index, pos));
+            if hovered || dragged {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
-            let x = at(self.study.plumb_x[index]) + 0.5;
-            painter.vline(x, rect.y_range(), Stroke::new(1.0, theme::GUIDE));
-            // The bob, low on the line.
-            painter.circle_filled(pos2(x, rect.bottom() - 32.0), 3.5, theme::GUIDE);
+            let bob = bob(rect, self.study.plumb_x[index]);
+            let line = Stroke::new(1.0, theme::GUIDE);
+            painter.vline(bob.x, rect.y_range(), line);
+            painter.circle_filled(bob, 3.5, theme::GUIDE);
+            if hovered || dragged {
+                painter.circle_stroke(bob, 7.0, line);
+            }
         }
     }
 
@@ -550,5 +598,125 @@ mod tests {
         assert_eq!(clock_text(299.2), "5:00");
         assert_eq!(clock_text(59.0), "0:59");
         assert_eq!(clock_text(0.0), "0:00");
+    }
+
+    /// The whole app offscreen, driven by input events. `None` without a
+    /// GPU adapter, and the tests that need one skip.
+    struct Harness {
+        app: App,
+        view: wgpu::TextureView,
+        time: f64,
+    }
+
+    const SIZE: [u32; 2] = [1280, 720];
+
+    impl Harness {
+        fn new() -> Option<Self> {
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&Default::default())).ok()?;
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("frame"),
+                size: wgpu::Extent3d {
+                    width: SIZE[0],
+                    height: SIZE[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let app = App::new(device, queue, format, crate::Lang::En);
+            let mut h = Self {
+                app,
+                view: target.create_view(&Default::default()),
+                time: 0.0,
+            };
+            h.frames(2);
+            Some(h)
+        }
+
+        fn frames(&mut self, n: usize) {
+            for _ in 0..n {
+                self.time += 1.0 / 60.0;
+                self.app.frame(self.time, &self.view, SIZE, 1.0);
+            }
+        }
+
+        fn pointer(&mut self, phase: crate::PointerPhase, pos: Pos2) {
+            use crate::{Button, InputEvent, PointerEvent, PointerKind, PointerPhase};
+            let button =
+                matches!(phase, PointerPhase::Down | PointerPhase::Up).then_some(Button::Primary);
+            self.app.push_event(InputEvent::Pointer(PointerEvent {
+                id: 1,
+                kind: PointerKind::Mouse,
+                phase,
+                pos: [pos.x, pos.y],
+                button,
+                pressure: if phase == PointerPhase::Up { 0.0 } else { 1.0 },
+                eraser: false,
+            }));
+            self.frames(1);
+        }
+
+        /// A left drag from `from` to `to`, in a few steps.
+        fn drag(&mut self, from: Pos2, to: Pos2) {
+            use crate::PointerPhase::{Down, Move, Up};
+            self.pointer(Move, from);
+            self.pointer(Down, from);
+            for k in 1..=4 {
+                self.pointer(Move, from.lerp(to, k as f32 / 4.0));
+            }
+            self.pointer(Up, to);
+        }
+    }
+
+    #[test]
+    fn the_plumb_line_moves_by_its_bob_but_never_off_the_clay() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.study.plumb = true;
+        h.frames(1);
+        let rect = h.app.view_rects[SCULPT];
+        let strokes = |h: &Harness| {
+            h.app
+                .sculpt
+                .log()
+                .iter()
+                .filter(|e| matches!(e.event, crate::sculpt::record::Event::Begin))
+                .count()
+        };
+
+        // Off the clay, the bob takes the line along.
+        let start = bob(rect, 0.5);
+        h.drag(start, start + egui::vec2(80.0, -40.0));
+        let moved = h.app.study.plumb_x[SCULPT];
+        let expected = (start.x + 80.0 - rect.left()) / rect.width();
+        assert!((moved - expected).abs() < 0.01, "{moved} vs {expected}");
+        assert_eq!(strokes(&h), 0);
+
+        // Pressing the line itself, away from the bob, does not move it.
+        let x = bob(rect, moved).x;
+        h.drag(
+            pos2(x, rect.top() + 60.0),
+            pos2(x + 50.0, rect.top() + 60.0),
+        );
+        assert_eq!(h.app.study.plumb_x[SCULPT], moved);
+
+        // Close up, the clay fills the view: the press on the bob sculpts.
+        h.app.study.plumb_x[SCULPT] = 0.5;
+        h.app.cameras[SCULPT].distance = 1.3;
+        h.frames(1);
+        h.drag(start, start + egui::vec2(80.0, 0.0));
+        assert_eq!(h.app.study.plumb_x[SCULPT], 0.5);
+        assert_eq!(strokes(&h), 1);
     }
 }

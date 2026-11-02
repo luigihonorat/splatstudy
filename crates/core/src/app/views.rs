@@ -238,7 +238,8 @@ impl App {
         });
         // In the mirror view the image is flipped: the pointer is reflected
         // into the rendered view, and sideways drags turn the other way so
-        // the clay still follows the hand.
+        // the clay still follows the hand. The guides stay on the screen.
+        let screen = pointer;
         let pointer = pointer.map(|pos| self.view_pos(rect, pos));
         let delta = if self.study.mirror {
             egui::vec2(-delta.x, delta.y)
@@ -255,6 +256,14 @@ impl App {
             ] {
                 if !ui.input(|i| i.pointer.button_pressed(button)) {
                     continue;
+                }
+                // The study aids' own handles (the plumb line's bob) take
+                // a left press first, but never one on the clay.
+                if ours == Button::Primary
+                    && let Some(screen) = screen
+                    && self.study_press(rect, index, screen, m)
+                {
+                    break;
                 }
                 let hit = match (index, ours, pointer) {
                     (SCULPT, Button::Primary, Some(pos)) if self.playback.is_none() => {
