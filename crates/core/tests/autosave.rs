@@ -210,6 +210,38 @@ fn a_session_comes_back_from_its_autosave() {
 }
 
 #[test]
+fn a_scene_without_its_start_gets_a_new_history_from_its_clay() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping autosave test");
+        return;
+    };
+    let mut first = Shell::new(&gpu);
+    first.stroke();
+    let full = first.app.autosave_bytes().expect("a session").scene;
+    let clay = scene::Scene::read(&full).unwrap();
+    assert!(!clay.log.is_empty());
+    // The same clay and log, without the checkpoints the log starts from.
+    let mut w = scene::SceneWriter::new();
+    w.mesh(&clay.mesh).log(&clay.log);
+    let broken = w.finish();
+
+    let mut second = Shell::new(&gpu);
+    second.open("broken.splatstudy", &broken);
+    let reopened = second.app.autosave_bytes().expect("the clay");
+    let scene = scene::Scene::read(&reopened.scene).unwrap();
+    // A new history whose start is the clay as it was opened, so later
+    // checkpoints keep their numbers in the replay.
+    assert!(scene.log.is_empty());
+    assert_eq!(scene.checkpoints.len(), 1);
+    assert_eq!(scene.checkpoints[0].log_index, 0);
+    assert_eq!(
+        scene.checkpoints[0].triangles.as_deref(),
+        Some(&clay.mesh.triangles[..])
+    );
+    assert_eq!(scene.mesh.triangles, clay.mesh.triangles);
+}
+
+#[test]
 fn a_scene_file_restores_too_and_a_new_scene_clears() {
     let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter; skipping autosave test");

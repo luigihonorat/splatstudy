@@ -153,17 +153,23 @@ impl App {
             reference,
             view,
         } = scene;
-        // The timelapse needs the clay the log starts from; without it the
-        // replay would start from the default sphere.
-        let complete = log.is_empty()
-            || checkpoints
-                .first()
-                .is_some_and(|c| c.log_index == 0 && c.triangles.is_some());
+        // The timelapse needs the clay the log starts from. Without it the
+        // replay would start from the default sphere, and number the
+        // checkpoints after it one too low: start a new history from the
+        // clay as it is instead.
+        let usable = checkpoints
+            .first()
+            .is_some_and(|c| c.log_index == 0 && c.triangles.is_some());
+        let complete = usable || log.is_empty();
 
         self.cancel_export();
         self.playback = None;
         self.drags = [None; 2];
-        self.sculpt = Sculpt::with_history(mesh, log, checkpoints);
+        self.sculpt = if usable {
+            Sculpt::with_history(mesh, log, checkpoints)
+        } else {
+            Sculpt::new(mesh)
+        };
         self.sculpt.take_topology_changed();
         self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
         if let Some(view) = view {
