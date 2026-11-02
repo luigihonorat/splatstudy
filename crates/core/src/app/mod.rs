@@ -34,7 +34,7 @@ use glam::Vec3;
 use crate::camera::OrbitCamera;
 use crate::input::{FilePurpose, InputEvent, InputState};
 use crate::navigation::{NavAction, NavStyle};
-use crate::render::clay::{ClayPass, GpuMesh, Look};
+use crate::render::clay::{ClayPass, GpuMesh};
 use crate::render::{self, Slot, ViewTarget};
 use crate::sculpt::Sculpt;
 use crate::ui::{self, fonts, i18n::Lang, theme, theme::ThemeMode};
@@ -414,7 +414,7 @@ impl App {
             Slot::SculptView,
             &self.cameras[SCULPT],
             sculpt.aspect(),
-            &Look::lit(theme::CLAY),
+            &self.sculpt_look(),
         );
         {
             let mut pass = sculpt.begin_pass(encoder, theme::VIEW_BG);
@@ -423,6 +423,7 @@ impl App {
                 .as_ref()
                 .map_or(&self.gpu_mesh, |p| &p.gpu_mesh);
             self.clay.draw(&mut pass, Slot::SculptView, mesh);
+            self.draw_ghost(&mut pass);
         }
         let mut pass = self.views[REFERENCE].begin_pass(encoder, theme::VIEW_BG);
         self.draw_reference(&mut pass);
