@@ -5,11 +5,26 @@
 //!
 //! Each file is a local header and the data; at the end come the central
 //! directory, one entry per file, and the end record pointing at it. No
-//! zip64: an archive stops growing at 4 GiB.
+//! zip64, and the whole archive is held in memory until the download, so
+//! it stops growing at [`BUDGET`].
 
-/// The archive would pass 4 GiB, which plain zip can't address.
+/// The archive would pass its limit: [`BUDGET`], or 4 GiB, which plain
+/// zip can't address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ZipFull;
+
+/// The most an archive holds, in bytes. In the browser it lives in the
+/// wasm heap (4 GiB at most, often less in a tab) and is copied once more
+/// into a Blob for the download, so it stays well under that.
+pub const BUDGET: usize = 512 << 20;
+
+/// A generous guess at the size of `frames` PNG frames of `size` pixels,
+/// headers included: a byte per pixel. The clay on its black background
+/// usually compresses to far less.
+pub fn estimate(size: [u32; 2], frames: u64) -> u64 {
+    let per_frame = u64::from(size[0]) * u64::from(size[1]) + 30 + 46 + 32;
+    per_frame * frames + 22
+}
 
 /// Every file gets this date, 1980-01-01 00:00, the earliest zip has; a
 /// timelapse's images don't need one.
@@ -19,25 +34,51 @@ const VERSION: u16 = 20;
 /// File names are UTF-8.
 const UTF8: u16 = 1 << 11;
 
-#[derive(Default)]
 pub struct Zip {
     buf: Vec<u8>,
     central: Vec<u8>,
     count: u16,
+    /// The most the finished archive may hold, in bytes.
+    limit: usize,
+}
+
+impl Default for Zip {
+    fn default() -> Self {
+        Self::with_limit(BUDGET)
+    }
 }
 
 impl Zip {
+    /// An archive of at most [`BUDGET`] bytes.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Stores a file. At most 65,535 files and 4 GiB in all.
+    /// An archive of at most `limit` bytes (and never past 4 GiB).
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            central: Vec::new(),
+            count: 0,
+            limit: limit.min(u32::MAX as usize),
+        }
+    }
+
+    /// Stores a file. At most 65,535 files, and the limit in all.
     pub fn add(&mut self, name: &str, data: &[u8]) -> Result<(), ZipFull> {
         let offset = self.buf.len();
         let end = offset + 30 + name.len() + data.len();
         let central_end = self.central.len() + 46 + name.len() + 22;
-        if end + central_end > u32::MAX as usize || self.count == u16::MAX || name.len() > 0xFFFF {
+        let whole = end + central_end;
+        if whole > self.limit || self.count == u16::MAX || name.len() > 0xFFFF {
             return Err(ZipFull);
+        }
+        // Grow by doubling as a Vec does, but never past the limit, and
+        // with room for the directory, so `finish` doesn't grow it again:
+        // at most the limit plus half of it in memory while it moves.
+        if whole > self.buf.capacity() {
+            let room = whole.next_power_of_two().min(self.limit).max(whole);
+            self.buf.reserve_exact(room - self.buf.len());
         }
         let crc = crc32(data);
         let size = data.len() as u32;
@@ -137,6 +178,27 @@ mod tests {
 
     fn le32(d: &[u8], at: usize) -> usize {
         u32::from_le_bytes(d[at..at + 4].try_into().unwrap()) as usize
+    }
+
+    #[test]
+    fn archives_stop_at_their_limit_without_growing_past_it() {
+        let data = vec![7u8; 1000];
+        let mut zip = Zip::with_limit(10_000);
+        let mut added = 0;
+        while zip.add(&format!("f{added}.png"), &data).is_ok() {
+            added += 1;
+            assert!(zip.buf.capacity() <= 10_000, "{}", zip.buf.capacity());
+        }
+        // Each file costs 1000 bytes and two headers with its name.
+        assert_eq!(added, 9);
+        let capacity = zip.buf.capacity();
+        let d = zip.finish();
+        assert!(d.len() <= 10_000);
+        assert_eq!(d.capacity(), capacity, "finishing doesn't grow it");
+        assert_eq!(le16(&d, d.len() - 22 + 10), 9);
+        // A guess errs on the large side, for frames that are all noise.
+        assert!(estimate([1280, 720], 100) > 100 * 1280 * 720);
+        assert!(estimate([1280, 720], 5400) > BUDGET as u64);
     }
 
     #[test]

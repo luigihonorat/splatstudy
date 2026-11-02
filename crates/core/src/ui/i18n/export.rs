@@ -60,6 +60,11 @@ pub struct ExportTr {
     pub nothing_recorded: &'static str,
     /// The reference was changed or removed while exporting.
     pub reference_changed: &'static str,
+    /// Before "(10 fps)": a long video's images are fewer per second so
+    /// they fit in the zip.
+    pub zip_fewer: &'static str,
+    /// The images would not fit in a zip even at the lowest rate.
+    pub zip_too_long: &'static str,
     /// The end card's last line, before the site's address.
     pub made_with: &'static str,
 }
@@ -103,6 +108,8 @@ pub const JA: ExportTr = ExportTr {
     failed: "書き出せませんでした",
     nothing_recorded: "まだ記録がありません",
     reference_changed: "モチーフが変わったため、書き出しを止めました",
+    zip_fewer: "ZIP に収まるよう、1 秒あたりの枚数を減らしました",
+    zip_too_long: "画像の ZIP には長すぎます。速さを上げるか、短い長さを選んでください",
     made_with: "SplatStudy で制作",
 };
 
@@ -145,6 +152,8 @@ pub const EN: ExportTr = ExportTr {
     failed: "the export failed",
     nothing_recorded: "nothing recorded yet",
     reference_changed: "the reference changed, so the export stopped",
+    zip_fewer: "too many images for one zip: fewer per second",
+    zip_too_long: "too long for a zip of images: choose a faster speed or a shorter length",
     made_with: "made with SplatStudy",
 };
 
@@ -187,5 +196,7 @@ pub const FR: ExportTr = ExportTr {
     failed: "l'export a échoué",
     nothing_recorded: "rien n'est encore enregistré",
     reference_changed: "le modèle a changé : l'export est arrêté",
+    zip_fewer: "trop d'images pour un zip : moins par seconde",
+    zip_too_long: "trop long pour un zip d'images : choisissez une vitesse plus rapide ou une durée plus courte",
     made_with: "fait avec SplatStudy",
 };

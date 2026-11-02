@@ -14,7 +14,9 @@ use super::{App, Request, WEB};
 use crate::camera::OrbitCamera;
 use crate::export::{
     CameraMotion, Captions, EndCard, Gpu, Job, Layout, Progress, Settings, Shape, Sink, Support,
-    VideoEncoder, clock, mp4::Mp4, zip::Zip,
+    VideoEncoder, clock,
+    mp4::Mp4,
+    zip::{self, Zip},
 };
 use crate::reference::{Aabb, Alignment, Content, Credit, Reference};
 use crate::render::Slot;
@@ -31,6 +33,8 @@ const VIDEO_FPS: u32 = 30;
 /// fewer of them.
 const ZIP_SHORT_SIDE: u32 = 720;
 const ZIP_FPS: u32 = 15;
+/// Fewer images per second when a long video's would not fit in the zip.
+const ZIP_FPS_CHOICES: [u32; 3] = [ZIP_FPS, 10, 5];
 /// Width of the export window's contents, in points.
 const WINDOW_WIDTH: f32 = 360.0;
 
@@ -265,13 +269,35 @@ impl App {
                 self.start_export(Sink::Video(mp4), VIDEO_SHORT_SIDE, VIDEO_FPS);
             }
             (Format::Images, true) => {
-                self.start_export(Sink::Zip(Zip::new()), ZIP_SHORT_SIDE, ZIP_FPS);
+                let v = self.lang.tr().video;
+                match self.zip_fps() {
+                    Some(fps) => {
+                        if fps < ZIP_FPS {
+                            self.notify(format!("{} ({fps} fps)", v.zip_fewer));
+                        }
+                        self.start_export(Sink::Zip(Zip::new()), ZIP_SHORT_SIDE, fps);
+                    }
+                    None => self.notify(v.zip_too_long),
+                }
             }
             (Format::Images, false) => {
                 self.export.waiting_for_folder = true;
                 self.request(Request::PickFolder);
             }
         }
+    }
+
+    /// The highest frame rate whose images likely fit in a zip in memory,
+    /// if any does.
+    fn zip_fps(&self) -> Option<u32> {
+        let size = self.export.shape.size(ZIP_SHORT_SIDE);
+        ZIP_FPS_CHOICES.into_iter().find(|&fps| {
+            let frames = self
+                .export_settings(ZIP_SHORT_SIDE, fps)
+                .timeline(self.export.duration)
+                .total();
+            zip::estimate(size, frames) <= zip::BUDGET as u64
+        })
     }
 
     /// Stops a running export whose reference was changed or removed: the
@@ -636,6 +662,9 @@ impl App {
         };
         if let Some(hint) = hint {
             note(ui, hint);
+        }
+        if WEB && format == Format::Images && self.zip_fps().is_none() {
+            note(ui, v.zip_too_long);
         }
 
         ui.add_space(12.0);
