@@ -87,12 +87,13 @@ const NOTICE_SECONDS: f64 = 4.0;
 const WEB: bool = cfg!(target_arch = "wasm32");
 const ISSUES_URL: &str = "https://github.com/luigihonorat/splatstudy/issues";
 const REPO_URL: &str = "https://github.com/luigihonorat/splatstudy";
+/// The website; the web app itself is at app.splatstudy.com.
 const SITE_URL: &str = "https://splatstudy.com";
 /// Every build ships the notices; the web page has them next to it.
 const LICENCES_URL: &str = if WEB {
     "licenses.html"
 } else {
-    "https://splatstudy.com/licenses.html"
+    "https://app.splatstudy.com/licenses.html"
 };
 
 const SCULPT: usize = 0;

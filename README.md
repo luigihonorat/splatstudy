@@ -10,7 +10,7 @@
 
 ## 使う
 
-ブラウザ版：<https://splatstudy.com>（WebGPU が必要です。Chrome / Edge の最新版、Safari 26 以降）
+ブラウザ版：<https://app.splatstudy.com>（WebGPU が必要です。Chrome / Edge の最新版、Safari 26 以降）
 
 開発中です。今の状態は下の「進み具合」を見てください。
 
@@ -42,7 +42,7 @@ cargo run -p splatstudy-native --release   # デスクトップ版（CMake が�
 
 ## ライセンス
 
-GPL-3.0-or-later に、アプリストアで配布するための追加許可（[`LICENSE-EXCEPTION`](LICENSE-EXCEPTION)）を付けています。フォント（Barlow、Noto Sans JP）は SIL Open Font License です。すべてのファイルのライセンスは [REUSE](https://reuse.software/) 形式で書かれています（[`LICENSES/`](LICENSES)）。使っている第三者のソフトウェアとフォントのライセンス表示は、配布するすべてのビルドに `licenses.html` として付けています（ブラウザ版：<https://splatstudy.com/licenses.html>）。
+GPL-3.0-or-later に、アプリストアで配布するための追加許可（[`LICENSE-EXCEPTION`](LICENSE-EXCEPTION)）を付けています。フォント（Barlow、Noto Sans JP）は SIL Open Font License です。すべてのファイルのライセンスは [REUSE](https://reuse.software/) 形式で書かれています（[`LICENSES/`](LICENSES)）。使っている第三者のソフトウェアとフォントのライセンス表示は、配布するすべてのビルドに `licenses.html` として付けています（ブラウザ版：<https://app.splatstudy.com/licenses.html>）。
 
 視点操作は ZBrush・Blender・Maya 風から選べます。Blender、Maya、ZBrush はそれぞれの権利者の商標で、操作方法の説明のためにだけ名前を挙げています。
 

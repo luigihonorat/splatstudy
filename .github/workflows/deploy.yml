@@ -1,5 +1,7 @@
 # Builds the browser version and uploads it to the web server behind
-# splatstudy.com on every push to main.
+# app.splatstudy.com on every push to main. The upload deletes anything else
+# in DEPLOY_PATH, so that folder holds the app only (the website at
+# splatstudy.com lives elsewhere).
 #
 # Repository secrets:
 #   DEPLOY_SSH_KEY      private key of a deploy-only user (no passphrase)
@@ -7,7 +9,7 @@
 #   DEPLOY_HOST         server address
 #   DEPLOY_PORT         SSH port (optional, default 22)
 #   DEPLOY_USER         the deploy user
-#   DEPLOY_PATH         web root, e.g. /var/www/splatstudy
+#   DEPLOY_PATH         the app's web root, e.g. /var/www/app.splatstudy
 
 name: deploy
 
