@@ -7,7 +7,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod config;
 mod files;
+mod text;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -92,6 +94,17 @@ fn run() -> Result<(), String> {
     let lang = sys_locale_lang();
     let mut app = App::new(device.clone(), queue.clone(), format, lang);
     app.set_debug(std::env::args().any(|a| a == "--debug"));
+    // `--sample=<id>` and `--view=<names>`, as `?sample=` and `?view=` on the web.
+    let options: Vec<String> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.strip_prefix("--").map(str::to_owned))
+        .collect();
+    app.apply_url_options(&options.join("&"));
+    app.set_first_run(config::first_run());
+
+    let event_subsystem = sdl.event().map_err(|e| e.to_string())?;
+    let mut files = files::Files::new(&event_subsystem);
+    let mut text = text::TextInput::default();
 
     let mut events = sdl.event_pump().map_err(|e| e.to_string())?;
     let mut input = Translator::default();
@@ -124,12 +137,18 @@ fn run() -> Result<(), String> {
                     surface.configure(&device, &config);
                     app.push_event(InputEvent::Focus(true));
                 }
+                Event::DropFile { filename, .. } => files.dropped(&filename),
                 other => {
                     for e in input.translate(other, &window) {
                         app.push_event(e);
                     }
                 }
             }
+        }
+
+        // Dialogs and file reads finish on other threads.
+        for e in files.take() {
+            app.push_event(e);
         }
 
         let due = redraw_at.is_some_and(|t| Instant::now() >= t);
@@ -161,6 +180,10 @@ fn run() -> Result<(), String> {
             .repaint_after
             .map(|s| Instant::now() + Duration::from_secs_f64(s));
         cursors.set(out.cursor);
+        for request in out.requests {
+            files.handle(request, &window);
+        }
+        text.update(app.text_field().map(|f| f.rect), &window, &video);
         if let Some(url) = out.open_url
             && let Err(e) = sdl3::url::open_url(&url)
         {
