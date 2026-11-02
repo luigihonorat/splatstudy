@@ -40,6 +40,8 @@ enum Format {
 pub(super) struct ExportState {
     open: bool,
     layout: Layout,
+    /// The user chose the layout, rather than it following the reference.
+    layout_picked: bool,
     shape: Shape,
     speed: f64,
     format: Format,
@@ -52,6 +54,8 @@ pub(super) struct ExportState {
     progress: (u64, u64),
     /// The job's composed frame, shown in the window.
     preview: Option<TextureId>,
+    /// A preview to free next frame: this frame may still paint it.
+    retired: Option<TextureId>,
     /// Asked the shell for a folder for the images (desktop).
     waiting_for_folder: bool,
 }
@@ -61,6 +65,7 @@ impl Default for ExportState {
         Self {
             open: false,
             layout: Layout::default(),
+            layout_picked: false,
             shape: Shape::default(),
             speed: SPEEDS[1],
             format: Format::Video,
@@ -69,6 +74,7 @@ impl Default for ExportState {
             job: None,
             progress: (0, 0),
             preview: None,
+            retired: None,
             waiting_for_folder: false,
         }
     }
@@ -115,6 +121,15 @@ impl App {
         // Only the times matter here, so any mesh will do.
         self.export.duration =
             Replay::new(Mesh::icosphere(0), self.sculpt.log().to_vec()).duration();
+        // Without a reference its half would stay black. A layout the user
+        // picked stays.
+        if !self.export.layout_picked {
+            self.export.layout = if self.scene_reference().is_none() {
+                Layout::SculptOnly
+            } else {
+                self.export.shape.natural_layout()
+            };
+        }
         self.export.open = true;
     }
 
@@ -128,9 +143,10 @@ impl App {
     }
 
     fn end_export(&mut self) {
-        if let Some(id) = self.export.preview.take() {
+        if let Some(id) = self.export.retired.take() {
             self.renderer.free_texture(&id);
         }
+        self.export.retired = self.export.preview.take();
     }
 
     /// The folder picked for an image sequence (desktop).
@@ -299,6 +315,11 @@ impl App {
     /// The export window, while one is open. Also moves a running export
     /// on, open or not.
     pub(super) fn export_window(&mut self, ui: &egui::Ui) {
+        if self.export.job.is_none()
+            && let Some(id) = self.export.retired.take()
+        {
+            self.renderer.free_texture(&id);
+        }
         self.step_export(ui);
         if !self.export.open {
             return;
@@ -356,6 +377,7 @@ impl App {
             ] {
                 if ui::choice(ui, label, e.layout == layout).clicked() {
                     e.layout = layout;
+                    e.layout_picked = true;
                 }
             }
         });
@@ -368,7 +390,9 @@ impl App {
             ] {
                 if ui::choice(ui, label, e.shape == shape).clicked() {
                     e.shape = shape;
-                    e.layout = shape.natural_layout();
+                    if e.layout != Layout::SculptOnly {
+                        e.layout = shape.natural_layout();
+                    }
                 }
             }
         });
@@ -433,7 +457,7 @@ impl App {
         }
         let ready = recorded && support != Support::Checking;
         if ui
-            .add_enabled_ui(ready, |ui| ui::choice(ui, v.start, true))
+            .add_enabled_ui(ready, |ui| ui::choice(ui, v.start, false))
             .inner
             .clicked()
         {
