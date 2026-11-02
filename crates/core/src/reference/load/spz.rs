@@ -16,16 +16,16 @@
 
 use glam::{Quat, Vec3};
 
-use super::{LoadError, sh0_to_u8, unit_quat};
+use super::{LoadError, MAX_SPLATS, sh0_to_u8, unit_quat};
 use crate::io::Reader;
 use crate::reference::Splats;
 
 const MAGIC: u32 = 0x5053_474E; // "NGSP"
-/// More than any real capture; stops a bomb from filling memory.
-const MAX_INFLATED: usize = 1 << 30;
+/// The bytes before the splats.
+const HEADER: usize = 16;
 
-/// The deflate data inside a gzip member.
-fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
+/// The deflate data inside a gzip member, after its header.
+fn deflated(bytes: &[u8]) -> Result<&[u8], LoadError> {
     const FHCRC: u8 = 1 << 1;
     const FEXTRA: u8 = 1 << 2;
     const FNAME: u8 = 1 << 3;
@@ -51,14 +51,25 @@ fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
     if flags & FHCRC != 0 {
         r.skip(2)?;
     }
-    let deflated = &bytes[r.position()..];
-    miniz_oxide::inflate::decompress_to_vec_with_limit(deflated, MAX_INFLATED)
-        .map_err(|_| LoadError::Invalid("broken compressed data"))
+    Ok(&bytes[r.position()..])
+}
+
+/// Up to the first `limit` bytes of the inflated data: never more, so a
+/// small file can't make a huge buffer.
+fn inflate(deflated: &[u8], limit: usize) -> Result<Vec<u8>, LoadError> {
+    use miniz_oxide::inflate::{TINFLStatus, decompress_to_vec_with_limit};
+    match decompress_to_vec_with_limit(deflated, limit) {
+        Ok(data) => Ok(data),
+        Err(e) if e.status == TINFLStatus::HasMoreOutput => Ok(e.output),
+        Err(_) => Err(LoadError::Invalid("broken compressed data")),
+    }
 }
 
 pub fn load_spz(bytes: &[u8]) -> Result<Splats, LoadError> {
-    let data = gunzip(bytes)?;
-    let mut r = Reader::new(&data);
+    let deflated = deflated(bytes)?;
+    // The header first, which says how much to inflate.
+    let header = inflate(deflated, HEADER)?;
+    let mut r = Reader::new(&header);
     if r.u32()? != MAGIC {
         return Err(LoadError::Invalid("not a .spz file"));
     }
@@ -77,9 +88,18 @@ pub fn load_spz(bytes: &[u8]) -> Result<Splats, LoadError> {
     if n == 0 {
         return Err(LoadError::Empty);
     }
+    if n > MAX_SPLATS {
+        return Err(LoadError::Unsupported(
+            "more splats than SplatStudy can show",
+        ));
+    }
     let rotation_size = if version == 2 { 3 } else { 4 };
     let per_splat = 9 + 1 + 3 + 3 + rotation_size;
-    if n.saturating_mul(per_splat) > r.remaining() {
+    // Only the splats' own fields; the higher harmonics after them stay
+    // compressed.
+    let data = inflate(deflated, HEADER + n * per_splat)?;
+    let mut r = Reader::new(&data[HEADER.min(data.len())..]);
+    if n * per_splat > r.remaining() {
         return Err(LoadError::Invalid(".spz data shorter than its header says"));
     }
     let positions = r.take(n * 9)?;
@@ -261,6 +281,32 @@ pub(crate) mod tests {
         let mut wrong_version = three_splats(3);
         wrong_version[0] = 0;
         assert!(load_spz(&wrong_version).is_err());
+    }
+
+    #[test]
+    fn only_what_the_header_declares_is_inflated() {
+        // Too many splats: refused from the header alone.
+        let mut d = Vec::new();
+        d.extend_from_slice(&MAGIC.to_le_bytes());
+        d.extend_from_slice(&3u32.to_le_bytes());
+        d.extend_from_slice(&(MAX_SPLATS as u32 + 1).to_le_bytes());
+        d.extend_from_slice(&[0, 12, 0, 0]);
+        assert_eq!(
+            load_spz(&gzip(&d)).err(),
+            Some(LoadError::Unsupported(
+                "more splats than SplatStudy can show"
+            ))
+        );
+        // A small file that inflates to 64 MiB of zeros after three splats
+        // reads just the splats.
+        let mut data = miniz_oxide::inflate::decompress_to_vec(
+            &three_splats(3)[21..three_splats(3).len() - 8],
+        )
+        .unwrap();
+        data.resize(64 << 20, 0);
+        let bomb = gzip(&data);
+        assert!(bomb.len() < 1 << 20);
+        assert_eq!(load_spz(&bomb).unwrap().len(), 3);
     }
 
     #[test]

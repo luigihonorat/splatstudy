@@ -25,6 +25,11 @@ pub use stl::{load_stl, weld};
 use super::{Content, Splats, UpAxis};
 use crate::io::ReadError;
 
+/// The most splats a compressed file may declare. More than the GPU's
+/// buffers hold anyway (the renderer thins them), and few enough that a
+/// small crafted file can't ask for gigabytes.
+pub const MAX_SPLATS: usize = 8_000_000;
+
 /// Why a file couldn't be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoadError {
