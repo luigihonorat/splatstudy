@@ -1,15 +1,19 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Study aids for comparing the sculpt with the reference: camera link,
-//! silhouette, ghost, mirror view, plumb line, grid and the pose timer.
+//! silhouette, ghost, mirror view, plumb line, grid, the pose timer, the
+//! silhouette match score, the proportion measure and the lighting.
 
-use egui::{Align2, CursorIcon, Key, Pos2, Rect, Sense, Stroke, pos2};
+use egui::{Align2, Color32, CursorIcon, Key, Pos2, Rect, Sense, Stroke, Vec2, pos2};
 
 use super::views::shown;
 use super::{App, REFERENCE, SCULPT};
+use crate::camera::OrbitCamera;
 use crate::input::Modifiers;
-use crate::render::Slot;
-use crate::render::clay::Look;
+use crate::reference::{Aabb, Alignment, Content};
+use crate::render::clay::{self, Lighting, Look, Overlap};
+use crate::render::readback::Readback;
+use crate::render::{Slot, ViewTarget};
 use crate::ui::{fonts, menu, theme};
 
 /// Which views show.
@@ -47,6 +51,10 @@ pub(super) struct StudyState {
     /// The reference laid over the sculpt view, see-through.
     pub(super) ghost: bool,
     pub(super) timer: PoseTimer,
+    /// How the clay, and mesh references, are lit.
+    pub(super) lighting: Lighting,
+    pub(super) measure: Measure,
+    pub(super) matching: SilhouetteMatch,
 }
 
 /// The plumb line's bob: how high it hangs over the view's bottom edge,
@@ -60,6 +68,128 @@ fn bob(rect: Rect, share: f32) -> Pos2 {
         (rect.left() + share * rect.width()).round() + 0.5,
         rect.bottom() - BOB_LIFT,
     )
+}
+
+/// The proportion measure, as a pencil held at arm's length: a line
+/// dragged over each view, and the clay's length as a share of the
+/// reference's. With the cameras linked both views show the form at the
+/// same scale for their height, so lengths count in view heights.
+#[derive(Default)]
+pub(super) struct Measure {
+    pub(super) on: bool,
+    /// The line in each view (indexed by `SCULPT` and `REFERENCE`): its
+    /// ends in view heights from the view's centre, in the rendered image,
+    /// so the mirror view flips it with the form it measures.
+    pub(super) lines: [Option<[Vec2; 2]>; 2],
+    /// The view a line is being dragged in.
+    drawing: Option<usize>,
+}
+
+/// Lines shorter than this, in points, are a click: they clear the view's line.
+const MEASURE_MIN: f32 = 4.0;
+
+impl Measure {
+    /// The length of view `index`'s line, in view heights.
+    fn length(&self, index: usize) -> Option<f32> {
+        self.lines[index].map(|[a, b]| (b - a).length())
+    }
+
+    /// The clay's measured length as a share of the reference's.
+    pub(super) fn ratio(&self) -> Option<f32> {
+        let reference = self.length(REFERENCE).filter(|&l| l > 1e-4)?;
+        Some(self.length(SCULPT)? / reference)
+    }
+}
+
+/// A point of a view in view heights from its centre, and back.
+fn to_heights(rect: Rect, pos: Pos2) -> Vec2 {
+    (pos - rect.center()) / rect.height().max(1.0)
+}
+
+fn from_heights(rect: Rect, at: Vec2) -> Pos2 {
+    rect.center() + at * rect.height()
+}
+
+/// The silhouette match: with the cameras linked, the clay and the
+/// reference are rendered flat from the same camera, small, and read back;
+/// the score is how much their outlines overlap. Compared again once the
+/// views have been still for a moment after a stroke or a turn, never
+/// every frame.
+#[derive(Default)]
+pub(super) struct SilhouetteMatch {
+    /// Tint the sculpt view where the clay is too big and too small.
+    pub(super) tint: bool,
+    /// What the views showed last frame, and since when.
+    seen: Option<(MatchKey, f64)>,
+    /// The two small flat renders, kept between comparisons.
+    targets: Option<[ViewTarget; 2]>,
+    pending: Option<PendingMatch>,
+    result: Option<MatchResult>,
+}
+
+/// Everything a comparison depends on: when it changes, the score is due again.
+#[derive(Clone, Debug, PartialEq)]
+struct MatchKey {
+    camera: OrbitCamera,
+    /// The flat renders' size, which has the sculpt view's shape.
+    size: [u32; 2],
+    /// The clay: its log's length, its vertex count and a sample of its
+    /// positions (opening a scene can bring a log as long).
+    clay: (usize, usize, u64),
+    /// The reference: its file's bytes (by address) and placement.
+    reference: (usize, Alignment, Option<Aabb>),
+}
+
+/// Flat renders on their way back from the GPU: the clay's, then the
+/// reference's. The browser maps buffers between frames, so each is taken
+/// when it is there.
+struct PendingMatch {
+    key: MatchKey,
+    readbacks: [Readback; 2],
+    pixels: [Option<Vec<u8>>; 2],
+}
+
+struct MatchResult {
+    key: MatchKey,
+    /// 0..1; `None` when neither outline shows.
+    iou: Option<f32>,
+    /// Where the clay is too big and too small, the size of the renders.
+    difference: egui::TextureHandle,
+}
+
+/// How long the views stay still before the silhouettes are compared, in
+/// seconds.
+const MATCH_STILL: f64 = 0.25;
+/// The flat renders hold about this many pixels, in the sculpt view's shape.
+const MATCH_PIXELS: f32 = 256.0 * 256.0;
+
+/// The size of the flat renders for a view of `aspect`.
+fn match_size(aspect: f32) -> [u32; 2] {
+    let side = MATCH_PIXELS.sqrt();
+    let root = aspect.clamp(0.1, 10.0).sqrt();
+    [
+        (side * root).round().max(16.0) as u32,
+        (side / root).round().max(16.0) as u32,
+    ]
+}
+
+/// The difference between two flat renders, pixel by pixel: where the clay
+/// alone is inked, where the reference alone is, and clear elsewhere.
+fn difference_image(size: [u32; 2], clay: &[u8], reference: &[u8]) -> egui::ColorImage {
+    let over = theme::CLAY_OVER.gamma_multiply(0.6);
+    let under = theme::CLAY_UNDER.gamma_multiply(0.6);
+    let pixels = clay
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(reference.as_chunks::<4>().0)
+        .map(|(c, r)| match (clay::inked(c), clay::inked(r)) {
+            (true, false) => over,
+            (false, true) => under,
+            _ => Color32::TRANSPARENT,
+        })
+        .collect();
+    egui::ColorImage::new([size[0] as usize, size[1] as usize], pixels)
 }
 
 /// Round lengths offered, in minutes, and numbers of rounds.
@@ -200,6 +330,9 @@ impl Default for StudyState {
             silhouette: false,
             ghost: false,
             timer: PoseTimer::default(),
+            lighting: Lighting::default(),
+            measure: Measure::default(),
+            matching: SilhouetteMatch::default(),
         }
     }
 }
@@ -307,6 +440,10 @@ impl App {
         if menu::item(ui, tr.ghost, "O", self.study.ghost).clicked() {
             self.study.ghost = !self.study.ghost;
         }
+        let tint = self.study.matching.tint;
+        if menu::item(ui, st.difference, "Shift+K", tint).clicked() {
+            self.study.matching.tint = !tint;
+        }
         ui.separator();
         if menu::item(ui, tr.plumb_line, "V", self.study.plumb).clicked() {
             self.study.plumb = !self.study.plumb;
@@ -321,6 +458,21 @@ impl App {
                 if menu::item(ui, &n.to_string(), "", chosen).clicked() {
                     self.study.grid_divisions = n;
                     self.study.grid = true;
+                }
+            }
+        });
+        if menu::item(ui, st.measure, "D", self.study.measure.on).clicked() {
+            self.toggle_measure();
+        }
+        menu::submenu(ui, st.lighting, |ui| {
+            ui.set_min_width(120.0);
+            for (lighting, label) in [
+                (Lighting::Studio, st.studio),
+                (Lighting::Raking, st.raking),
+                (Lighting::Top, st.top_light),
+            ] {
+                if menu::item(ui, label, "B", self.study.lighting == lighting).clicked() {
+                    self.study.lighting = lighting;
                 }
             }
         });
@@ -425,10 +577,19 @@ impl App {
         rect: Rect,
         index: usize,
         screen: Pos2,
-        _m: Modifiers,
+        m: Modifiers,
     ) -> bool {
         if self.on_bob(rect, index, screen) {
             self.study.plumb_drag = Some(index);
+            return true;
+        }
+        // Measuring takes a plain left drag in either view; with a
+        // modifier the press still navigates.
+        if self.study.measure.on && !(m.alt || m.ctrl || m.command) {
+            let at = to_heights(rect, self.view_pos(rect, screen));
+            let measure = &mut self.study.measure;
+            measure.lines[index] = Some([at, at]);
+            measure.drawing = Some(index);
             return true;
         }
         false
@@ -447,7 +608,12 @@ impl App {
     /// The plumb line and the grid over each shown view. They are drawn in
     /// screen space, so the mirror view does not flip them, and the grid's
     /// square cells match from view to view whatever their widths.
+    ///
+    /// The other aids drawn over the views follow: the proportion measure
+    /// and the silhouette match.
     pub(super) fn guides(&mut self, ui: &egui::Ui, rects: [Rect; 2]) {
+        // Before the views are drawn, after this frame's keys and menus.
+        clay::set_lighting(self.study.lighting);
         let (pointer, held) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         if !held {
             self.study.plumb_drag = None;
@@ -482,6 +648,307 @@ impl App {
                 painter.circle_stroke(bob, 7.0, line);
             }
         }
+        self.measure_ui(ui, rects, pointer, held);
+        self.silhouette_match(ui, rects);
+    }
+
+    /// The measured lines: the one being dragged follows the pointer; each
+    /// shows with its length, the reference's as 1 and the clay's as a
+    /// share of it, and a view still without one says what to do.
+    fn measure_ui(&mut self, ui: &egui::Ui, rects: [Rect; 2], pointer: Option<Pos2>, held: bool) {
+        if let Some(index) = self.study.measure.drawing {
+            let rect = rects[index];
+            if held {
+                if let Some(pos) = pointer {
+                    let at = to_heights(rect, self.view_pos(rect, pos));
+                    if let Some([_, end]) = &mut self.study.measure.lines[index] {
+                        *end = at;
+                    }
+                }
+            } else {
+                let measure = &mut self.study.measure;
+                measure.drawing = None;
+                let short = measure
+                    .length(index)
+                    .is_none_or(|l| l * rect.height() < MEASURE_MIN);
+                if short {
+                    measure.lines[index] = None;
+                }
+            }
+        }
+        let measure = &self.study.measure;
+        if !measure.on {
+            return;
+        }
+        let st = self.lang.tr().study;
+        let ratio = measure.ratio();
+        let line = Stroke::new(1.0, theme::GUIDE);
+        for (index, rect) in rects.into_iter().enumerate() {
+            if !shown(rect) {
+                continue;
+            }
+            let painter = ui.painter().with_clip_rect(rect);
+            let Some(ends) = measure.lines[index] else {
+                painter.text(
+                    pos2(rect.center().x, rect.bottom() - 40.0),
+                    Align2::CENTER_BOTTOM,
+                    st.measure_hint,
+                    fonts::regular(13.0),
+                    theme::VIEW_TEXT,
+                );
+                continue;
+            };
+            let [a, b] = ends.map(|at| self.view_pos(rect, from_heights(rect, at)));
+            painter.line_segment([a, b], line);
+            // Ticks across both ends, as on a ruler.
+            let across = (b - a).normalized().rot90() * 5.0;
+            for end in [a, b] {
+                painter.line_segment([end - across, end + across], line);
+            }
+            let label = if index == REFERENCE { Some(1.0) } else { ratio };
+            if let Some(value) = label.filter(|_| a.distance(b) >= MEASURE_MIN) {
+                // Beside the middle, on the side away from the view's centre.
+                let middle = a + (b - a) / 2.0;
+                let side = if across.dot(middle - rect.center()) >= 0.0 {
+                    across
+                } else {
+                    -across
+                };
+                painter.text(
+                    middle + side.normalized() * 16.0,
+                    Align2::CENTER_CENTER,
+                    format!("{value:.2}"),
+                    fonts::regular(13.0),
+                    theme::VIEW_INK,
+                );
+            }
+        }
+    }
+
+    fn toggle_measure(&mut self) {
+        let measure = &mut self.study.measure;
+        measure.on = !measure.on;
+        measure.lines = [None; 2];
+        measure.drawing = None;
+    }
+
+    /// What the silhouette match compares now, or `None` when there is
+    /// nothing to compare: the cameras unlinked, no 3D reference, the
+    /// sculpt view hidden or a timelapse playing.
+    fn match_key(&self, rects: [Rect; 2]) -> Option<MatchKey> {
+        let rect = rects[SCULPT];
+        let reference = self.reference.current.as_ref()?;
+        if !self.study.link
+            || !shown(rect)
+            || self.playback.is_some()
+            || matches!(reference.content, Content::Image(_))
+        {
+            return None;
+        }
+        let positions = &self.sculpt.mesh.positions;
+        let stride = (positions.len() / 64).max(1);
+        let sample = positions.iter().step_by(stride).fold(0u64, |h, p| {
+            p.to_array()
+                .iter()
+                .fold(h, |h, v| h.rotate_left(7) ^ u64::from(v.to_bits()))
+        });
+        Some(MatchKey {
+            camera: self.cameras[SCULPT],
+            size: match_size(rect.aspect_ratio()),
+            clay: (self.sculpt.log().len(), positions.len(), sample),
+            reference: (
+                std::sync::Arc::as_ptr(&reference.source.bytes).cast::<u8>() as usize,
+                reference.align,
+                reference.crop,
+            ),
+        })
+    }
+
+    /// Compares the silhouettes when they are due, takes the pixels when
+    /// they are back, and shows the score (and the difference, if on) over
+    /// the sculpt view.
+    fn silhouette_match(&mut self, ui: &egui::Ui, rects: [Rect; 2]) {
+        let Some(key) = self.match_key(rects) else {
+            let matching = &mut self.study.matching;
+            (matching.seen, matching.pending, matching.result) = (None, None, None);
+            return;
+        };
+        self.take_match();
+        let now = self.now;
+        let still = self.drags.iter().all(Option::is_none);
+        let matching = &mut self.study.matching;
+        let since = match &matching.seen {
+            Some((seen, since)) if *seen == key => *since,
+            _ => {
+                matching.seen = Some((key.clone(), now));
+                now
+            }
+        };
+        let fresh = matching.result.as_ref().is_some_and(|r| r.key == key);
+        if matching.pending.is_some() {
+            // The browser maps the buffers between frames: look again.
+            ui.ctx().request_repaint();
+        } else if !fresh {
+            let wait = MATCH_STILL - (now - since);
+            if still && wait <= 0.0 {
+                self.start_match(key);
+                ui.ctx().request_repaint();
+            } else {
+                let wait = wait.max(0.02);
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(wait));
+            }
+        }
+        self.match_ui(ui, rects[SCULPT], fresh);
+    }
+
+    /// Renders the clay and the reference flat into the small targets from
+    /// the sculpt camera, and starts reading them back. Its own submit,
+    /// before the frame's: the slots' uniforms are written again for the
+    /// views after it.
+    fn start_match(&mut self, key: MatchKey) {
+        let size = key.size;
+        let matching = &mut self.study.matching;
+        if matching.targets.as_ref().is_none_or(|t| t[0].size != size) {
+            matching.targets = Some([
+                ViewTarget::new(&self.device, size),
+                ViewTarget::new(&self.device, size),
+            ]);
+        }
+        // The clay as it is now, though the frame uploads it later.
+        for range in self.sculpt.take_dirty() {
+            self.gpu_mesh.write(&self.queue, &self.sculpt.mesh, range);
+        }
+        let Some(targets) = &self.study.matching.targets else {
+            return;
+        };
+        let camera = key.camera;
+        let aspect = size[0] as f32 / size[1] as f32;
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let ink = Look::flat(theme::SILHOUETTE_INK);
+        self.clay
+            .prepare(&self.queue, Slot::SculptView, &camera, aspect, &ink);
+        {
+            let mut pass = targets[0].begin_pass(&mut encoder, theme::VIEW_BG);
+            self.clay.draw(&mut pass, Slot::SculptView, &self.gpu_mesh);
+        }
+        {
+            let mut pass = targets[1].begin_pass(&mut encoder, theme::VIEW_BG);
+            let look = ReferenceLook {
+                flat: true,
+                opacity: 1.0,
+                over: false,
+            };
+            self.draw_reference_sized(&mut pass, Slot::ReferenceView, &camera, size, &look);
+        }
+        let readbacks = targets
+            .each_ref()
+            .map(|t| Readback::copy(&self.device, &mut encoder, t));
+        self.queue.submit([encoder.finish()]);
+        for readback in &readbacks {
+            readback.map();
+        }
+        self.study.matching.pending = Some(PendingMatch {
+            key,
+            readbacks,
+            pixels: [None, None],
+        });
+    }
+
+    /// Takes the flat renders' pixels as they arrive, and scores them once
+    /// both are there.
+    fn take_match(&mut self) {
+        let matching = &mut self.study.matching;
+        let Some(pending) = &mut matching.pending else {
+            return;
+        };
+        for (readback, pixels) in pending.readbacks.iter().zip(&mut pending.pixels) {
+            if pixels.is_some() {
+                continue;
+            }
+            match readback.try_take(&self.device) {
+                Ok(taken) => *pixels = taken,
+                Err(_) => {
+                    log::warn!("could not read the silhouettes back");
+                    matching.pending = None;
+                    return;
+                }
+            }
+        }
+        let [Some(clay), Some(reference)] = &pending.pixels else {
+            return;
+        };
+        let size = pending.key.size;
+        let iou = Overlap::of(clay, reference).iou();
+        let difference = self.ctx.load_texture(
+            "silhouette difference",
+            difference_image(size, clay, reference),
+            egui::TextureOptions::LINEAR,
+        );
+        matching.result = Some(MatchResult {
+            key: pending.key.clone(),
+            iou,
+            difference,
+        });
+        matching.pending = None;
+    }
+
+    /// The score in the sculpt view's lower right corner, dimmed while a
+    /// newer one is due, and the difference tint over the view while the
+    /// score is fresh.
+    fn match_ui(&self, ui: &egui::Ui, rect: Rect, fresh: bool) {
+        let Some(result) = &self.study.matching.result else {
+            return;
+        };
+        let st = self.lang.tr().study;
+        let painter = ui.painter().with_clip_rect(rect);
+        let tint = self.study.matching.tint;
+        if tint && fresh {
+            let uv = if self.study.mirror {
+                Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))
+            } else {
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
+            };
+            painter.image(result.difference.id(), rect, uv, Color32::WHITE);
+        }
+        let score = result
+            .iou
+            .map_or("–".to_owned(), |iou| format!("{:.0}%", iou * 100.0));
+        let colour = if fresh {
+            theme::VIEW_INK
+        } else {
+            theme::VIEW_TEXT
+        };
+        let corner = rect.right_bottom() + egui::vec2(-14.0, -12.0);
+        let shown = painter.text(
+            corner,
+            Align2::RIGHT_BOTTOM,
+            format!("{} {score}", st.match_score),
+            fonts::regular(13.0),
+            colour,
+        );
+        if tint {
+            // The legend, above the score: a short stroke of each tone.
+            let mut y = shown.top() - 8.0;
+            for (label, tone) in [
+                (st.too_small, theme::CLAY_UNDER),
+                (st.too_big, theme::CLAY_OVER),
+            ] {
+                let text = painter.text(
+                    pos2(corner.x, y),
+                    Align2::RIGHT_BOTTOM,
+                    label,
+                    fonts::regular(12.0),
+                    theme::VIEW_TEXT,
+                );
+                painter.hline(
+                    text.left() - 22.0..=text.left() - 8.0,
+                    text.center().y,
+                    Stroke::new(3.0, tone),
+                );
+                y = text.top() - 4.0;
+            }
+        }
     }
 
     pub(super) fn study_shortcuts(&mut self, ui: &egui::Ui) {
@@ -499,6 +966,10 @@ impl App {
         if pressed(Key::R) {
             self.study.mirror = !self.study.mirror;
         }
+        // Before plain K, which would take Shift+K too.
+        if ui.input_mut(|i| i.consume_key(M::SHIFT, Key::K)) {
+            self.study.matching.tint = !self.study.matching.tint;
+        }
         if pressed(Key::K) {
             self.study.silhouette = !self.study.silhouette;
         }
@@ -510,6 +981,22 @@ impl App {
         }
         if pressed(Key::G) {
             self.study.grid = !self.study.grid;
+        }
+        if pressed(Key::D) {
+            self.toggle_measure();
+        }
+        // Esc clears the measured lines, then puts the measure away.
+        if self.study.measure.on && pressed(Key::Escape) {
+            let measure = &mut self.study.measure;
+            if measure.lines.iter().any(Option::is_some) {
+                measure.lines = [None; 2];
+                measure.drawing = None;
+            } else {
+                measure.on = false;
+            }
+        }
+        if pressed(Key::B) {
+            self.study.lighting = self.study.lighting.next();
         }
     }
 }
@@ -718,5 +1205,151 @@ mod tests {
         h.drag(start, start + egui::vec2(80.0, 0.0));
         assert_eq!(h.app.study.plumb_x[SCULPT], 0.5);
         assert_eq!(strokes(&h), 1);
+    }
+
+    #[test]
+    fn the_measure_compares_lengths_in_view_heights() {
+        let mut m = Measure::default();
+        assert_eq!(m.ratio(), None);
+        m.lines[SCULPT] = Some([Vec2::ZERO, egui::vec2(0.3, 0.4)]);
+        assert_eq!(m.ratio(), None, "nothing to compare with yet");
+        m.lines[REFERENCE] = Some([egui::vec2(-0.5, 0.0), egui::vec2(0.5, 0.0)]);
+        assert!((m.ratio().unwrap() - 0.5).abs() < 1e-6);
+
+        // A view twice as tall shows the form twice as large.
+        let small = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let tall = Rect::from_min_size(pos2(500.0, 0.0), egui::vec2(800.0, 600.0));
+        let a = to_heights(small, pos2(200.0, 150.0) + egui::vec2(30.0, 0.0));
+        let b = to_heights(tall, pos2(900.0, 300.0) + egui::vec2(60.0, 0.0));
+        assert!((a - b).length() < 1e-6);
+        assert_eq!(from_heights(tall, b), pos2(960.0, 300.0));
+    }
+
+    #[test]
+    fn match_renders_keep_the_view_shape_and_size() {
+        for aspect in [0.5, 1.0, 1.6, 3.0] {
+            let [w, h] = match_size(aspect);
+            assert!(
+                (w as f32 / h as f32 - aspect).abs() < 0.02 * aspect,
+                "{aspect}"
+            );
+            let pixels = (w * h) as f32;
+            assert!(
+                (pixels / MATCH_PIXELS - 1.0).abs() < 0.02,
+                "{aspect}: {pixels}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_difference_tints_too_big_and_too_small_apart() {
+        let ink = theme::SILHOUETTE_INK.to_array();
+        let bg = theme::VIEW_BG.to_array();
+        let clay = [ink, ink, bg, bg].concat();
+        let reference = [ink, bg, ink, bg].concat();
+        let image = difference_image([4, 1], &clay, &reference);
+        assert_eq!(image.pixels[0], Color32::TRANSPARENT, "both");
+        assert_eq!(image.pixels[1], theme::CLAY_OVER.gamma_multiply(0.6));
+        assert_eq!(image.pixels[2], theme::CLAY_UNDER.gamma_multiply(0.6));
+        assert_eq!(image.pixels[3], Color32::TRANSPARENT, "neither");
+    }
+
+    /// The icosphere the clay starts as, written as an OBJ.
+    fn clay_as_obj() -> Vec<u8> {
+        let mesh = super::super::sculpting::start_mesh();
+        let mut obj = String::new();
+        for p in &mesh.positions {
+            obj += &format!("v {} {} {}\n", p.x, p.y, p.z);
+        }
+        for t in mesh.indices().as_chunks::<3>().0 {
+            obj += &format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1);
+        }
+        obj.into_bytes()
+    }
+
+    impl Harness {
+        /// Runs frames until a fresh silhouette match is in, and gives its
+        /// score.
+        fn settled_match(&mut self) -> Option<f32> {
+            for _ in 0..240 {
+                self.frames(1);
+                let rects = self.app.view_rects;
+                let key = self.app.match_key(rects)?;
+                let matching = &self.app.study.matching;
+                if let Some(result) = &matching.result
+                    && result.key == key
+                {
+                    return result.iou;
+                }
+            }
+            panic!("no silhouette match after 240 frames");
+        }
+    }
+
+    #[test]
+    fn the_silhouette_match_scores_the_outlines_overlap() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.load_reference("clay.obj", clay_as_obj().into());
+        // Placed where the clay is, as it is, rather than fitted.
+        h.app.reference.current.as_mut().unwrap().align = Alignment::default();
+        h.frames(2);
+        assert!(h.app.match_key(h.app.view_rects).is_none(), "unlinked");
+        h.app.study.link = true;
+        h.app.follow_camera(SCULPT);
+
+        // The clay itself as the reference: the outlines agree.
+        let same = h.settled_match().expect("a score");
+        assert!(same > 0.99, "{same}");
+
+        // The reference shrunk to 70 %: about 0.7² of the clay's area.
+        let reference = h.app.reference.current.as_mut().unwrap();
+        reference.align.scale *= 0.7;
+        let smaller = h.settled_match().expect("a score");
+        assert!((smaller - 0.49).abs() < 0.06, "{smaller}");
+
+        // A turn of the linked cameras is scored again, once still.
+        h.app.cameras[SCULPT].orbit(120.0, 0.0);
+        h.app.follow_camera(SCULPT);
+        let turned = h.settled_match().expect("a score");
+        assert!((turned - smaller).abs() < 0.06, "{turned}");
+    }
+
+    #[test]
+    fn the_measure_takes_a_drag_in_each_view_and_esc_clears_it() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.study.measure.on = true;
+        h.frames(1);
+        let [sculpt, reference] = h.app.view_rects;
+        let strokes_before = h.app.sculpt.log().len();
+        // Across the clay: measuring, not sculpting.
+        let c = sculpt.center();
+        h.drag(c - egui::vec2(30.0, 0.0), c + egui::vec2(30.0, 0.0));
+        let c = reference.center();
+        h.drag(c - egui::vec2(0.0, 60.0), c + egui::vec2(0.0, 60.0));
+        assert_eq!(h.app.sculpt.log().len(), strokes_before);
+        let ratio = h.app.study.measure.ratio().expect("both lines");
+        assert!((ratio - 0.5).abs() < 0.01, "{ratio}");
+
+        let esc = |h: &mut Harness| {
+            for pressed in [true, false] {
+                h.app.push_event(crate::InputEvent::Key {
+                    key: Key::Escape,
+                    pressed,
+                    repeat: false,
+                });
+            }
+            h.frames(1);
+        };
+        esc(&mut h);
+        assert!(h.app.study.measure.on);
+        assert_eq!(h.app.study.measure.lines, [None; 2]);
+        esc(&mut h);
+        assert!(!h.app.study.measure.on);
     }
 }

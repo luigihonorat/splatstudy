@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Strings for the study aids: camera link, silhouette, ghost, guides and timer.
+//! Strings for the study aids: camera link, silhouette, ghost, guides, timer,
+//! silhouette match, proportion measure and lighting.
 
 pub struct StudyTr {
     /// The submenu that picks which views show.
@@ -18,6 +19,23 @@ pub struct StudyTr {
     pub minutes: fn(u32) -> String,
     /// How many rounds the timer runs.
     pub rounds: fn(u32) -> String,
+    /// Before the silhouette match score, a share in percent.
+    pub match_score: &'static str,
+    /// Tints where the clay's outline is too big and too small.
+    pub difference: &'static str,
+    /// The difference tint's legend: the clay reaches past the reference.
+    pub too_big: &'static str,
+    /// The difference tint's legend: the clay falls short of it.
+    pub too_small: &'static str,
+    /// The proportion measure, in the view menu.
+    pub measure: &'static str,
+    /// Shown in a view still waiting for its measured line.
+    pub measure_hint: &'static str,
+    /// The lighting submenu and its three lightings.
+    pub lighting: &'static str,
+    pub studio: &'static str,
+    pub raking: &'static str,
+    pub top_light: &'static str,
 }
 
 pub const JA: StudyTr = StudyTr {
@@ -32,6 +50,16 @@ pub const JA: StudyTr = StudyTr {
     time_up: "時間です",
     minutes: ja_minutes,
     rounds: ja_rounds,
+    match_score: "一致",
+    difference: "シルエットのずれ",
+    too_big: "はみ出し",
+    too_small: "足りない",
+    measure: "比率を測る",
+    measure_hint: "ドラッグして長さを測る",
+    lighting: "ライト",
+    studio: "スタジオ",
+    raking: "斜光",
+    top_light: "天窓",
 };
 
 pub const EN: StudyTr = StudyTr {
@@ -46,6 +74,16 @@ pub const EN: StudyTr = StudyTr {
     time_up: "time is up",
     minutes: en_minutes,
     rounds: en_rounds,
+    match_score: "match",
+    difference: "silhouette difference",
+    too_big: "too big",
+    too_small: "too small",
+    measure: "measure proportions",
+    measure_hint: "drag to measure a length",
+    lighting: "lighting",
+    studio: "studio",
+    raking: "raking",
+    top_light: "top",
 };
 
 pub const FR: StudyTr = StudyTr {
@@ -60,6 +98,16 @@ pub const FR: StudyTr = StudyTr {
     time_up: "temps écoulé",
     minutes: fr_minutes,
     rounds: fr_rounds,
+    match_score: "accord",
+    difference: "écart de silhouette",
+    too_big: "en trop",
+    too_small: "en moins",
+    measure: "mesurer les proportions",
+    measure_hint: "glisser pour mesurer une longueur",
+    lighting: "éclairage",
+    studio: "atelier",
+    raking: "rasant",
+    top_light: "zénithal",
 };
 
 fn ja_minutes(n: u32) -> String {
