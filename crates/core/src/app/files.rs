@@ -152,6 +152,8 @@ impl App {
             log,
             reference,
             view,
+            history_damaged,
+            reference_damaged,
         } = scene;
         // The timelapse needs the clay the log starts from. Without it the
         // replay would start from the default sphere, and number the
@@ -160,7 +162,7 @@ impl App {
         let usable = checkpoints
             .first()
             .is_some_and(|c| c.log_index == 0 && c.triangles.is_some());
-        let complete = usable || log.is_empty();
+        let complete = (usable || log.is_empty()) && !history_damaged;
 
         self.cancel_export();
         self.playback = None;
@@ -182,6 +184,9 @@ impl App {
         match reference {
             Some(reference) => self.restore_reference(reference),
             None => self.remove_reference(),
+        }
+        if reference_damaged {
+            self.notify(self.lang.tr().files.reference_damaged);
         }
         self.files.replaced();
         complete
@@ -449,6 +454,7 @@ impl App {
                 return false;
             }
         };
+        let lost = lost || scene.reference_damaged;
         let complete = self.show_scene(scene);
         self.files.name = None;
         self.files.saved = None;

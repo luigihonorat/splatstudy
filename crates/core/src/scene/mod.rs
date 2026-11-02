@@ -79,6 +79,11 @@ pub struct Scene {
     pub log: Vec<Entry>,
     pub reference: Option<SavedReference>,
     pub view: Option<View>,
+    /// The log or checkpoints were damaged and left out: the clay opens
+    /// as it is, without its timelapse.
+    pub history_damaged: bool,
+    /// The reference was damaged and left out.
+    pub reference_damaged: bool,
 }
 
 /// How the two views were looking.
@@ -304,16 +309,43 @@ impl Scene {
         let mut log = Vec::new();
         let mut reference = None;
         let mut view = None;
+        let mut history_damaged = false;
+        let mut reference_damaged = false;
+        // A damaged part is logged and left out; only damaged clay (or
+        // a damaged file) loses the scene.
+        let damaged = |what: &str, err: ReadError| log::warn!("scene {what}: {err}");
         for chunk in chunks(data)? {
             let mut r = Reader::new(&chunk.payload);
             match chunk.tag {
                 MESH => mesh = Some(read_mesh(&mut r)?),
-                CHECKPOINTS => checkpoints = read_checkpoints(&mut r)?,
-                LOG => log = read_log(&mut r)?,
-                REFERENCE => reference = Some(reference::read_reference(&mut r)?),
-                REFERENCE_BY_KEY => {
-                    reference = reference::read_reference_by_key(&mut r, &mut find)?;
-                }
+                CHECKPOINTS => match read_checkpoints(&mut r) {
+                    Ok(read) => checkpoints = read,
+                    Err(err) => {
+                        damaged("checkpoints", err);
+                        history_damaged = true;
+                    }
+                },
+                LOG => match read_log(&mut r) {
+                    Ok(read) => log = read,
+                    Err(err) => {
+                        damaged("log", err);
+                        history_damaged = true;
+                    }
+                },
+                REFERENCE => match reference::read_reference(&mut r) {
+                    Ok(read) => reference = Some(read),
+                    Err(err) => {
+                        damaged("reference", err);
+                        reference_damaged = true;
+                    }
+                },
+                REFERENCE_BY_KEY => match reference::read_reference_by_key(&mut r, &mut find) {
+                    Ok(read) => reference = read,
+                    Err(err) => {
+                        damaged("reference", err);
+                        reference_damaged = true;
+                    }
+                },
                 VIEW => view = Some(read_view(&mut r)?),
                 _ => {}
             }
@@ -322,12 +354,22 @@ impl Scene {
             offset: data.len(),
             what: "a scene without clay",
         })?;
+        if history_damaged {
+            // Half a history can't be replayed; the clay itself is fine.
+            checkpoints.clear();
+            log.clear();
+        }
+        if reference_damaged {
+            reference = None;
+        }
         Ok(Scene {
             mesh,
             checkpoints,
             log,
             reference,
             view,
+            history_damaged,
+            reference_damaged,
         })
     }
 }
@@ -646,6 +688,27 @@ mod tests {
         assert_eq!(scene.mesh.positions.len(), live.mesh.positions.len());
         assert!(scene.log.is_empty());
         assert!(scene.view.is_none());
+    }
+
+    #[test]
+    fn a_damaged_part_is_left_out_and_the_clay_still_opens() {
+        let live = session();
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh)
+            .checkpoints(live.checkpoints())
+            .chunk(LOG, true, b"not a log")
+            .chunk(REFERENCE, false, b"not a reference")
+            .view(&view());
+        let scene = Scene::read(&w.finish()).expect("the clay opens");
+        assert_eq!(scene.mesh.triangles, live.mesh.triangles);
+        assert!(scene.history_damaged && scene.reference_damaged);
+        // Half a history is no history.
+        assert!(scene.log.is_empty() && scene.checkpoints.is_empty());
+        assert!(scene.reference.is_none());
+        assert_eq!(scene.view, Some(view()));
+
+        let scene = Scene::read(&save(&live, &view())).unwrap();
+        assert!(!scene.history_damaged && !scene.reference_damaged);
     }
 
     #[test]
