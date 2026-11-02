@@ -164,6 +164,11 @@ impl App {
         self.export.encoder = Some(encoder);
     }
 
+    /// An export is under way (or waiting for its folder).
+    pub(super) fn exporting(&self) -> bool {
+        self.export.job.is_some() || self.export.waiting_for_folder
+    }
+
     fn video_support(&self) -> Support {
         self.export
             .encoder
