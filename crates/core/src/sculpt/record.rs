@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
-use super::{Brush, DEFAULT_LEVEL, Dab, Falloff, MAX_TRIANGLES, MAX_VERTICES, Mesh, Sculpt};
+use super::{
+    Brush, Bvh, DEFAULT_LEVEL, Dab, Falloff, MAX_TRIANGLES, MAX_VERTICES, Mesh, Resume, Sculpt,
+};
 use crate::io::{ReadError, Reader, Writer};
 
 /// Pauses longer than this, in seconds, are shortened to it in playback.
@@ -43,6 +45,12 @@ pub enum Event {
     /// The brushes fade this way from the next dab or grab on (see
     /// `Sculpt::set_falloff`). Every checkpoint goes back to the default.
     Falloff(Falloff),
+    /// The scene was reopened here: everything worked out from the clay
+    /// (its hierarchy, its normals) was made afresh from it, the undo
+    /// history and any open stroke dropped, and the falloff went back to
+    /// the default. The clay itself didn't change, so this holds no mesh
+    /// (see `Sculpt::with_history`).
+    Rebuild,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,6 +177,7 @@ mod tag {
     pub const CHECKPOINT: u8 = 8;
     pub const MIRROR: u8 = 9;
     pub const FALLOFF: u8 = 10;
+    pub const REBUILD: u8 = 11;
 }
 
 impl Entry {
@@ -222,6 +231,9 @@ impl Entry {
             Event::Falloff(f) => {
                 w.u8(tag::FALLOFF).u8(f as u8);
             }
+            Event::Rebuild => {
+                w.u8(tag::REBUILD);
+            }
         }
     }
 
@@ -272,6 +284,7 @@ impl Entry {
                     .get(r.u8()? as usize)
                     .ok_or_else(|| r.invalid("unknown falloff"))?,
             ),
+            tag::REBUILD => Event::Rebuild,
             _ => return Err(r.invalid("unknown log event")),
         };
         Ok(Entry { time, event })
@@ -316,6 +329,28 @@ pub fn starts_with_mesh(checkpoints: &[Checkpoint]) -> bool {
         .is_some_and(|c| c.log_index == 0 && c.has_mesh())
 }
 
+/// True if replaying `log` from `checkpoints` ends on `mesh`'s triangles:
+/// those of the last whole-mesh checkpoint the log snaps to, or of the
+/// start. Only then can a replay go on from its own clay where a reopened
+/// sculpt goes on from `mesh` (see [`Event::Rebuild`]).
+pub(super) fn ends_on_triangles_of(mesh: &Mesh, log: &[Entry], checkpoints: &[Checkpoint]) -> bool {
+    if !starts_with_mesh(checkpoints) {
+        return false;
+    }
+    // As `Replay::snap` does: a checkpoint without a usable mesh is skipped.
+    let last = log
+        .iter()
+        .rev()
+        .filter_map(|e| match e.event {
+            Event::Checkpoint(n) => checkpoints.get(n as usize),
+            _ => None,
+        })
+        .find(|c| c.has_mesh())
+        .unwrap_or(&checkpoints[0]);
+    let triangles = last.triangles.as_deref().unwrap_or_default();
+    last.positions.len() == mesh.positions.len() && triangles == mesh.triangles.as_slice()
+}
+
 impl Sculpt {
     /// A sculpt that keeps no log of its own, for playing one back.
     fn replaying(mesh: Mesh) -> Sculpt {
@@ -328,13 +363,19 @@ impl Sculpt {
 
     /// Back to `positions` on the same triangles: the state
     /// [`Sculpt::replaying`] would make of the checkpoint this sculpt was
-    /// built from, without building it again. The hierarchy's shape came
-    /// from those same positions, so a refit gives the boxes a new build
-    /// would. The GPU buffers keep their layout: every page is just dirty.
-    fn rewind(&mut self, positions: &[Vec3]) {
+    /// built from, without building it again. Unless `reshaped`, the
+    /// hierarchy's shape came from those same positions, so a refit gives
+    /// the boxes a new build would; after an [`Event::Rebuild`] it came from
+    /// others, so it is built again. The GPU buffers keep their layout:
+    /// every page is just dirty.
+    fn rewind(&mut self, positions: &[Vec3], reshaped: bool) {
         self.mesh.positions.copy_from_slice(positions);
         self.mesh.recompute_normals();
-        self.bvh.refit(&self.mesh);
+        if reshaped {
+            self.bvh = Bvh::build(&self.mesh);
+        } else {
+            self.bvh.refit(&self.mesh);
+        }
         self.bvh_stale = false;
         self.dirty_pages.fill(true);
         self.stroke_open = false;
@@ -347,7 +388,7 @@ impl Sculpt {
         self.last_checkpoint = 0.0;
         self.falloff = Falloff::Smooth;
         self.logged_falloff = Falloff::Smooth;
-        self.resumed = false;
+        self.resume = Resume::Settled;
     }
 
     /// Does what a log entry recorded. Checkpoints need the checkpoint
@@ -369,7 +410,25 @@ impl Sculpt {
             Event::Checkpoint(_) => {}
             Event::Mirror { to_negative } => self.mirror(to_negative),
             Event::Falloff(falloff) => self.falloff = falloff,
+            Event::Rebuild => self.rebuild(),
         }
+    }
+
+    /// What reopening a scene does: the state `Sculpt::with_history` makes
+    /// of the clay as it is, so a replay goes on exactly as the reopened
+    /// sculpt did.
+    fn rebuild(&mut self) {
+        self.mesh.recompute_normals();
+        self.bvh = Bvh::build(&self.mesh);
+        self.bvh_stale = false;
+        self.dirty_pages.fill(true);
+        self.stroke_open = false;
+        self.stroke_indices.clear();
+        self.stroke_before.clear();
+        self.grabbed.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.falloff = Falloff::Smooth;
     }
 }
 
@@ -391,6 +450,9 @@ pub struct Replay {
     /// restart, or a snap to new triangles): going back to it only needs
     /// its positions again.
     built_from: usize,
+    /// An [`Event::Rebuild`] was played since: the hierarchy no longer has
+    /// the shape a build from `built_from` gives.
+    reshaped: bool,
 }
 
 impl Replay {
@@ -433,6 +495,7 @@ impl Replay {
             times,
             next: 0,
             built_from,
+            reshaped: false,
         }
     }
 
@@ -443,12 +506,13 @@ impl Replay {
         if index == self.built_from {
             // Scrubbing back within the same mesh: no new adjacency,
             // hierarchy or GPU buffers.
-            self.sculpt.rewind(&checkpoint.positions);
+            self.sculpt.rewind(&checkpoint.positions, self.reshaped);
         } else {
             let mesh = checkpoint.mesh().expect("starts have triangles");
             self.sculpt = Sculpt::replaying(mesh);
             self.built_from = index;
         }
+        self.reshaped = false;
     }
 
     /// Does what checkpoint `n` holds: becomes its mesh, or snaps to its
@@ -463,6 +527,7 @@ impl Replay {
             self.sculpt.snap_positions(&checkpoint.positions);
         } else if let Some(mesh) = checkpoint.mesh() {
             self.built_from = n as usize;
+            self.reshaped = false;
             self.sculpt.swap_mesh(mesh);
             self.sculpt.undo.clear();
             self.sculpt.redo.clear();
@@ -504,6 +569,10 @@ impl Replay {
                 Some(&t) if t <= time => {
                     match self.entries[self.next].event {
                         Event::Checkpoint(n) => self.snap(n),
+                        Event::Rebuild => {
+                            self.sculpt.apply(Event::Rebuild);
+                            self.reshaped = true;
+                        }
                         event => self.sculpt.apply(event),
                     }
                     self.next += 1;
@@ -759,9 +828,57 @@ mod tests {
             reopened.checkpoints().to_vec(),
         );
         session_at(&mut again, clock + 5.0, -0.05);
+        // Each reopening logged a rebuild, not another whole mesh.
+        assert_eq!(again.checkpoints().len(), live.checkpoints().len());
+        let rebuilds = again.log().iter().filter(|e| e.event == Event::Rebuild);
+        assert_eq!(rebuilds.count(), 2);
         let mut replay = Replay::of(&again);
         assert!(replay.seek(f64::INFINITY, usize::MAX));
         assert_same(&replay, &again);
+
+        // Scrubbing back across the rebuilds and forward again in small
+        // steps lands on the same clay as a fresh replay.
+        let steps = 9;
+        for k in (0..=steps).rev() {
+            let time = replay.duration() * k as f64 / steps as f64;
+            let mut fresh = Replay::of(&again);
+            assert!(fresh.seek(time, usize::MAX));
+            assert!(replay.seek(time, usize::MAX));
+            assert_same(&replay, &fresh.sculpt);
+        }
+        while !replay.seek(f64::INFINITY, 40) {}
+        assert_same(&replay, &again);
+
+        // And the log, rebuilds and all, saves and reads back.
+        let mut w = Writer::new();
+        write_log(&mut w, again.log());
+        assert_eq!(
+            read_log(&mut Reader::new(&w.finish())).unwrap(),
+            again.log()
+        );
+    }
+
+    #[test]
+    fn a_history_that_leads_elsewhere_resumes_from_a_whole_checkpoint() {
+        let mut live = Sculpt::new(Mesh::icosphere(3));
+        let clock = session_at(&mut live, 0.0, 0.0);
+        // A clay the log doesn't lead to: other triangles.
+        let other = Mesh::icosphere(2);
+        let mut reopened = Sculpt::with_history(
+            other.clone(),
+            live.log().to_vec(),
+            live.checkpoints().to_vec(),
+        );
+        session_at(&mut reopened, clock + 5.0, 0.05);
+        assert_eq!(reopened.checkpoints().len(), live.checkpoints().len() + 1);
+        assert_eq!(
+            reopened.checkpoints().last().unwrap().triangles.as_deref(),
+            Some(other.triangles.as_slice())
+        );
+        assert!(!reopened.log().iter().any(|e| e.event == Event::Rebuild));
+        let mut replay = Replay::of(&reopened);
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_same(&replay, &reopened);
     }
 
     #[test]

@@ -922,6 +922,72 @@ mod tests {
         }
     }
 
+    /// What an autosave costs on the default sphere as a session goes on
+    /// over several reloads: 20 strokes per page load, then a save, then
+    /// one more stroke and a save again.
+    /// `cargo test --release -p splatstudy-core autosave_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn autosave_timing() {
+        use std::time::Instant;
+
+        fn strokes(s: &mut Sculpt, clock: &mut f64, from: usize, count: usize) {
+            for k in from..from + count {
+                *clock += 4.0;
+                s.set_clock(*clock);
+                s.begin_stroke();
+                let (a, b) = (k as f32 * 0.37, k as f32 * 0.21);
+                let at = Vec3::new(a.sin(), b.cos(), 0.6).normalize();
+                for i in 0..40 {
+                    s.dab(Dab {
+                        brush: Brush::Clay,
+                        centre: (at + Vec3::Y * (i as f32 * 0.01)).normalize(),
+                        radius: 0.1,
+                        strength: 0.5,
+                        invert: false,
+                        symmetry: true,
+                        direction: Vec3::Y,
+                    });
+                    if i % 4 == 3 {
+                        s.refresh();
+                    }
+                }
+                s.end_stroke();
+                s.refresh();
+            }
+        }
+        // As `App::autosave_bytes` writes it.
+        let mut cache = HistoryCache::default();
+        let mut save = |s: &Sculpt| {
+            let mut w = SceneWriter::stored();
+            w.mesh(&s.mesh).history(s, &mut cache);
+            w.finish()
+        };
+        let ms = |since: Instant| since.elapsed().as_secs_f64() * 1e3;
+        let mut s = Sculpt::new(Mesh::icosphere(crate::sculpt::DEFAULT_LEVEL));
+        for reload in 0..8 {
+            // Each page load starts the clock near 0 again.
+            let mut clock = 1.0;
+            strokes(&mut s, &mut clock, reload * 21, 20);
+            let start = Instant::now();
+            let first = save(&s);
+            let t_first = ms(start);
+            strokes(&mut s, &mut clock, reload * 21 + 20, 1);
+            let start = Instant::now();
+            let next = save(&s);
+            let t_next = ms(start);
+            println!(
+                "reload {reload}: {} checkpoints; first save {:.2} MB in {t_first:.0} ms; \
+                 one stroke later {:.2} MB in {t_next:.0} ms",
+                s.checkpoints().len(),
+                first.len() as f64 / 1e6,
+                next.len() as f64 / 1e6,
+            );
+            let scene = Scene::read(&next).expect("reads");
+            s = Sculpt::with_history(scene.mesh, scene.log, scene.checkpoints);
+        }
+    }
+
     #[test]
     fn bad_meshes_are_refused() {
         // A triangle pointing past the vertices.

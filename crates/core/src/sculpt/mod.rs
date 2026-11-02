@@ -173,10 +173,23 @@ pub struct Sculpt {
     /// The falloff a replay of the log would have reached: a change is
     /// logged before the next dab or grab that differs from it.
     logged_falloff: Falloff,
-    /// Reopened with a log, and not changed since (see `with_history`).
-    resumed: bool,
+    /// Reopened with a log, and not changed since: what the first change
+    /// logs before itself (see `with_history`).
+    resume: Resume,
     /// Tells this sculpt from every other made in this run.
     id: u64,
+}
+
+/// What a reopened sculpt logs before its first change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Resume {
+    /// Nothing: a new sculpt, or the first change was logged.
+    Settled,
+    /// An [`Event::Rebuild`]: a replay rebuilds from its own clay, which
+    /// is this one.
+    Rebuild,
+    /// A whole checkpoint: the log doesn't lead to this clay's triangles.
+    Checkpoint,
 }
 
 fn mirror(v: Vec3) -> Vec3 {
@@ -228,7 +241,7 @@ impl Sculpt {
             topology_changed: false,
             falloff: Falloff::Smooth,
             logged_falloff: Falloff::Smooth,
-            resumed: false,
+            resume: Resume::Settled,
             mesh,
         }
     }
@@ -239,22 +252,40 @@ impl Sculpt {
     /// The reopened sculpt builds its hierarchy afresh from `mesh`, while a
     /// replay of the log would still have the one built at the last
     /// topology change, which finds vertices in another order. So the
-    /// first change after reopening logs a checkpoint of `mesh` first, and
-    /// a replay rebuilds from the same mesh. (Not before: a scene reopened
-    /// and saved untouched saves the same bytes.)
+    /// first change after reopening logs an [`Event::Rebuild`] first, and a
+    /// replay rebuilds from its own clay, which is `mesh`. (Not before: a
+    /// scene reopened and saved untouched saves the same bytes.)
+    ///
+    /// When the log doesn't lead to `mesh`'s triangles (a history from a
+    /// damaged or edited file), a replay can't reach `mesh` by itself: a
+    /// whole checkpoint of it is logged instead.
     pub fn with_history(mesh: Mesh, log: Vec<Entry>, checkpoints: Vec<Checkpoint>) -> Sculpt {
+        let resume = if log.is_empty() {
+            Resume::Settled
+        } else if record::ends_on_triangles_of(&mesh, &log, &checkpoints) {
+            Resume::Rebuild
+        } else {
+            Resume::Checkpoint
+        };
         Sculpt {
-            resumed: !log.is_empty(),
+            resume,
             log,
             checkpoints,
             ..Sculpt::bare(mesh)
         }
     }
 
-    /// Logs the checkpoint a reopened sculpt owes, before its first change.
+    /// Logs what a reopened sculpt owes, before its first change.
     fn settle_resume(&mut self) {
-        if std::mem::take(&mut self.resumed) {
-            self.checkpoint(true);
+        match std::mem::replace(&mut self.resume, Resume::Settled) {
+            Resume::Settled => {}
+            Resume::Rebuild => {
+                self.record(Event::Rebuild);
+                // A replay goes back to the default there, as at a checkpoint.
+                self.logged_falloff = Falloff::Smooth;
+                self.last_checkpoint = self.clock;
+            }
+            Resume::Checkpoint => self.checkpoint(true),
         }
     }
 
@@ -304,7 +335,7 @@ impl Sculpt {
     /// brings the previous mesh back.
     pub fn replace_mesh(&mut self, mesh: Mesh) {
         // Its own checkpoint follows.
-        self.resumed = false;
+        self.resume = Resume::Settled;
         let old = self.swap_mesh(mesh);
         self.undo.clear();
         self.redo.clear();
