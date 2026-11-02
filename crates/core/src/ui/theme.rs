@@ -27,6 +27,11 @@ pub const SILHOUETTE_INK: Color32 = hex(0xE6E6E6);
 pub const GUIDE: Color32 = hex(0xEE8A2A);
 /// The crop box around a reference.
 pub const CROP_LINE: Color32 = hex(0xEE8A2A);
+/// The silhouette difference over the sculpt view: where the clay reaches
+/// past the reference's outline, and where it falls short of it. Muted, so
+/// the form still reads through them.
+pub const CLAY_OVER: Color32 = hex(0xB0694A);
+pub const CLAY_UNDER: Color32 = hex(0x5B84A8);
 /// How strongly the ghost of the reference shows over the sculpt.
 pub const GHOST_OPACITY: f32 = 0.35;
 
