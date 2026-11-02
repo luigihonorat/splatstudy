@@ -12,6 +12,8 @@ struct Uniforms {
     base: vec4<f32>,
     // Direction towards the key light, view space.
     light: vec4<f32>,
+    // x: flat (silhouette), y: opacity, z: use vertex colours.
+    params: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -19,13 +21,23 @@ struct Uniforms {
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    // sRGB.
+    @location(2) color: vec4<f32>,
 };
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) position: vec3<f32>,
+    // Linear.
+    @location(2) color: vec3<f32>,
 };
+
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
+}
 
 @vertex
 fn vs(v: VsIn) -> VsOut {
@@ -33,6 +45,7 @@ fn vs(v: VsIn) -> VsOut {
     out.clip = u.view_proj * vec4<f32>(v.position, 1.0);
     out.normal = (u.view * vec4<f32>(v.normal, 0.0)).xyz;
     out.position = (u.view * vec4<f32>(v.position, 1.0)).xyz;
+    out.color = select(vec3<f32>(1.0), to_linear(v.color.rgb), u.params.z > 0.5);
     return out;
 }
 
@@ -44,6 +57,11 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base = u.base.rgb * in.color;
+    let opacity = u.params.y;
+    if u.params.x > 0.5 {
+        return vec4<f32>(to_srgb(base) * opacity, opacity);
+    }
     var n = normalize(in.normal);
     if !front {
         n = -n;
@@ -57,6 +75,8 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let h = normalize(l + v);
     let spec = pow(max(dot(n, h), 0.0), 32.0) * 0.05 * step(0.0, n_dot_l);
     let light = 0.78 * wrap + 0.30 * sky + 0.10 * rim;
-    let colour = u.base.rgb * light + vec3<f32>(spec);
-    return vec4<f32>(to_srgb(clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+    let colour = base * light + vec3<f32>(spec);
+    // Premultiplied, for the blend state.
+    let srgb = to_srgb(clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0)));
+    return vec4<f32>(srgb * opacity, opacity);
 }

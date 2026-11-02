@@ -8,12 +8,15 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 
-/// One vertex as the GPU sees it: position then normal, 24 bytes.
+/// One vertex as the GPU sees it: position, normal and an sRGB colour,
+/// 28 bytes. The clay is white; coloured scans and, later, polypaint fill
+/// the colour.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    pub color: [u8; 4],
 }
 
 /// Compressed adjacency lists: the items of `i` are `items[offsets[i]..offsets[i + 1]]`.
@@ -179,6 +182,7 @@ impl Mesh {
         Vertex {
             position: self.positions[i].to_array(),
             normal: self.normals[i].to_array(),
+            color: [255; 4],
         }
     }
 

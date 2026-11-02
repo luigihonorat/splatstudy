@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Draws the clay mesh. The pipeline is shared; each mesh owns its buffers.
+//! Draws the clay mesh, and other meshes shaded like it (scanned
+//! references). The pipeline is shared; each mesh owns its buffers, and
+//! each [`Slot`] its camera.
 
+use egui::Color32;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-use super::{DEPTH_FORMAT, SAMPLES, VIEW_FORMAT};
+use super::{DEPTH_FORMAT, SAMPLES, Slot, VIEW_FORMAT};
 use crate::camera::OrbitCamera;
 use crate::sculpt::{Mesh, Vertex};
 
@@ -16,6 +19,35 @@ struct Uniforms {
     view: [[f32; 4]; 4],
     base: [f32; 4],
     light: [f32; 4],
+    /// x: flat, y: opacity, z: use vertex colours, w: unused.
+    params: [f32; 4],
+}
+
+/// How a mesh is shaded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    /// The base colour, multiplied by each vertex's colour if those are on.
+    pub colour: Color32,
+    /// Filled flat with the colour, without light: the silhouette.
+    pub flat: bool,
+    /// 0..1. Below 1 the mesh blends over what was drawn before it. Every
+    /// surface blends, back faces too (there is no culling); a see-through
+    /// mesh meant to read as one layer needs a depth pre-pass first.
+    pub opacity: f32,
+    /// Use the vertices' own colours, as scans have.
+    pub vertex_colours: bool,
+}
+
+impl Look {
+    /// Lit, opaque, in one colour.
+    pub const fn lit(colour: Color32) -> Self {
+        Self {
+            colour,
+            flat: false,
+            opacity: 1.0,
+            vertex_colours: false,
+        }
+    }
 }
 
 /// The key light, in view space: above, to the left and in front, like a
@@ -24,8 +56,8 @@ const LIGHT: Vec3 = Vec3::new(-0.45, 0.65, 0.6);
 
 pub struct ClayPass {
     pipeline: wgpu::RenderPipeline,
-    uniforms: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    /// Uniforms and their bind group, one per slot.
+    slots: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
 }
 
 /// A mesh's GPU buffers.
@@ -78,20 +110,25 @@ impl ClayPass {
                 count: None,
             }],
         });
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("clay uniforms"),
-            size: size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("clay"),
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            }],
-        });
+        let slots = Slot::ALL
+            .map(|_| {
+                let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("clay uniforms"),
+                    size: size_of::<Uniforms>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("clay"),
+                    layout: &layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    }],
+                });
+                (uniforms, bind_group)
+            })
+            .into();
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("clay"),
             bind_group_layouts: &[Some(&layout)],
@@ -107,14 +144,24 @@ impl ClayPass {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3,
+                        1 => Float32x3,
+                        2 => Unorm8x4,
+                    ],
                 })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(VIEW_FORMAT.into())],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: VIEW_FORMAT,
+                    // The shader writes premultiplied colour: opaque draws
+                    // replace, see-through ones blend.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -137,34 +184,40 @@ impl ClayPass {
             multiview_mask: None,
             cache: None,
         });
-        Self {
-            pipeline,
-            uniforms,
-            bind_group,
-        }
+        Self { pipeline, slots }
     }
 
-    /// Sets the camera and clay colour for the next draw.
+    /// Sets the camera and look for the slot's next draws. Each slot keeps
+    /// its own, so every slot can be prepared before one submit.
     pub fn prepare(
         &self,
         queue: &wgpu::Queue,
+        slot: Slot,
         camera: &OrbitCamera,
         aspect: f32,
-        clay: egui::Color32,
+        look: &Look,
     ) {
         let view: Mat4 = camera.view();
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
         let uniforms = Uniforms {
             view_proj: (camera.projection(aspect) * view).to_cols_array_2d(),
             view: view.to_cols_array_2d(),
-            base: super::linear(clay),
+            base: super::linear(look.colour),
             light: LIGHT.normalize().extend(0.0).to_array(),
+            params: [
+                flag(look.flat),
+                look.opacity.clamp(0.0, 1.0),
+                flag(look.vertex_colours),
+                0.0,
+            ],
         };
-        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
+        let (buffer, _) = &self.slots[slot.index()];
+        queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, mesh: &GpuMesh) {
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, slot: Slot, mesh: &GpuMesh) {
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(0, &self.slots[slot.index()].1, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..1);

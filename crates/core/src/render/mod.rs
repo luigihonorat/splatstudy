@@ -8,10 +8,36 @@
 //! shaders do any conversion explicitly.
 
 pub mod clay;
+pub mod readback;
 
 pub const VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const SAMPLES: u32 = 4;
+
+/// Where a draw goes. Each slot has its own camera uniforms, so draws seen
+/// from different cameras can share one submit: the two views, and the two
+/// halves of an exported frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    SculptView,
+    ReferenceView,
+    ExportSculpt,
+    ExportReference,
+}
+
+impl Slot {
+    pub const COUNT: usize = 4;
+    pub const ALL: [Slot; Slot::COUNT] = [
+        Slot::SculptView,
+        Slot::ReferenceView,
+        Slot::ExportSculpt,
+        Slot::ExportReference,
+    ];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
 
 /// The render targets of one 3D view: multisampled colour and depth, and the
 /// resolved texture that egui shows.
