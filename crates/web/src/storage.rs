@@ -99,7 +99,7 @@ function db() {
       r.onsuccess = () => {
         openNow = r.result;
         // Another tab upgrading the database: step aside, open again later.
-        openNow.onversionchange = () => { openNow.close(); openNow = null; opened = null; };
+        openNow.onversionchange = () => idb_reset();
         ok(r.result);
       };
       r.onerror = () => fail(r.error);
@@ -108,6 +108,13 @@ function db() {
     opened.catch(() => { opened = null; });
   }
   return opened;
+}
+// Forgets the connection, so the next call opens a new one: after an
+// error, the old one may be dead (WebKit loses it in background tabs).
+export function idb_reset() {
+  try { if (openNow) openNow.close(); } catch (_) {}
+  openNow = null;
+  opened = null;
 }
 export async function idb_scene() {
   const d = await db();
@@ -215,6 +222,7 @@ export function page_hidden() {
 }
 "#)]
 extern "C" {
+    fn idb_reset();
     #[wasm_bindgen(catch)]
     async fn idb_scene() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
@@ -611,7 +619,25 @@ impl Autosave {
     }
 
     /// Stores a save, or clears the stores when there is nothing to keep.
+    /// An error other than a full disk may be passing (a lost connection):
+    /// it is tried once more on a new connection.
     async fn write(&self, save: Option<&Bytes>, leaving: bool, issued: u64) -> Result<(), Trouble> {
+        match self.write_once(save, leaving, issued).await {
+            Err(Trouble::Unavailable) if !leaving => {
+                log::info!("autosave: trying again on a new connection");
+                idb_reset();
+                self.write_once(save, leaving, issued).await
+            }
+            result => result,
+        }
+    }
+
+    async fn write_once(
+        &self,
+        save: Option<&Bytes>,
+        leaving: bool,
+        issued: u64,
+    ) -> Result<(), Trouble> {
         let Some(save) = save else {
             idb_clear().await.map_err(trouble)?;
             self.state.borrow_mut().stored_blob = None;
