@@ -26,6 +26,22 @@ pub struct MeshTr {
     pub threshold: &'static str,
     /// Notice after clay was made from the reference.
     pub made_from_reference: &'static str,
+    /// Splitting every triangle into four.
+    pub subdivide: &'static str,
+    /// Notice after a subdivision.
+    pub subdivided: &'static str,
+    /// Notice when the clay already has too many vertices to subdivide.
+    pub too_dense: &'static str,
+    /// The stroke stabiliser slider: the brush trails the pointer.
+    pub stabiliser: &'static str,
+    /// The stabiliser's value when it is at zero.
+    pub off: &'static str,
+    /// Heading of the brush falloff choices.
+    pub falloff: &'static str,
+    /// Falloff shapes: a soft dome, a cone, and a narrow peak.
+    pub falloff_smooth: &'static str,
+    pub falloff_linear: &'static str,
+    pub falloff_sharp: &'static str,
 }
 
 pub const JA: MeshTr = MeshTr {
@@ -41,6 +57,15 @@ pub const JA: MeshTr = MeshTr {
     from_reference: "モチーフから粘土を作る",
     threshold: "しきい値",
     made_from_reference: "モチーフから粘土を作りました。元に戻すと前の塑像に戻ります",
+    subdivide: "細分化",
+    subdivided: "細分化しました。元に戻すと前のメッシュに戻ります",
+    too_dense: "頂点が多すぎるため、これ以上細分化できません",
+    stabiliser: "手ぶれ補正",
+    off: "オフ",
+    falloff: "減衰",
+    falloff_smooth: "なめらか",
+    falloff_linear: "直線",
+    falloff_sharp: "鋭い",
 };
 
 pub const EN: MeshTr = MeshTr {
@@ -56,6 +81,15 @@ pub const EN: MeshTr = MeshTr {
     from_reference: "clay from reference",
     threshold: "threshold",
     made_from_reference: "clay made from the reference; undo brings the previous sculpt back",
+    subdivide: "subdivide",
+    subdivided: "subdivided; undo brings the previous mesh back",
+    too_dense: "too many vertices to subdivide again",
+    stabiliser: "stabiliser",
+    off: "off",
+    falloff: "falloff",
+    falloff_smooth: "smooth",
+    falloff_linear: "linear",
+    falloff_sharp: "sharp",
 };
 
 pub const FR: MeshTr = MeshTr {
@@ -71,4 +105,13 @@ pub const FR: MeshTr = MeshTr {
     from_reference: "argile depuis la référence",
     threshold: "seuil",
     made_from_reference: "argile tirée de la référence ; annuler rétablit la sculpture précédente",
+    subdivide: "subdiviser",
+    subdivided: "subdivisé ; annuler rétablit le maillage précédent",
+    too_dense: "trop de sommets pour subdiviser encore",
+    stabiliser: "stabilisateur",
+    off: "aucun",
+    falloff: "atténuation",
+    falloff_smooth: "douce",
+    falloff_linear: "linéaire",
+    falloff_sharp: "vive",
 };

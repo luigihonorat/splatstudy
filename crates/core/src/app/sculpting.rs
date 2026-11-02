@@ -5,19 +5,29 @@
 use std::sync::Arc;
 
 use egui::{Key, Pos2, Rect, Stroke};
-use glam::{Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 
 use super::{App, Drag, Request, SCULPT};
+use crate::camera::OrbitCamera;
 use crate::input::{FilePurpose, PointerKind};
 use crate::meshio::{self, Soup};
 use crate::reference::Content;
 use crate::render::clay::GpuMesh;
-use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Hit, Mesh};
+use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Falloff, Hit, Mesh, subdivide};
 use crate::ui::{self, i18n::Tr, menu, theme};
 use crate::voxel;
 
 /// Dabs are placed every this fraction of the tool radius along a stroke.
 const SPACING: f32 = 0.15;
+
+/// Sides of the brush outline drawn on the clay.
+const CURSOR_SEGMENTS: usize = 48;
+/// Length of the normal tick at the centre of that outline, as a share of
+/// the brush radius.
+const TICK: f32 = 0.3;
+
+/// The stabiliser's longest string, in points.
+const MAX_STABILISER: f32 = 120.0;
 
 /// Each brush with its shortcut and starting strength, in `Brush::ALL` order.
 /// (F frames the sculpt, so flatten takes T, for trim.)
@@ -43,15 +53,28 @@ pub(super) fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
     }
 }
 
+fn falloff_name(tr: &Tr, falloff: Falloff) -> &'static str {
+    match falloff {
+        Falloff::Smooth => tr.mesh.falloff_smooth,
+        Falloff::Linear => tr.mesh.falloff_linear,
+        Falloff::Sharp => tr.mesh.falloff_sharp,
+    }
+}
+
 pub(super) struct ToolSettings {
     pub(super) tool: Brush,
     /// Radius on screen, in points.
     pub(super) radius: f32,
     /// Strength per tool at full pen pressure, 0..1, in `Brush::ALL` order.
     pub(super) strength: [f32; 7],
+    /// How each tool fades towards its rim, in `Brush::ALL` order.
+    pub(super) falloff: [Falloff; 7],
     pub(super) symmetry: bool,
     /// Pen pressure scales the size as well as the strength.
     pub(super) pressure_size: bool,
+    /// Stroke stabiliser: how far the brush trails the pointer, in
+    /// points; 0 is off.
+    pub(super) stabiliser: f32,
     /// Remesh resolution: cells across the clay's longest side.
     pub(super) resolution: f32,
     /// Clay from splats: the density that counts as material, 0..1.
@@ -65,6 +88,7 @@ pub(super) struct ToolSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pending {
     Remesh,
+    Subdivide,
     FromReference,
 }
 
@@ -74,14 +98,20 @@ impl Default for ToolSettings {
             tool: Brush::Clay,
             radius: 48.0,
             strength: BRUSHES.map(|(_, _, strength)| strength),
+            falloff: [Falloff::Smooth; 7],
             symmetry: true,
             pressure_size: false,
+            stabiliser: 0.0,
             resolution: voxel::DEFAULT_RESOLUTION as f32,
             threshold: voxel::DEFAULT_THRESHOLD,
             pending: None,
         }
     }
 }
+
+/// Subdivision stops short of this many vertices: beyond it, strokes in
+/// the browser stop following the pen smoothly.
+const MAX_SUBDIVIDED_VERTICES: usize = 1_500_000;
 
 /// Imported meshes with fewer vertices are too coarse to sculpt: remeshed.
 const MIN_IMPORT_VERTICES: usize = 5_000;
@@ -109,6 +139,57 @@ fn needs_remesh(soup: &Soup) -> bool {
     lengths.sort_by(f32::total_cmp);
     let at = |q: f32| lengths[((lengths.len() - 1) as f32 * q) as usize];
     at(0.95) > at(0.05) * MAX_EDGE_SPREAD
+}
+
+/// Where a brush on a string `length` long ends up when the pointer moves
+/// to `pointer`: it stays put while the string is slack, and is pulled
+/// straight towards the pointer once it is taut. The pressure moves the
+/// same share of the way. A zero length gives the pointer itself.
+fn follow(
+    brush: Pos2,
+    brush_pressure: f32,
+    pointer: Pos2,
+    pressure: f32,
+    length: f32,
+) -> (Pos2, f32) {
+    let gap = brush.distance(pointer);
+    if length <= 0.0 {
+        return (pointer, pressure);
+    }
+    if gap <= length {
+        return (brush, brush_pressure);
+    }
+    let t = (gap - length) / gap;
+    (
+        brush.lerp(pointer, t),
+        brush_pressure + (pressure - brush_pressure) * t,
+    )
+}
+
+/// Walks a stroke's brush from `from` to `to`, calling `dab` every
+/// `spacing` points along the way with the pressure interpolated there.
+/// `carry` is how far the brush went since the last dab; returns it for
+/// the next step.
+fn walk(
+    from: Pos2,
+    from_pressure: f32,
+    carry: f32,
+    to: Pos2,
+    pressure: f32,
+    spacing: f32,
+    mut dab: impl FnMut(Pos2, f32),
+) -> f32 {
+    let length = from.distance(to);
+    let mut along = spacing - carry;
+    while along <= length {
+        let t = along / length.max(1e-6);
+        dab(
+            from.lerp(to, t),
+            from_pressure + (pressure - from_pressure) * t,
+        );
+        along += spacing;
+    }
+    length - (along - spacing)
 }
 
 /// `Brush::ALL` lists the brushes in declaration order.
@@ -140,6 +221,9 @@ impl App {
             }
             if pressed(M::SHIFT, Key::R) {
                 self.ask_remesh();
+            }
+            if pressed(M::SHIFT, Key::D) {
+                self.ask_subdivide();
             }
         }
         if pressed(M::NONE, Key::OpenBracket) {
@@ -239,6 +323,7 @@ impl App {
     fn run_pending(&mut self) {
         match self.tool.pending.take() {
             Some(Pending::Remesh) => self.remesh(),
+            Some(Pending::Subdivide) => self.subdivide(),
             Some(Pending::FromReference) => self.clay_from_reference(),
             None => {}
         }
@@ -256,6 +341,28 @@ impl App {
             }
             None => self.notify(tr.mesh.nothing_left),
         }
+    }
+
+    /// Subdivides the clay at the next frame, saying so first; or says
+    /// why not, if the result would be too heavy to sculpt.
+    fn ask_subdivide(&mut self) {
+        let m = self.lang.tr().mesh;
+        if subdivide::subdivided_len(&self.sculpt.mesh) > MAX_SUBDIVIDED_VERTICES {
+            if self.playback.is_none() {
+                self.notify(m.too_dense);
+            }
+        } else {
+            self.ask(Pending::Subdivide, m.subdivide);
+        }
+    }
+
+    /// Splits every triangle of the clay into four.
+    pub(super) fn subdivide(&mut self) {
+        let mesh = subdivide::subdivide(&self.sculpt.mesh);
+        let count = mesh.positions.len();
+        self.replace_clay(mesh);
+        let m = self.lang.tr().mesh;
+        self.notify(format!("{} ({count} {})", m.subdivided, m.vertices));
     }
 
     /// Mesh formats in the file → export menu. Always the live clay, even
@@ -291,6 +398,9 @@ impl App {
         }
         if menu::action(ui, live, tr.mesh.remesh, "Shift+R") {
             self.ask_remesh();
+        }
+        if menu::action(ui, live, tr.mesh.subdivide, "Shift+D") {
+            self.ask_subdivide();
         }
     }
 
@@ -331,6 +441,35 @@ impl App {
         ui::slider(ui, tr.strength, strength, 0.0..=1.0, |v| {
             format!("{:.0}%", v * 100.0)
         });
+        let off = tr.mesh.off;
+        let stabiliser = &mut self.tool.stabiliser;
+        ui::slider(
+            ui,
+            tr.mesh.stabiliser,
+            stabiliser,
+            0.0..=MAX_STABILISER,
+            |v| {
+                if v < 0.5 {
+                    off.to_owned()
+                } else {
+                    format!("{v:.0}")
+                }
+            },
+        );
+        // Below half a point it is off, as the slider says.
+        if *stabiliser < 0.5 {
+            *stabiliser = 0.0;
+        }
+        ui::section(ui, tr.mesh.falloff);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            let chosen = &mut self.tool.falloff[tool_index(self.tool.tool)];
+            for falloff in Falloff::ALL {
+                if ui::choice(ui, falloff_name(tr, falloff), *chosen == falloff).clicked() {
+                    *chosen = falloff;
+                }
+            }
+        });
         ui.add_space(10.0);
         if ui::choice(ui, tr.symmetry, self.tool.symmetry).clicked() {
             self.tool.symmetry = !self.tool.symmetry;
@@ -350,6 +489,9 @@ impl App {
         );
         if ui::choice(ui, tr.mesh.remesh, false).clicked() {
             self.ask_remesh();
+        }
+        if ui::choice(ui, tr.mesh.subdivide, false).clicked() {
+            self.ask_subdivide();
         }
         // Clay from the reference: the threshold only matters for splats.
         let loaded = self.has_reference();
@@ -419,6 +561,8 @@ impl App {
         if self.tool.tool == Brush::Move {
             let (right, up) = camera.right_up();
             self.sculpt
+                .set_falloff(self.tool.falloff[tool_index(Brush::Move)]);
+            self.sculpt
                 .grab(hit.point, self.tool.radius * scale, self.tool.symmetry);
             self.drags[SCULPT] = Some(Drag::Grab {
                 start: pos,
@@ -437,8 +581,10 @@ impl App {
         }
     }
 
-    /// Continues a clay or smooth stroke to `to`, placing dabs at even
-    /// spacing and interpolating the pressure between samples.
+    /// Continues a clay or smooth stroke towards the pointer at `to`. With
+    /// the stabiliser on, the brush trails the pointer on a string and
+    /// moves only when the pointer pulls it; dabs follow the brush at even
+    /// spacing, with the pressure interpolated between samples.
     pub(super) fn stroke_to(&mut self, rect: Rect, to: Pos2, pressure: f32) {
         let Some(Drag::Stroke {
             last,
@@ -448,23 +594,30 @@ impl App {
         else {
             return;
         };
+        let (to, pressure) = follow(last, last_pressure, to, pressure, self.tool.stabiliser);
         let spacing = (self.tool.radius * SPACING).max(1.0);
-        let length = last.distance(to);
-        // The way the pointer heads, in the view plane; brushes that follow
+        // The way the brush heads, in the view plane; brushes that follow
         // the stroke take its part along the surface.
         let (right, up) = self.cameras[SCULPT].right_up();
         let d = to - last;
         let direction = (right * d.x - up * d.y).normalize_or_zero();
-        let mut along = spacing - carry;
-        while along <= length {
-            let t = along / length.max(1e-6);
-            if let Some(hit) = self.pick(rect, last.lerp(to, t)) {
-                let pressure = last_pressure + (pressure - last_pressure) * t;
+        let mut dabs = Vec::new();
+        let carry = walk(
+            last,
+            last_pressure,
+            carry,
+            to,
+            pressure,
+            spacing,
+            |pos, p| {
+                dabs.push((pos, p));
+            },
+        );
+        for (pos, pressure) in dabs {
+            if let Some(hit) = self.pick(rect, pos) {
                 self.dab_at(rect, pressure, hit, direction);
             }
-            along += spacing;
         }
-        let carry = length - (along - spacing);
         self.drags[SCULPT] = Some(Drag::Stroke {
             last: to,
             pressure,
@@ -486,6 +639,7 @@ impl App {
             1.0
         };
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
+        self.sculpt.set_falloff(self.tool.falloff[tool_index(tool)]);
         self.sculpt.dab(Dab {
             brush: tool,
             centre: hit.point,
@@ -507,9 +661,12 @@ impl App {
         self.sculpt.raycast(origin, dir)
     }
 
-    /// The tool outline around the pointer, while it is over the clay view.
+    /// The tool outline, while the pointer is over the clay view: a circle
+    /// lying on the clay under the brush, or a circle on the screen where
+    /// there is no clay. In a stabilised stroke the brush trails the
+    /// pointer, and a thin line joins them.
     pub(super) fn tool_cursor(&self, ui: &egui::Ui, rect: Rect) {
-        let Some(pos) = ui
+        let Some(screen) = ui
             .input(|i| i.pointer.hover_pos())
             .filter(|p| rect.contains(*p))
         else {
@@ -519,8 +676,191 @@ impl App {
             return;
         }
         let ink = theme::VIEW_INK.gamma_multiply(0.6);
+        let line = Stroke::new(1.0, ink);
         let painter = ui.painter().with_clip_rect(rect);
-        painter.circle_stroke(pos, self.tool.radius, Stroke::new(1.0, ink));
-        painter.circle_filled(pos, 1.5, ink);
+        // Strokes work in the rendered view's points; the mirror view shows
+        // it flipped, and `view_pos` maps either way.
+        let pointer = self.view_pos(rect, screen);
+        let brush = match self.drags[SCULPT] {
+            Some(Drag::Stroke { last, .. }) if self.tool.stabiliser > 0.0 => last,
+            _ => pointer,
+        };
+        let centre = self.view_pos(rect, brush);
+        if brush != pointer {
+            painter.line_segment([centre, screen], Stroke::new(1.0, ink.gamma_multiply(0.5)));
+            painter.circle_filled(screen, 1.5, ink);
+        }
+        let outline = self.pick(rect, brush).and_then(|hit| {
+            let normal = self.sculpt.normal_at(&hit);
+            surface_outline(
+                &self.cameras[SCULPT],
+                rect,
+                hit.point,
+                normal,
+                self.tool.radius,
+            )
+        });
+        match outline {
+            Some((ring, tick)) => {
+                let ring = ring.into_iter().map(|p| self.view_pos(rect, p)).collect();
+                painter.add(egui::Shape::closed_line(ring, line));
+                painter.line_segment(tick.map(|p| self.view_pos(rect, p)), line);
+            }
+            None => {
+                painter.circle_stroke(centre, self.tool.radius, line);
+            }
+        }
+        painter.circle_filled(centre, 1.5, ink);
+    }
+}
+
+/// A point in the world as seen in a view of `rect`, in its points (before
+/// any mirroring); `None` behind the camera.
+fn project(to_clip: Mat4, rect: Rect, p: Vec3) -> Option<Pos2> {
+    let clip = to_clip * p.extend(1.0);
+    if clip.w <= 1e-6 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    Some(egui::pos2(
+        rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
+        rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
+    ))
+}
+
+/// The brush outline on the clay, as `camera` sees it in a view of `rect`:
+/// a circle around `centre` lying square to `normal`, as wide as a circle
+/// of `radius` points facing the camera there would be, and a short tick
+/// along the normal. In the rendered view's points; `None` if part of it
+/// is behind the camera.
+fn surface_outline(
+    camera: &OrbitCamera,
+    rect: Rect,
+    centre: Vec3,
+    normal: Vec3,
+    radius: f32,
+) -> Option<(Vec<Pos2>, [Pos2; 2])> {
+    let radius = radius * camera.world_per_point(centre, rect.height());
+    let (u, v) = normal.any_orthonormal_pair();
+    let to_clip = camera.projection(rect.width() / rect.height()) * camera.view();
+    let ring = (0..CURSOR_SEGMENTS)
+        .map(|i| {
+            let a = i as f32 / CURSOR_SEGMENTS as f32 * std::f32::consts::TAU;
+            project(to_clip, rect, centre + (u * a.cos() + v * a.sin()) * radius)
+        })
+        .collect::<Option<Vec<Pos2>>>()?;
+    let tick = [
+        project(to_clip, rect, centre)?,
+        project(to_clip, rect, centre + normal * radius * TICK)?,
+    ];
+    Some((ring, tick))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view() -> Rect {
+        Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(800.0, 600.0))
+    }
+
+    #[test]
+    fn the_outline_facing_the_camera_is_the_screen_circle() {
+        let camera = OrbitCamera::default();
+        let rect = view();
+        let towards_eye = (camera.eye() - camera.target).normalize();
+        let (ring, tick) =
+            surface_outline(&camera, rect, camera.target, towards_eye, 40.0).unwrap();
+        let centre = rect.center();
+        assert!(tick[0].distance(centre) < 0.01);
+        for p in &ring {
+            let r = p.distance(centre);
+            assert!((r - 40.0).abs() < 0.5, "{r}");
+        }
+        // Seen end on, the tick is a dot.
+        assert!(tick[0].distance(tick[1]) < 1.0);
+    }
+
+    #[test]
+    fn the_outline_lies_on_the_surface_seen_edge_on() {
+        // A surface seen from the side: its outline is a thin ellipse, as
+        // wide as the brush across and flat along the view.
+        let camera = OrbitCamera::default();
+        let rect = view();
+        let (_, up) = camera.right_up();
+        let (ring, tick) = surface_outline(&camera, rect, camera.target, up, 40.0).unwrap();
+        let (mut lo, mut hi) = (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN));
+        for p in &ring {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+        }
+        assert!((hi.x - lo.x - 80.0).abs() < 1.0, "{lo:?} {hi:?}");
+        assert!(hi.y - lo.y < 4.0, "{lo:?} {hi:?}");
+        // The tick points up the screen, a share of the radius long.
+        let rise = tick[0].y - tick[1].y;
+        assert!((rise - 40.0 * TICK).abs() < 1.0, "{rise}");
+    }
+
+    #[test]
+    fn the_stabiliser_trails_the_pointer_and_pressure_follows() {
+        let brush = Pos2::new(0.0, 0.0);
+        // Off: the brush is the pointer.
+        let to = Pos2::new(3.0, 4.0);
+        assert_eq!(follow(brush, 0.2, to, 0.8, 0.0), (to, 0.8));
+        // Slack: nothing moves.
+        assert_eq!(follow(brush, 0.2, to, 0.8, 10.0), (brush, 0.2));
+        // Taut: pulled along the string to its length behind the pointer,
+        // with the pressure the same share of the way.
+        let to = Pos2::new(30.0, 40.0);
+        let (at, pressure) = follow(brush, 0.2, to, 0.8, 10.0);
+        assert!((at.distance(to) - 10.0).abs() < 1e-4);
+        assert!((at - Pos2::new(24.0, 32.0)).length() < 1e-4);
+        assert!((pressure - 0.68).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_stabilised_shaky_line_comes_out_straight_with_even_dabs() {
+        // A pen drawing along x with a shake of ±3 points across.
+        let samples: Vec<(Pos2, f32)> = (0..400)
+            .map(|i| {
+                let shake = match i {
+                    0 => 0.0,
+                    _ if i % 2 == 0 => 3.0,
+                    _ => -3.0,
+                };
+                (Pos2::new(i as f32, shake), 0.5 + 0.001 * i as f32)
+            })
+            .collect();
+        let spacing = 5.0;
+        let mut dabs = Vec::new();
+        let (mut brush, mut pressure) = samples[0];
+        let mut carry = 0.0;
+        for &(pointer, p) in &samples[1..] {
+            let (to, to_pressure) = follow(brush, pressure, pointer, p, 30.0);
+            carry = walk(brush, pressure, carry, to, to_pressure, spacing, |at, p| {
+                dabs.push((at, p));
+            });
+            (brush, pressure) = (to, to_pressure);
+        }
+        assert!(dabs.len() > 50);
+        // The shake mostly stays out: after the start, dabs keep within
+        // a fraction of it of the line.
+        for &(at, _) in &dabs[10..] {
+            assert!(at.y.abs() < 0.6, "{at:?}");
+        }
+        // Even spacing along the path, and the pressure rises with it.
+        for pair in dabs[10..].windows(2) {
+            let gap = pair[0].0.distance(pair[1].0);
+            assert!((gap - spacing).abs() < 0.5, "{gap}");
+            assert!(pair[1].1 >= pair[0].1);
+        }
+        // Without the stabiliser every bit of the shake goes into the path.
+        let mut raw = Vec::new();
+        let mut carry = 0.0;
+        for pair in samples.windows(2) {
+            let ((a, pa), (b, pb)) = (pair[0], pair[1]);
+            carry = walk(a, pa, carry, b, pb, spacing, |at, _| raw.push(at));
+        }
+        assert!(raw.iter().any(|at| at.y.abs() > 2.0));
     }
 }
