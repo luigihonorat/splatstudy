@@ -591,6 +591,12 @@ impl App {
         );
     }
 
+    /// The splat reference was drawn into `slot` at least once.
+    #[cfg(test)]
+    pub(super) fn splats_drawn_into(&self, slot: Slot) -> bool {
+        matches!(&self.reference.drawn, Some(Drawn::Splats(s)) if s.was_prepared(slot))
+    }
+
     /// A reference is loaded.
     pub(super) fn has_reference(&self) -> bool {
         self.reference.current.is_some()

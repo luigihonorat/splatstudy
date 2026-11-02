@@ -375,6 +375,12 @@ impl SplatPass {
         self.centres.is_empty()
     }
 
+    /// The slot was prepared at least once.
+    #[cfg(test)]
+    pub(crate) fn was_prepared(&self, slot: Slot) -> bool {
+        self.slots[slot.index()].borrow().is_some()
+    }
+
     /// Where the splats are sorted.
     pub fn sorts_on(&self) -> SortOn {
         if self.gpu_sort.is_some() {

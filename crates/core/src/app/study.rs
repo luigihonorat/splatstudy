@@ -1321,6 +1321,48 @@ mod tests {
         assert!((turned - smaller).abs() < 0.06, "{turned}");
     }
 
+    /// A `.splat` file of a few small grey splats around the origin.
+    fn dots_splat() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for i in 0..8 {
+            let x = i as f32 * 0.1 - 0.35;
+            for v in [x, 0.0, 0.0, 0.05, 0.05, 0.05] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[160, 160, 160, 255, 255, 128, 128, 128]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_hidden_view_draws_no_reference() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.study.ghost = true;
+        for (layout, sculpt, reference) in [
+            (Layout::Sculpt, true, false),
+            (Layout::Reference, false, true),
+            (Layout::Both, true, true),
+        ] {
+            h.app.study.layout = layout;
+            // A fresh reference, never drawn into any slot yet.
+            h.app.load_reference("dots.splat", dots_splat().into());
+            h.frames(2);
+            assert_eq!(
+                h.app.splats_drawn_into(Slot::SculptView),
+                sculpt,
+                "the ghost, {layout:?}"
+            );
+            assert_eq!(
+                h.app.splats_drawn_into(Slot::ReferenceView),
+                reference,
+                "the reference, {layout:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_measure_takes_a_drag_in_each_view_and_esc_clears_it() {
         let Some(mut h) = Harness::new() else {

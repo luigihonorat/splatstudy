@@ -416,6 +416,9 @@ impl App {
     }
 
     fn render_views(&self, encoder: &mut wgpu::CommandEncoder) {
+        // A hidden view's target is 1×1 and not seen: the reference isn't
+        // drawn (nor sorted) into it.
+        let [sculpt_shown, reference_shown] = self.view_rects.map(views::shown);
         let sculpt = &self.views[SCULPT];
         self.clay.prepare(
             &self.queue,
@@ -431,10 +434,14 @@ impl App {
                 .as_ref()
                 .map_or(&self.gpu_mesh, |p| &p.gpu_mesh);
             self.clay.draw(&mut pass, Slot::SculptView, mesh);
-            self.draw_ghost(&mut pass);
+            if sculpt_shown {
+                self.draw_ghost(&mut pass);
+            }
         }
         let mut pass = self.views[REFERENCE].begin_pass(encoder, theme::VIEW_BG);
-        self.draw_reference(&mut pass);
+        if reference_shown {
+            self.draw_reference(&mut pass);
+        }
     }
 
     fn fit_views(&mut self, ppp: f32) -> bool {
