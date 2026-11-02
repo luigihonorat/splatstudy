@@ -204,12 +204,12 @@ pub fn chunks(data: &[u8]) -> Result<Vec<Chunk>, ReadError> {
     if r.take(MAGIC.len()).ok() != Some(&MAGIC[..]) {
         return Err(ReadError::Invalid {
             offset: 0,
-            what: "not a splatstudy scene",
+            what: "not a SplatStudy scene",
         });
     }
     let version = r.u32()?;
     if version == 0 || version > VERSION {
-        return Err(r.invalid("a scene from a newer splatstudy"));
+        return Err(r.invalid("a scene from a newer SplatStudy"));
     }
     let mut chunks = Vec::new();
     while !r.is_empty() {

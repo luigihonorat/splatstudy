@@ -1,10 +1,10 @@
-# splatstudy
+# SplatStudy
 
 3D の参照を横に置いて塑像する、デジタル彫刻ツール。
 
 画面は左右に分かれています。左が自分の塑像、右がモチーフ（参照）です。モチーフにはガウシアンスプラットがいちばん向いていますが、3D スキャン、3D メッシュ、画像（PureRef のような画像パネル）も使えます。
 
-美術予備校では、石膏像や人物モデルを前にして粘土で塑像を学びます。splatstudy は、その学び方を予備校に通えない人にも届けるためのツールです。
+美術予備校では、石膏像や人物モデルを前にして粘土で塑像を学びます。SplatStudy は、その学び方を予備校に通えない人にも届けるためのツールです。
 
 > **Built with Claude: Japan 2026** の参加作品です（2026年11月2日〜8日）。コードはすべてこの期間に Claude Code と書いています。
 
@@ -50,4 +50,4 @@ GPL-3.0-or-later に、アプリストアで配布するための追加許可（
 
 ---
 
-**English.** splatstudy is a digital sculpting tool for studying from 3D references: your sculpture on the left, the reference on the right (Gaussian splats, 3D scans, meshes or images). It brings the Japanese art-prep-school practice of sculpting from plaster casts and live models to anyone with a browser. Made for Built with Claude: Japan 2026. Licence: GPL-3.0-or-later with an app store exception.
+**English.** SplatStudy is a digital sculpting tool for studying from 3D references: your sculpture on the left, the reference on the right (Gaussian splats, 3D scans, meshes or images). It brings the Japanese art-prep-school practice of sculpting from plaster casts and live models to anyone with a browser. Made for Built with Claude: Japan 2026. Licence: GPL-3.0-or-later with an app store exception.

@@ -205,7 +205,7 @@ impl Mp4 {
         b.u32(0x0048_0000).u32(0x0048_0000); // 72 dpi
         b.u32(0).u16(1); // reserved, one frame per sample
         let mut name = [0u8; 32];
-        let label = b"splatstudy";
+        let label = b"SplatStudy";
         name[0] = label.len() as u8;
         name[1..=label.len()].copy_from_slice(label);
         b.raw(&name);

@@ -30,7 +30,7 @@ fn main() {
         log::error!("{err}");
         let _ = sdl3::messagebox::show_simple_message_box(
             sdl3::messagebox::MessageBoxFlag::ERROR,
-            "splatstudy",
+            "SplatStudy",
             &err,
             None,
         );
@@ -46,7 +46,7 @@ fn run() -> Result<(), String> {
     let sdl = sdl3::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
     let window = video
-        .window("splatstudy", 1440, 900)
+        .window("SplatStudy", 1440, 900)
         .position_centered()
         .resizable()
         .high_pixel_density()

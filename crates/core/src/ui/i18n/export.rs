@@ -70,7 +70,7 @@ pub const JA: ExportTr = ExportTr {
     images_written: "画像を保存しました",
     failed: "書き出せませんでした",
     nothing_recorded: "まだ記録がありません",
-    made_with: "splatstudy で制作",
+    made_with: "SplatStudy で制作",
 };
 
 pub const EN: ExportTr = ExportTr {
@@ -101,7 +101,7 @@ pub const EN: ExportTr = ExportTr {
     images_written: "images saved",
     failed: "the export failed",
     nothing_recorded: "nothing recorded yet",
-    made_with: "made with splatstudy",
+    made_with: "made with SplatStudy",
 };
 
 pub const FR: ExportTr = ExportTr {
@@ -132,5 +132,5 @@ pub const FR: ExportTr = ExportTr {
     images_written: "images enregistrées",
     failed: "l'export a échoué",
     nothing_recorded: "rien n'est encore enregistré",
-    made_with: "fait avec splatstudy",
+    made_with: "fait avec SplatStudy",
 };

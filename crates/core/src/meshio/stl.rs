@@ -12,7 +12,7 @@ const HEADER: usize = 80;
 pub fn write(mesh: &Mesh) -> Vec<u8> {
     let mut w = Writer::new();
     let mut header = [b' '; HEADER];
-    let title = b"binary stl made with splatstudy";
+    let title = b"binary STL made with SplatStudy";
     header[..title.len()].copy_from_slice(title);
     w.raw(&header).u32(mesh.triangles.len() as u32);
     for t in &mesh.triangles {

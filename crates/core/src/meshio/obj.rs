@@ -9,7 +9,7 @@ use crate::sculpt::Mesh;
 /// The clay as OBJ: positions, smooth normals and triangles.
 pub fn write(mesh: &Mesh) -> Vec<u8> {
     let mut out = String::with_capacity(mesh.positions.len() * 80 + mesh.triangles.len() * 40);
-    out.push_str("# made with splatstudy\n");
+    out.push_str("# made with SplatStudy\n");
     // `{}` prints the shortest text that reads back as the same f32.
     for p in &mesh.positions {
         let _ = writeln!(out, "v {} {} {}", p.x, p.y, p.z);

@@ -130,7 +130,7 @@ impl App {
                 ui.label(tr.about_text);
                 ui.label(
                     RichText::new(format!(
-                        "splatstudy {} · GPL-3.0-or-later",
+                        "SplatStudy {} · GPL-3.0-or-later",
                         env!("CARGO_PKG_VERSION")
                     ))
                     .color(muted),
