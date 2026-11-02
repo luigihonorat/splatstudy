@@ -185,7 +185,7 @@ impl App {
         }
         // Empty reference view: say what can go there.
         let reference = rects[REFERENCE];
-        if shown(reference) {
+        if shown(reference) && !self.has_reference() {
             painter.with_clip_rect(reference).text(
                 reference.center(),
                 Align2::CENTER_CENTER,
