@@ -137,6 +137,16 @@ impl Splats {
     }
 }
 
+/// Mesh vertices must all be finite: one NaN would spread through the
+/// clay made from them, and break fitting. `Err` names the format.
+pub(crate) fn finite_vertices(positions: &[Vec3], format: &'static str) -> Result<(), LoadError> {
+    if positions.iter().all(|p| p.is_finite()) {
+        Ok(())
+    } else {
+        Err(LoadError::Invalid(format))
+    }
+}
+
 /// Points as small round splats, sized so a scanned surface reads as
 /// closed: about half the spacing of points spread over the bounding box's
 /// faces.

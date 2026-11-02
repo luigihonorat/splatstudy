@@ -13,7 +13,7 @@
 
 use glam::Vec3;
 
-use super::{LoadError, point_cloud, sh0_to_u8, sigmoid, unit_quat, unit_to_u8};
+use super::{LoadError, finite_vertices, point_cloud, sh0_to_u8, sigmoid, unit_quat, unit_to_u8};
 use crate::io::Reader;
 use crate::reference::{Content, RefMesh, Splats};
 
@@ -267,6 +267,11 @@ pub fn load_ply(bytes: &[u8]) -> Result<Content, LoadError> {
             big: format == Format::Big,
         },
     };
+    // Faces are checked against the vertices read so far: a second vertex
+    // element would change what they point at.
+    if elements.iter().filter(|e| e.name == "vertex").count() > 1 {
+        return Err(LoadError::Invalid("PLY with two vertex elements"));
+    }
     let mut vertices = Vertices::default();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
     for element in &elements {
@@ -474,6 +479,10 @@ fn build(v: Vertices, triangles: Vec<[u32; 3]>) -> Result<Content, LoadError> {
         ));
     }
     if !triangles.is_empty() {
+        if triangles.iter().flatten().any(|&i| i as usize >= n) {
+            return Err(LoadError::Invalid("PLY face refers to a missing vertex"));
+        }
+        finite_vertices(&positions, "PLY has numbers that aren't finite")?;
         return Ok(Content::Mesh(RefMesh {
             positions,
             triangles,
@@ -637,5 +646,29 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert!(load_ply(b"not a ply\nend_header\n").is_err());
+    }
+
+    #[test]
+    fn faces_cannot_point_past_the_vertices() {
+        // Faces checked against 100 dummy vertices, then only 3 real ones.
+        let mut file = String::from(
+            "ply\nformat ascii 1.0\nelement vertex 100\nproperty float q\n\
+             element face 1\nproperty list uchar int vertex_indices\n\
+             element vertex 3\nproperty float x\nproperty float y\nproperty float z\n\
+             end_header\n",
+        );
+        file += &"0\n".repeat(100);
+        file += "3 0 50 99\n0 0 0\n1 0 0\n0 1 0\n";
+        assert!(load_ply(file.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn meshes_with_numbers_that_are_not_finite_are_errors() {
+        let file = "ply\nformat ascii 1.0\nelement vertex 3\n\
+                    property float x\nproperty float y\nproperty float z\n\
+                    element face 1\nproperty list uchar int vertex_indices\nend_header\n\
+                    0 0 0\nnan 0 0\n0 1 0\n3 0 1 2\n";
+        assert!(load_ply(file.as_bytes()).is_err());
+        assert!(load_ply(file.replace("nan", "1").as_bytes()).is_ok());
     }
 }

@@ -8,7 +8,7 @@
 
 use glam::Vec3;
 
-use super::{LoadError, unit_to_u8};
+use super::{LoadError, finite_vertices, unit_to_u8};
 use crate::reference::RefMesh;
 
 /// Reads an OBJ mesh. Public so importing a sculpt can use it too.
@@ -77,6 +77,7 @@ pub fn load_obj(bytes: &[u8]) -> Result<RefMesh, LoadError> {
             LoadError::Empty
         });
     }
+    finite_vertices(&positions, "OBJ has numbers that aren't finite")?;
     Ok(RefMesh {
         positions,
         triangles,
@@ -130,6 +131,10 @@ mod tests {
         assert!(load_obj(b"v 0 zero 0\n").is_err());
         assert!(load_obj(b"v 0 0 0\n").is_err(), "no faces");
         assert!(load_obj(&[0xFF, 0x00, 0x13]).is_err());
+        for bad in ["nan", "inf", "-inf", "1e40"] {
+            let obj = format!("v 0 0 0\nv 1 {bad} 0\nv 0 1 0\nf 1 2 3\n");
+            assert!(load_obj(obj.as_bytes()).is_err(), "{bad}");
+        }
         for end in 0..CUBE.len() {
             // Cuts either fail or give part of the cube; never a panic.
             let _ = load_obj(&CUBE.as_bytes()[..end]);

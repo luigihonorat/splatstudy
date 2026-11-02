@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 
-use super::LoadError;
+use super::{LoadError, finite_vertices};
 use crate::io::Reader;
 use crate::reference::RefMesh;
 
@@ -26,9 +26,7 @@ pub fn load_stl(bytes: &[u8]) -> Result<RefMesh, LoadError> {
     if corners.is_empty() {
         return Err(LoadError::Empty);
     }
-    if corners.iter().any(|p| !p.is_finite()) {
-        return Err(LoadError::Invalid("STL has numbers that aren't finite"));
-    }
+    finite_vertices(&corners, "STL has numbers that aren't finite")?;
     let (positions, triangles) = weld(&corners);
     if triangles.is_empty() {
         return Err(LoadError::Empty);
