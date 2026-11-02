@@ -3,7 +3,7 @@
 """Screenshot SplatStudy's web build in headless Edge and print its console.
 
     python scripts/webshot.py URL OUT.png [--size 1400x850] [--wait 6]
-        [--dpr 1] [--js EXPRESSION | --cdp 'Method {json}']...
+        [--dpr 1] [--js EXPRESSION | --cdp 'Method {json}' | --pick FILE]...
         [--downloads DIR]
 
 Starts a separate headless Edge with a fresh profile (never the user's
@@ -11,7 +11,10 @@ browser) on a free DevTools port, so several copies can run at once. It loads
 URL, waits, then runs the steps in the order given: --js evaluates an
 expression in the page (promises are awaited; @FILE reads it from a file),
 --cdp sends a DevTools command such as
-'Input.insertText {"text": "日本"}'. Then it takes the screenshot, prints the
+'Input.insertText {"text": "日本"}', and --pick FILE gives a file to the
+page's <input type=file> as if picked in the dialog (send
+'Page.setInterceptFileChooserDialog {"enabled": true}' first so no dialog
+opens). Then it takes the screenshot, prints the
 page's console, exceptions and step results, and closes Edge. With
 --downloads, files the page downloads are saved into DIR.
 
@@ -113,6 +116,13 @@ def main():
         type=lambda v: ("cdp", v),
         help="send a DevTools command after the wait: 'Method {json params}'",
     )
+    ap.add_argument(
+        "--pick",
+        dest="steps",
+        action="append",
+        type=lambda v: ("file", v),
+        help="give this file to the page's <input type=file>, as if picked",
+    )
     ap.add_argument("--downloads", help="save the page's downloads into this folder")
     args = ap.parse_args()
     width, height = (int(v) for v in args.size.split("x"))
@@ -163,6 +173,15 @@ def main():
                 )
                 value = result.get("result", result) if isinstance(result, dict) else result
                 page.log.append(f"js {js[:60]!r} -> {json.dumps(value, ensure_ascii=False)[:300]}")
+            elif kind == "file":
+                # Puts a file into the page's <input type=file> and fires its
+                # change event, as if picked in the file dialog.
+                root = page.call("DOM.getDocument")["root"]["nodeId"]
+                node = page.call("DOM.querySelector", nodeId=root, selector="input[type=file]")
+                result = page.call(
+                    "DOM.setFileInputFiles", files=[os.path.abspath(step)], nodeId=node["nodeId"]
+                )
+                page.log.append(f"file {step} -> {json.dumps(result)[:300]}")
             else:
                 method, _, params = step.partition(" ")
                 result = page.call(method, **json.loads(params or "{}"))

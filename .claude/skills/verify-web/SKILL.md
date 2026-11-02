@@ -34,7 +34,13 @@ For the browser build:
    - `--cdp 'Method {json}'` sends a DevTools command, e.g.
      `--cdp 'Input.imeSetComposition {"text":"にほん","selectionStart":3,"selectionEnd":3}'`
      then `--cdp 'Input.insertText {"text":"日本"}'` to test Japanese input.
-   - `--downloads DIR` saves what the page downloads.
+   - `--downloads DIR` saves what the page downloads (Ctrl+S on a scene, an
+     OBJ export).
+   - `--pick FILE` answers the app's file picker: send
+     `--cdp 'Page.setInterceptFileChooserDialog {"enabled":true}'` first, then
+     the key or menu that opens it (`Input.dispatchKeyEvent` with
+     `"modifiers":2` for Ctrl+O), then `--pick`. A saved scene re-opened this
+     way is the save/open round trip.
 
 ## Tips
 
