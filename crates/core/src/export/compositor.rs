@@ -12,6 +12,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, TextureId, vec2};
 
 use super::layout::{Layout, Placement, PxRect, place};
+use crate::reference::RefImage;
 use crate::render::{self, VIEW_FORMAT, ViewTarget};
 use crate::ui::{fonts, theme};
 
@@ -52,6 +53,8 @@ pub struct Compositor {
     sculpt_texture: TextureId,
     reference_texture: Option<TextureId>,
     output: ViewTarget,
+    /// A picture shown in the reference half instead of its view.
+    image: Option<egui::TextureHandle>,
     frames: u64,
 }
 
@@ -93,6 +96,7 @@ impl Compositor {
             sculpt_texture,
             reference_texture,
             output: output_target(device, size),
+            image: None,
             frames: 0,
         }
     }
@@ -103,6 +107,20 @@ impl Compositor {
 
     pub fn placement(&self) -> &Placement {
         &self.placement
+    }
+
+    /// Shows `image` in the reference half, fitted inside it, instead of
+    /// the reference view.
+    pub fn set_image(&mut self, image: &RefImage) {
+        let size = [image.size[0] as usize, image.size[1] as usize];
+        if image.rgba.len() != size[0] * size[1] * 4 {
+            return;
+        }
+        let pixels = egui::ColorImage::from_rgba_unmultiplied(size, &image.rgba);
+        self.image = Some(
+            self.ctx
+                .load_texture("reference", pixels, egui::TextureOptions::LINEAR),
+        );
     }
 
     /// Where the sculpt is drawn, before [`compose`](Self::compose).
@@ -154,6 +172,7 @@ impl Compositor {
         };
         let placement = self.placement;
         let textures = (self.sculpt_texture, self.reference_texture);
+        let image = self.image.as_ref().map(|i| (i.id(), i.size_vec2()));
         let ctx = self.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| {
             let painter = ui.painter();
@@ -164,7 +183,15 @@ impl Compositor {
                     painter.image(textures.0, to_points(placement.sculpt), uv, Color32::WHITE);
                     if let (Some(rect), Some(texture)) = (placement.reference, textures.1) {
                         let rect = to_points(rect);
-                        painter.image(texture, rect, uv, Color32::WHITE);
+                        match image {
+                            Some((id, size)) => {
+                                let fitted = fit(size, rect.shrink(CREDIT_MARGIN.x));
+                                painter.image(id, fitted, uv, Color32::WHITE);
+                            }
+                            None => {
+                                painter.image(texture, rect, uv, Color32::WHITE);
+                            }
+                        }
                         if let Some(credit) = credit.filter(|c| !c.is_empty()) {
                             credit_line(painter, rect, credit);
                         }
@@ -212,6 +239,12 @@ impl Compositor {
         }
         buffers
     }
+}
+
+/// The largest rectangle of `size`'s proportions inside `rect`, centred.
+fn fit(size: egui::Vec2, rect: Rect) -> Rect {
+    let scale = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
+    Rect::from_center_size(rect.center(), size * scale)
 }
 
 /// The credit along the bottom of the reference view, clipped to it.

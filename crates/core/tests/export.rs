@@ -195,6 +195,37 @@ fn end_card_shows_the_title_and_the_footer() {
     assert_eq!(frame.inked(0..w / 6, 0..h / 4), 0);
 }
 
+#[test]
+fn a_picture_fills_the_reference_half_keeping_its_proportions() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping export test");
+        return;
+    };
+    let size = Shape::Wide.size(540);
+    let mut compositor = Compositor::new(&device, size, Layout::SideBySide);
+    // Two pixels side by side: red, then blue.
+    compositor.set_image(&splatstudy_core::reference::RefImage {
+        size: [2, 1],
+        rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+    });
+    let frame = compose(
+        &device,
+        &queue,
+        &mut compositor,
+        &Overlay::Views { credit: None },
+    );
+    frame.save("picture.png");
+    let [w, h] = size;
+    let centre = w / 2 + 1 + (w / 2 - 1) / 2;
+    let red = frame.at(centre - 120, h / 2);
+    let blue = frame.at(centre + 120, h / 2);
+    assert!(red[0] > 200 && red[2] < 50, "{red:?}");
+    assert!(blue[2] > 200 && blue[0] < 50, "{blue:?}");
+    // Twice as wide as high: black above and below.
+    assert_eq!(frame.at(centre, 40), VIEW_BG.to_array());
+    assert_eq!(frame.at(centre, h - 40), VIEW_BG.to_array());
+}
+
 mod job {
     use glam::Vec3;
     use splatstudy_core::export::{
@@ -289,6 +320,7 @@ mod job {
             short_side: 90,
             fps: 10,
             speed: 1.0,
+            look: Look::lit(CLAY),
         }
     }
 
@@ -308,8 +340,8 @@ mod job {
             let progress = job.step(
                 gpu,
                 encoder,
-                &mut |_, _, aspect| {
-                    assert!(aspect > 0.0);
+                &mut |_, _, size| {
+                    assert!(size[0] > 0 && size[1] > 0);
                     reference_draws += 1;
                 },
                 &mut writes,

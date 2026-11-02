@@ -15,7 +15,8 @@ use crate::export::{
     EndCard, Gpu, Job, Layout, Progress, Settings, Shape, Sink, Support, VideoEncoder, mp4::Mp4,
     zip::Zip,
 };
-use crate::reference::Credit;
+use crate::reference::{Content, Credit};
+use crate::render::Slot;
 use crate::sculpt::{Mesh, Replay};
 use crate::ui::{self, menu};
 
@@ -182,6 +183,7 @@ impl App {
             short_side,
             fps,
             speed: self.export.speed,
+            look: self.sculpt_look(),
         };
         let replay = Replay::new(self.session_start(), self.sculpt.log().to_vec());
         let reference = self.scene_reference();
@@ -216,7 +218,10 @@ impl App {
             self.export.encoder.as_deref_mut(),
         );
         match job {
-            Ok(job) => {
+            Ok(mut job) => {
+                if let Some(Content::Image(image)) = self.scene_reference().map(|r| &r.content) {
+                    job.set_image(image);
+                }
                 let id = self.renderer.register_native_texture(
                     &self.device,
                     job.preview(),
@@ -246,7 +251,7 @@ impl App {
             job.step(
                 &gpu,
                 encoder.as_deref_mut(),
-                &mut |pass, camera, aspect| self.draw_export_reference(pass, camera, aspect),
+                &mut |pass, camera, size| self.draw_export_reference(pass, camera, size),
                 &mut writes,
             )
         };
@@ -281,18 +286,17 @@ impl App {
         self.export.encoder = encoder;
     }
 
-    // INTEGRATION (references): draws the reference into an exported
-    // frame's reference half, seen from `camera` at `aspect`, into a pass
-    // already cleared to the view's background. It needs the reference
-    // part's renderer to take a slot (`Slot::ExportReference`), a camera
-    // and an aspect, as the clay's does; images go through the same pass
-    // or as an egui image. Until then the half stays black.
+    /// Draws the reference into an exported frame's reference half, seen
+    /// from `camera`, as the reference view shows it (the silhouette
+    /// included). Pictures draw nothing here: the compositor shows them.
     fn draw_export_reference(
         &self,
-        _pass: &mut wgpu::RenderPass<'_>,
-        _camera: &OrbitCamera,
-        _aspect: f32,
+        pass: &mut wgpu::RenderPass<'_>,
+        camera: &OrbitCamera,
+        size: [u32; 2],
     ) {
+        let look = self.reference_look();
+        self.draw_reference_sized(pass, Slot::ExportReference, camera, size, &look);
     }
 
     /// Video items in the file → export menu, after the mesh formats.
@@ -409,6 +413,7 @@ impl App {
         } else {
             VIDEO_FPS
         };
+        let look = self.sculpt_look();
         let e = &mut self.export;
         let settings = Settings {
             layout: e.layout,
@@ -416,6 +421,7 @@ impl App {
             short_side: VIDEO_SHORT_SIDE,
             fps,
             speed: e.speed,
+            look,
         };
         note(
             ui,

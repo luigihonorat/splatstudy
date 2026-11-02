@@ -57,6 +57,8 @@ pub struct Settings {
     pub fps: u32,
     /// Session seconds per video second.
     pub speed: f64,
+    /// How the clay is shaded (lit, or the silhouette).
+    pub look: Look,
 }
 
 impl Settings {
@@ -177,14 +179,20 @@ impl Job {
         self.compositor.size()
     }
 
+    /// Shows a picture in the reference half instead of what
+    /// `draw_reference` draws: pictures are drawn by egui, not in a pass.
+    pub fn set_image(&mut self, image: &crate::reference::RefImage) {
+        self.compositor.set_image(image);
+    }
+
     /// Does what can be done now without waiting. `draw_reference` draws
-    /// the reference into an export pass, seen from the camera given, at
-    /// the aspect given. `writes` gets the images for a folder sink.
+    /// the reference into an export pass, seen from the camera given, into
+    /// a target of the size given in pixels. `writes` gets the images for a folder sink.
     pub fn step<'e>(
         &mut self,
         gpu: &Gpu,
         mut encoder: Option<&mut (dyn VideoEncoder + 'e)>,
-        draw_reference: &mut dyn FnMut(&mut wgpu::RenderPass<'_>, &OrbitCamera, f32),
+        draw_reference: &mut dyn FnMut(&mut wgpu::RenderPass<'_>, &OrbitCamera, [u32; 2]),
         writes: &mut Vec<(String, Vec<u8>)>,
     ) -> Progress {
         // Frames back from the GPU, in order.
@@ -242,7 +250,7 @@ impl Job {
     fn render(
         &mut self,
         gpu: &Gpu,
-        draw_reference: &mut dyn FnMut(&mut wgpu::RenderPass<'_>, &OrbitCamera, f32),
+        draw_reference: &mut dyn FnMut(&mut wgpu::RenderPass<'_>, &OrbitCamera, [u32; 2]),
     ) -> Readback {
         let index = self.next;
         let time = if index < self.timelapse {
@@ -267,7 +275,7 @@ impl Job {
                 Slot::ExportSculpt,
                 &self.cameras[0],
                 view.aspect(),
-                &Look::lit(theme::CLAY),
+                &self.settings.look,
             );
             {
                 let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
@@ -275,7 +283,7 @@ impl Job {
             }
             if let Some(view) = self.compositor.reference_view() {
                 let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
-                draw_reference(&mut pass, &self.cameras[1], view.aspect());
+                draw_reference(&mut pass, &self.cameras[1], view.size);
             }
             Overlay::Views {
                 credit: self.credit.as_deref(),
