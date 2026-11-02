@@ -17,6 +17,7 @@
 //!   mvhd
 //!   trak
 //!     tkhd
+//!     edts > elst
 //!     mdia
 //!       mdhd
 //!       hdlr
@@ -172,6 +173,17 @@ impl Mp4 {
         b.u16(0).u16(0).u16(0).u16(0); // layer, group, volume, reserved
         b.matrix();
         b.u32(w << 16).u32(h << 16);
+        b.close();
+
+        // The whole track from its first frame, at normal speed. Without
+        // B-frames there is nothing to skip, so this only spells out what
+        // players assume anyway; ffmpeg writes the same edit, the layout
+        // players see most.
+        b.open(b"edts");
+        b.full(b"elst", 0, 0);
+        b.u32(1).u32(movie_duration as u32).u32(0); // one edit: duration, media time 0
+        b.u16(1).u16(0); // rate 1.0
+        b.close();
         b.close();
 
         b.open(b"mdia");
@@ -490,6 +502,17 @@ pub(crate) mod tests {
         assert_eq!(&inner[0].kind, b"avcC");
         assert_eq!(inner[0].body.len(), 11);
         assert_eq!(be32(&d, entry[0].body.start + 24) >> 16, 1920);
+        // The track: header, edit list, media.
+        let trak = path(&d, &[b"moov", b"trak"]);
+        let parts: Vec<[u8; 4]> = children(&d, trak).iter().map(|b| b.kind).collect();
+        assert_eq!(parts, [*b"tkhd", *b"edts", *b"mdia"]);
+        // One edit: the whole movie (70 frames at 30 fps, in ms), from
+        // media time 0, at rate 1.
+        let elst = path(&d, &[b"moov", b"trak", b"edts", b"elst"]);
+        assert_eq!(be32(&d, elst.start + 4), 1);
+        assert_eq!(be32(&d, elst.start + 8), 2333);
+        assert_eq!(be32(&d, elst.start + 12), 0);
+        assert_eq!(be32(&d, elst.start + 16), 0x0001_0000);
     }
 
     #[test]
