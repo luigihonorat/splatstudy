@@ -298,6 +298,30 @@ fn a_restored_clay_is_kept_even_with_no_history() {
 }
 
 #[test]
+fn an_offered_restore_keeps_the_autosave_until_there_is_new_work() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping autosave test");
+        return;
+    };
+    let mut shell = Shell::new(&gpu);
+    shell.app.offer_restore();
+    shell.frame();
+    // A study aid changes the revision, but saving the fresh sphere
+    // would drop the offered session: not ready.
+    shell.app.apply_url_options("view=grid");
+    assert!(!shell.app.autosave_ready(false));
+    assert!(!shell.app.autosave_ready(true), "not even when leaving");
+    assert!(!shell.app.take_restore_request(), "not asked yet");
+    // New work is worth more than the offer: it is saved, and the offer
+    // goes.
+    shell.stroke();
+    assert!(shell.app.autosave_ready(false));
+    assert!(shell.app.autosave_bytes().is_some());
+    shell.ctrl(Key::N);
+    assert!(shell.app.autosave_ready(false), "the offer is gone");
+}
+
+#[test]
 fn a_scene_file_restores_too_and_a_new_scene_clears() {
     let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter; skipping autosave test");

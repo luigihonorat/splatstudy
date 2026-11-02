@@ -200,6 +200,7 @@ fn run() -> Result<(), String> {
             ppp,
         );
         queue.present(texture);
+        autosave.frame_drawn();
         let now_preferences = app.preferences();
         if now_preferences != preferences {
             config::save_preferences(&now_preferences);

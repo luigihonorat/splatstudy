@@ -140,14 +140,11 @@ async fn run() -> Result<(), JsValue> {
     if let Some(tag) = query_value(&search, "lang") {
         app.apply_preferences(&format!("lang={tag}"));
     }
-    // The last session first (unless `?fresh`); a sample in the URL
-    // doesn't replace the reference it came back with.
-    let options = storage::restore(&mut app, &search).await;
-    app.apply_url_options(&options);
-    app.set_first_run(storage::first_run());
+    // The last session first (unless `?fresh`): its scene now, its
+    // reference, which can take seconds to read, after a first frame.
+    let start = storage::begin_restore(&search).await;
     let preferences = app.preferences();
-
-    let shell = Rc::new(RefCell::new(Shell {
+    let mut shell = Shell {
         app,
         surface,
         config,
@@ -158,7 +155,24 @@ async fn run() -> Result<(), JsValue> {
         redraw_at: None,
         cursor: CursorIcon::Default,
         preferences,
-    }));
+    };
+    let early = shell.frame(now());
+    // A sample in the URL doesn't replace the reference the session came
+    // back with.
+    let options = match start {
+        storage::Start::Scene(scene) => {
+            storage::finish_restore(&mut shell.app, &scene, &search).await
+        }
+        storage::Start::Offer => {
+            shell.app.offer_restore();
+            search.clone()
+        }
+        storage::Start::Nothing => search.clone(),
+    };
+    shell.app.apply_url_options(&options);
+    shell.app.set_first_run(storage::first_run());
+
+    let shell = Rc::new(RefCell::new(shell));
     listen(&shell, &canvas)?;
     // Files and text input deliver from their own callbacks. One can fire
     // while the shell is borrowed (moving the focus commits an IME word
@@ -173,6 +187,9 @@ async fn run() -> Result<(), JsValue> {
         })
     };
     let files = files::Files::new(&document, deliver.clone())?;
+    for request in early {
+        files.handle(request);
+    }
     let text = ime::TextInput::new(&document, &canvas, deliver)?;
     let s = shell.clone();
     storage::Autosave::start(Rc::new(move |f| {
@@ -423,6 +440,7 @@ impl Shell {
         let size = [self.config.width, self.config.height];
         let out = self.app.frame(now, &view, size, ppp);
         self.queue.present(texture);
+        storage::frame_drawn();
         let preferences = self.app.preferences();
         if preferences != self.preferences {
             storage::set(storage::PREFERENCES, &preferences);
@@ -468,9 +486,7 @@ fn animate(
     let callback: Rc<RefCell<Option<FrameCallback>>> = Rc::new(RefCell::new(None));
     let next = callback.clone();
     *callback.borrow_mut() = Some(Closure::new(move || {
-        let now = web_sys::window()
-            .and_then(|w| w.performance())
-            .map_or(0.0, |p| p.now() / 1000.0);
+        let now = now();
         let queued = std::mem::take(&mut *pending.borrow_mut());
         for event in queued {
             shell.borrow_mut().app.push_event(event);
@@ -485,6 +501,13 @@ fn animate(
         request_frame(next.borrow().as_ref().expect("frame callback"));
     }));
     request_frame(callback.borrow().as_ref().expect("frame callback"));
+}
+
+/// Seconds on the page's clock.
+fn now() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map_or(0.0, |p| p.now() / 1000.0)
 }
 
 fn request_frame(f: &Closure<dyn FnMut()>) {
@@ -527,9 +550,20 @@ fn css_cursor(cursor: CursorIcon) -> &'static str {
     }
 }
 
-/// Shows a startup failure in the page instead of a blank canvas.
+/// Shows a startup failure in the page instead of a blank canvas, by way
+/// of the page's own `splatstudyError`, which also says how to start
+/// without the last session.
 fn show_error(message: &str) {
-    if let Some(el) = web_sys::window()
+    let window = web_sys::window();
+    let shown = window
+        .as_ref()
+        .and_then(|w| js_sys::Reflect::get(w, &"splatstudyError".into()).ok())
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .is_some_and(|f| f.call1(&JsValue::NULL, &message.into()).is_ok());
+    if shown {
+        return;
+    }
+    if let Some(el) = window
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("error"))
     {

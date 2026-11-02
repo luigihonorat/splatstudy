@@ -12,6 +12,10 @@
 //! is written once rather than with every save. The core makes the bytes
 //! and says when it is ready (see `splatstudy_core::scene::autosave`); this
 //! decides when to save, and stores.
+//!
+//! A restore that crashes the tab would crash it again on every reload, so
+//! a flag in localStorage marks a restore under way until its first frame
+//! is drawn. Found at start, the restore is only offered.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -29,6 +33,8 @@ use web_sys::Storage;
 pub const PREFERENCES: &str = "splatstudy.preferences";
 /// Set after the first visit.
 const SEEN: &str = "splatstudy.seen";
+/// Set while an autosave is being restored, until a frame is drawn.
+const RESTORING: &str = "splatstudy.restoring";
 
 fn local() -> Option<Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -43,6 +49,12 @@ pub fn set(key: &str, value: &str) {
         && storage.set_item(key, value).is_err()
     {
         log::warn!("could not store {key}");
+    }
+}
+
+fn remove(key: &str) {
+    if let Some(storage) = local() {
+        let _ = storage.remove_item(key);
     }
 }
 
@@ -204,58 +216,113 @@ fn to_arc(view: &Uint8Array) -> Arc<[u8]> {
     unsafe { bytes.assume_init() }
 }
 
-/// Opens the last session's autosave in `app`, unless the URL has
-/// `?fresh`. Returns the URL options still to apply: without `sample=`
-/// when the session came back with its own reference, which the sample
-/// would replace.
-pub async fn restore(app: &mut App, search: &str) -> String {
-    if crate::query_value(search, "fresh").is_some() {
-        return search.to_owned();
+thread_local! {
+    /// The reference file the restored autosave named, for the autosave.
+    static RESTORED_BLOB: Cell<Option<String>> = const { Cell::new(None) };
+    /// A restore was applied; the flag goes once a frame shows it.
+    static AWAIT_FRAME: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The shell drew a frame: a restore before it didn't crash the tab.
+pub fn frame_drawn() {
+    if AWAIT_FRAME.take() {
+        remove(RESTORING);
     }
-    let scene = match idb_scene().await {
-        Ok(v) => match v.dyn_into::<Uint8Array>() {
-            Ok(view) => view.to_vec(),
-            Err(_) => return search.to_owned(),
-        },
+}
+
+/// How the last session comes back at start.
+pub enum Start {
+    /// `?fresh`, or nothing stored.
+    Nothing,
+    /// A restore was under way when the tab last went: perhaps it crashed
+    /// it. The app only offers it.
+    Offer,
+    /// The stored scene, to restore once a first frame is up.
+    Scene(Vec<u8>),
+}
+
+/// Reads the last session's scene, unless the URL has `?fresh` or the
+/// last restore never finished.
+pub async fn begin_restore(search: &str) -> Start {
+    if crate::query_value(search, "fresh").is_some() {
+        return Start::Nothing;
+    }
+    let scene = read_scene().await;
+    if get(RESTORING).is_some() {
+        if scene.is_none() {
+            remove(RESTORING);
+            return Start::Nothing;
+        }
+        log::warn!("the last restore didn't finish; offering it instead");
+        return Start::Offer;
+    }
+    match scene {
+        Some(scene) => Start::Scene(scene),
+        None => Start::Nothing,
+    }
+}
+
+/// The stored scene, if any.
+async fn read_scene() -> Option<Vec<u8>> {
+    match idb_scene().await {
+        Ok(v) => v.dyn_into::<Uint8Array>().ok().map(|view| view.to_vec()),
         Err(e) => {
             log::warn!("no autosave to restore: {}", error_name(&e));
-            return search.to_owned();
+            None
         }
-    };
-    let key = scene::reference_key(&scene).ok().flatten();
-    let reference = match key {
-        Some(key) => match idb_blob(&key.name()).await {
-            Ok(v) => v.dyn_into::<Uint8Array>().ok().map(|view| to_arc(&view)),
-            Err(e) => {
-                log::warn!("autosave's reference: {}", error_name(&e));
-                None
-            }
-        },
-        None => None,
-    };
+    }
+}
+
+/// The reference file a stored scene names, if it is stored.
+async fn read_reference(key: Option<BlobKey>) -> Option<Arc<[u8]>> {
+    match idb_blob(&key?.name()).await {
+        Ok(v) => v.dyn_into::<Uint8Array>().ok().map(|view| to_arc(&view)),
+        Err(e) => {
+            log::warn!("autosave's reference: {}", error_name(&e));
+            None
+        }
+    }
+}
+
+/// Runs a closure on the app, wherever it is kept.
+type Visit<'a> = dyn FnMut(&mut dyn FnMut(&mut App)) + 'a;
+
+/// Opens a stored scene in `app`, with its reference. Flags the restore
+/// until a frame is drawn. The reference's key when it came back too, or
+/// `None` when the scene didn't read.
+async fn restore_scene(scene: &[u8], with_app: &mut Visit<'_>) -> Option<Option<String>> {
+    set(RESTORING, "1");
+    let key = scene::reference_key(scene).ok().flatten();
+    let reference = read_reference(key).await;
     let with_reference = reference.is_some();
-    if !app.restore_autosave(&scene, reference) {
-        return search.to_owned();
+    let mut reference = Some(reference);
+    let mut restored = false;
+    with_app(&mut |app| restored = app.restore_autosave(scene, reference.take().flatten()));
+    if !restored {
+        remove(RESTORING);
+        return None;
     }
-    if with_reference {
-        // Known to be stored: a save as the page closes needn't ask.
-        RESTORED_BLOB.set(key.map(|key| key.name()));
-    }
+    AWAIT_FRAME.set(true);
     log::info!("restored the autosave ({} bytes)", scene.len());
-    if !with_reference {
+    Some(key.filter(|_| with_reference).map(|key| key.name()))
+}
+
+/// Opens the scene [`begin_restore`] read in `app`. Returns the URL
+/// options still to apply: without `sample=` when the session came back
+/// with its own reference, which the sample would replace.
+pub async fn finish_restore(app: &mut App, scene: &[u8], search: &str) -> String {
+    let restored = restore_scene(scene, &mut |f| f(app)).await;
+    let Some(Some(blob)) = restored else {
         return search.to_owned();
-    }
+    };
+    // Known to be stored: a save as the page closes needn't ask.
+    RESTORED_BLOB.set(Some(blob));
     let kept: Vec<&str> = search
         .trim_start_matches('?')
         .split('&')
         .filter(|pair| !pair.is_empty() && !pair.starts_with("sample="))
         .collect();
     kept.join("&")
-}
-
-thread_local! {
-    /// The reference file the restored autosave named, for the autosave.
-    static RESTORED_BLOB: Cell<Option<String>> = const { Cell::new(None) };
 }
 
 /// Hands the app to a closure; the shell owns it.
@@ -270,7 +337,7 @@ struct State {
     changed_at: f64,
     /// The revision stored, or restored.
     stored: u64,
-    /// A save is being written.
+    /// A save, or a restore, is being written or read.
     writing: bool,
     /// The blob key that is stored.
     stored_blob: Option<String>,
@@ -360,6 +427,11 @@ impl Autosave {
         if let Some(trouble) = st.trouble.take() {
             app.autosave_trouble(trouble);
         }
+        if !st.writing && app.take_restore_request() {
+            st.writing = true;
+            drop(st);
+            return self.restore_later();
+        }
         let revision = app.scene_revision();
         let t = now();
         if revision != st.seen {
@@ -378,11 +450,15 @@ impl Autosave {
         drop(st);
         let this = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = this.write(bytes, leaving).await;
+            let result = this.write(bytes.as_ref(), leaving).await;
             let mut st = this.state.borrow_mut();
             st.writing = false;
             match result {
-                Ok(()) => st.stored = revision,
+                Ok(()) => {
+                    st.stored = revision;
+                    drop(st);
+                    remove(RESTORING);
+                }
                 Err(trouble) => {
                     st.on = false;
                     st.trouble = Some(trouble);
@@ -391,9 +467,35 @@ impl Autosave {
         });
     }
 
+    /// Restores the stored scene in place of the open one, as the user
+    /// asked. `writing` is set: no save runs meanwhile.
+    fn restore_later(&self) {
+        let this = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let restored = match read_scene().await {
+                Some(scene) => restore_scene(&scene, &mut |f| (this.with_app)(f)).await,
+                None => None,
+            };
+            let mut revision = None;
+            (this.with_app)(&mut |app| {
+                if restored.is_none() {
+                    app.autosave_gone();
+                }
+                revision = Some(app.scene_revision());
+            });
+            let mut st = this.state.borrow_mut();
+            st.writing = false;
+            if let (Some(blob), Some(revision)) = (restored, revision) {
+                st.seen = revision;
+                st.stored = revision;
+                st.stored_blob = blob;
+            }
+        });
+    }
+
     /// Stores a save, or clears the stores when there is nothing to keep.
-    async fn write(&self, bytes: Option<Bytes>, leaving: bool) -> Result<(), Trouble> {
-        let Some(save) = bytes else {
+    async fn write(&self, save: Option<&Bytes>, leaving: bool) -> Result<(), Trouble> {
+        let Some(save) = save else {
             idb_clear().await.map_err(trouble)?;
             self.state.borrow_mut().stored_blob = None;
             log::info!("autosave cleared");

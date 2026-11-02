@@ -48,6 +48,11 @@ pub(super) struct FileState {
     history: HistoryCache,
     /// The scene came from the autosave: worth keeping even unchanged.
     restored: bool,
+    /// The autosave wasn't restored at start, in case restoring it is what
+    /// made the app crash: the file menu offers it.
+    restore_offered: bool,
+    /// The user asked for it; the shell takes the request.
+    restore_asked: bool,
 }
 
 /// Where a file's bytes are, and how many: tells it apart from any other
@@ -369,6 +374,11 @@ impl App {
         if menu::action(ui, self.files.saved.is_some(), tr.revert, "") {
             self.revert_scene();
         }
+        if self.files.restore_offered
+            && menu::action(ui, !self.files.restore_asked, tr.files.restore_last, "")
+        {
+            self.files.restore_asked = true;
+        }
     }
 
     /// Import items in the file menu.
@@ -437,13 +447,16 @@ impl App {
 
     /// True when an autosave can be taken now: no stroke under way, and
     /// no export, which saving would stall, unless the page or window is
-    /// `leaving` and the export is lost anyway.
+    /// `leaving` and the export is lost anyway. Also false while the
+    /// autosave is only offered (see [`App::offer_restore`]) and the open
+    /// scene has nothing worth keeping: that would drop the offered one.
     pub fn autosave_ready(&self, leaving: bool) -> bool {
         let stroking = self
             .drags
             .iter()
             .any(|d| matches!(d, Some(Drag::Stroke { .. } | Drag::Grab { .. })));
-        !stroking && (leaving || !self.exporting())
+        let offered = self.files.restore_offered && !self.worth_keeping();
+        !stroking && !offered && (leaving || !self.exporting())
     }
 
     /// False for a fresh sphere: nothing sculpted, no reference, not from
@@ -475,6 +488,8 @@ impl App {
         if !self.worth_keeping() {
             return None;
         }
+        // The autosave now holds this scene: the offered one is gone.
+        self.files.restore_offered = false;
         let sculpted = !self.sculpt.log().is_empty();
         let reference = self.scene_reference().map(|r| r.source.bytes.clone());
         let reference = reference.map(|bytes| (self.files.key_of(&bytes), bytes));
@@ -486,6 +501,27 @@ impl App {
             reference,
             sculpted,
         })
+    }
+
+    /// The shell didn't restore the autosave at start, because the last
+    /// restore never got to draw a frame: perhaps it crashed the app. Says
+    /// so, and offers it in the file menu.
+    pub fn offer_restore(&mut self) {
+        self.files.restore_offered = true;
+        self.files.restore_asked = false;
+        self.notify(self.lang.tr().files.restore_skipped);
+    }
+
+    /// True once after the user chose to restore the offered autosave:
+    /// the shell restores it then, through [`App::restore_autosave`].
+    pub fn take_restore_request(&mut self) -> bool {
+        std::mem::take(&mut self.files.restore_asked)
+    }
+
+    /// The autosave the user asked for is no longer stored.
+    pub fn autosave_gone(&mut self) {
+        self.files.restore_offered = false;
+        self.notify(self.lang.tr().files.autosave_gone);
     }
 
     /// Opens an autosave at start: `scene` from [`App::autosave_bytes`],
@@ -517,6 +553,7 @@ impl App {
         self.files.name = None;
         self.files.saved = None;
         self.files.restored = true;
+        self.files.restore_offered = false;
         let tr = self.lang.tr();
         self.notify(match (lost, complete) {
             (true, _) => tr.files.restored_without_reference,

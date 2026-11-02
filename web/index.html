@@ -14,7 +14,9 @@
     #message, #error { display: none; position: fixed; inset: 0; padding: 72px 40px; max-width: 640px; }
     #message h1 { font-weight: 300; font-size: 36px; line-height: 1.2; margin: 0 0 18px; }
     #message p { color: #666666; margin: 0 0 8px; }
-    #error { white-space: pre-wrap; color: #D0473F; font-size: 13px; }
+    #error { white-space: pre-wrap; color: #D0473F; font-size: 13px; background: #F7F7F7; max-width: none; }
+    #error p { color: #111111; font-size: 15px; white-space: normal; }
+    #error a { color: #111111; }
   </style>
 </head>
 <body>
@@ -48,6 +50,34 @@
       box.style.display = "block";
     }
     window.splatstudyUnsupported = unsupported;
+    const fresh = {
+      ja: ["SplatStudy が止まりました。", "前回の作業を復元せずに開く"],
+      en: ["SplatStudy stopped.", "Open it without restoring the last session"],
+      fr: ["SplatStudy s’est arrêté.", "L’ouvrir sans restaurer la dernière session"],
+    };
+    // A failure at start, or a crash: the error, and a way to start
+    // without the last session (`?fresh`), in case restoring it is what
+    // fails. Also called by the app.
+    function showError(detail) {
+      const box = document.getElementById("error");
+      if (box.style.display === "block") return;
+      const [title, link] = fresh[language()];
+      const p = document.createElement("p");
+      p.textContent = title + " ";
+      const a = document.createElement("a");
+      a.href = location.pathname + "?fresh";
+      a.textContent = link + " (?fresh)";
+      p.append(a);
+      box.textContent = String(detail);
+      box.prepend(p);
+      box.style.display = "block";
+    }
+    window.splatstudyError = showError;
+    // A panic or running out of memory traps the wasm instance: nothing
+    // works after it.
+    const crashed = e => e instanceof WebAssembly.RuntimeError;
+    window.addEventListener("error", e => { if (crashed(e.error)) showError(e.error); });
+    window.addEventListener("unhandledrejection", e => { if (crashed(e.reason)) showError(e.reason); });
     const adapter = navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null);
     if (!adapter) {
       unsupported();
