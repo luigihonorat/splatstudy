@@ -14,6 +14,7 @@ pub mod input;
 pub mod io;
 pub mod meshio;
 pub mod navigation;
+pub mod quad;
 pub mod reference;
 pub mod render;
 pub mod scene;
