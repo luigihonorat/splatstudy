@@ -143,3 +143,88 @@ fn see_through_look_blends_with_the_background() {
     // behind (in stored sRGB values): 0.5, then 0.5 + 0.5 * 0.5.
     assert!((185..=197).contains(&ghost), "ghost {ghost}");
 }
+
+/// Pixels inside the sphere that stand out from both pairs of neighbours,
+/// away from its outline: cracks or seams in the shading.
+fn outliers(data: &[u8], [width, height]: [u32; 2]) -> usize {
+    let at = |x: u32, y: u32| pixel(data, width, x, y)[1] as i32;
+    let bg = VIEW_BG.to_array()[1] as i32;
+    let mut count = 0;
+    for y in 5..height - 5 {
+        for x in 5..width - 5 {
+            let c = at(x, y);
+            let near_bg = [(5, 0), (0, 5), (1, 0), (0, 1)]
+                .iter()
+                .any(|&(dx, dy)| at(x - dx, y - dy) == bg || at(x + dx, y + dy) == bg);
+            if near_bg || c == bg {
+                continue;
+            }
+            let h = (at(x - 1, y) + at(x + 1, y)) / 2;
+            let v = (at(x, y - 1) + at(x, y + 1)) / 2;
+            if (c - h).abs() > 6 && (c - v).abs() > 6 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// The start clay and other subdivided clay render as smoothly as the old
+/// icosphere. Drawn in one call with no culling, Direct3D 12 on NVIDIA
+/// shaded some of their front pixels as back faces, in dashed lines (see
+/// `ClayPass::draw`), so a DX12 adapter is used where there is one.
+#[test]
+fn subdivided_clay_renders_without_cracks() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::DX12,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let dx12 = pollster::block_on(instance.request_adapter(&Default::default()))
+        .ok()
+        .and_then(|a| pollster::block_on(a.request_device(&Default::default())).ok());
+    let Some((device, queue)) = dx12.or_else(device) else {
+        eprintln!("no GPU adapter; skipping render test");
+        return;
+    };
+    // The size of the sculpt view in a 1400 x 850 window.
+    let size = [505, 819];
+    let (cube, _) = splatstudy_core::sculpt::cube_sphere(splatstudy_core::sculpt::START_LEVEL);
+    let mut subdivided = splatstudy_core::sculpt::Sculpt::new(Mesh::icosphere(4));
+    subdivided.subdivide();
+    subdivided.subdivide();
+    for (name, mesh) in [
+        ("icosphere", Mesh::icosphere(7)),
+        ("cube sphere", cube),
+        ("subdivided icosphere", subdivided.mesh.clone()),
+        ("cube sphere 3", splatstudy_core::sculpt::cube_sphere(3).0),
+        ("cube sphere 4", splatstudy_core::sculpt::cube_sphere(4).0),
+        ("cube sphere 5", splatstudy_core::sculpt::cube_sphere(5).0),
+        ("cube sphere 6", splatstudy_core::sculpt::cube_sphere(6).0),
+    ] {
+        let target = ViewTarget::new(&device, size);
+        let clay = ClayPass::new(&device);
+        let gpu = GpuMesh::new(&device, &mesh);
+        let mut camera = OrbitCamera::default();
+        for (yaw, pitch) in [(0.0, 0.0), (35.0, 30.0), (-60.0, -20.0)] {
+            camera.orbit(yaw, pitch);
+            clay.prepare(
+                &queue,
+                Slot::SculptView,
+                &camera,
+                target.aspect(),
+                &Look::lit(CLAY),
+            );
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = target.begin_pass(&mut encoder, VIEW_BG);
+                clay.draw(&mut pass, Slot::SculptView, &gpu);
+            }
+            let readback = Readback::copy(&device, &mut encoder, &target);
+            queue.submit([encoder.finish()]);
+            readback.map();
+            let data = readback.wait(&device).expect("read back");
+            let n = outliers(&data, size);
+            assert!(n <= 2, "{name}, turned {yaw} {pitch}: {n} cracked pixels");
+        }
+    }
+}

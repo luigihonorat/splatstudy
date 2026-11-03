@@ -199,14 +199,18 @@ enum Layer {
     Ghost,
 }
 
+/// A pipeline in two halves: back faces, then front faces (see
+/// [`ClayPass::draw`]).
+type Sides = [wgpu::RenderPipeline; 2];
+
 pub struct ClayPass {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: Sides,
     /// The ghost's three steps: push the depth back to the far plane where
     /// the ghost covers, keep its nearest surface's depth, then blend that
     /// surface alone over the colour already drawn.
-    ghost_clear: wgpu::RenderPipeline,
-    ghost_depth: wgpu::RenderPipeline,
-    ghost_colour: wgpu::RenderPipeline,
+    ghost_clear: Sides,
+    ghost_depth: Sides,
+    ghost_colour: Sides,
     /// Uniforms and their bind group, per slot and layer.
     slots: Vec<[(wgpu::Buffer, wgpu::BindGroup); 2]>,
 }
@@ -294,7 +298,7 @@ impl ClayPass {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |v: Variant| {
+        let side = |v: &Variant, cull: wgpu::Face| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(v.label),
                 layout: Some(&pipeline_layout),
@@ -331,8 +335,10 @@ impl ClayPass {
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     front_face: wgpu::FrontFace::Ccw,
-                    // No culling: thin forms and the inside of open shapes stay visible.
-                    cull_mode: None,
+                    // Each half culls the other side; drawn one after the
+                    // other, thin forms and the inside of open shapes stay
+                    // visible.
+                    cull_mode: Some(cull),
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -350,6 +356,8 @@ impl ClayPass {
                 cache: None,
             })
         };
+        let pipeline =
+            |v: Variant| [wgpu::Face::Front, wgpu::Face::Back].map(|cull| side(&v, cull));
         use wgpu::CompareFunction::{Always, Less, LessEqual};
         Self {
             pipeline: pipeline(Variant {
@@ -439,9 +447,14 @@ impl ClayPass {
         queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
+    ///
+    /// Back faces are drawn first, then front faces, as two draws. Mixed in
+    /// one draw, Direct3D 12 on NVIDIA GPUs (Dawn in the browser, wgpu on
+    /// desktop) shaded some front pixels as back faces: dashed lines along
+    /// edges of subdivided clay. Back first is also the order see-through
+    /// clay blends in.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, slot: Slot, mesh: &GpuMesh) {
-        pass.set_pipeline(&self.pipeline);
-        self.draw_mesh(pass, slot, Layer::Main, mesh);
+        self.draw_sides(pass, slot, Layer::Main, mesh, &self.pipeline);
     }
 
     /// Lays `mesh` over everything the pass has drawn so far, as one
@@ -450,9 +463,22 @@ impl ClayPass {
     /// shows, and nothing drawn before hides it. It leaves the ghost's depth
     /// in the depth buffer, so draw it last.
     pub fn draw_ghost(&self, pass: &mut wgpu::RenderPass<'_>, slot: Slot, mesh: &GpuMesh) {
-        for pipeline in [&self.ghost_clear, &self.ghost_depth, &self.ghost_colour] {
+        for sides in [&self.ghost_clear, &self.ghost_depth, &self.ghost_colour] {
+            self.draw_sides(pass, slot, Layer::Ghost, mesh, sides);
+        }
+    }
+
+    fn draw_sides(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        slot: Slot,
+        layer: Layer,
+        mesh: &GpuMesh,
+        sides: &Sides,
+    ) {
+        for pipeline in sides {
             pass.set_pipeline(pipeline);
-            self.draw_mesh(pass, slot, Layer::Ghost, mesh);
+            self.draw_mesh(pass, slot, layer, mesh);
         }
     }
 
