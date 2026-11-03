@@ -72,12 +72,13 @@ mod tests {
     /// The contents of every string literal outside comments.
     fn literals(source: &str) -> String {
         let mut out = String::new();
+        // Kept from line to line: a string can run over several.
+        let mut inside = false;
         for line in source.lines() {
             let code = line.trim_start();
-            if code.starts_with("//") {
+            if !inside && code.starts_with("//") {
                 continue;
             }
-            let mut inside = false;
             let mut chars = code.chars();
             while let Some(c) = chars.next() {
                 match (inside, c) {
@@ -102,7 +103,7 @@ mod tests {
         let mut fonts = Fonts::new(TextOptions::default(), definitions());
         let text: String = TABLES.iter().map(|t| literals(t)).collect();
         assert!(
-            text.contains("塑像") && text.contains("sculpter"),
+            text.contains("塑像") && text.contains("sculpter") && text.contains("\nAlt"),
             "strings read"
         );
         let mut missing: Vec<char> = text
