@@ -12,7 +12,7 @@
 
 use glam::Vec3;
 
-use super::mesh::{Mesh, Stamp};
+use super::mesh::{Mesh, Stamp, morton_codes, radix_order};
 
 const LEAF_SIZE: usize = 4;
 
@@ -48,13 +48,24 @@ pub struct Hit {
 }
 
 impl Bvh {
+    /// The tree over `mesh`'s triangles: sorted along a Morton curve by
+    /// their centroids (a linear-time radix sort), then split where the
+    /// codes first differ, so each split is a cut of space, as the median
+    /// split along the longest side it replaced was, at a fraction of the
+    /// cost (a level of 3 million triangles is built in tens of
+    /// milliseconds, not most of a second). Only arithmetic and integer
+    /// sorts: the same tree on every machine.
     pub fn build(mesh: &Mesh) -> Bvh {
         let centroids: Vec<Vec3> = mesh
             .triangles
             .iter()
             .map(|t| t.iter().map(|&i| mesh.positions[i as usize]).sum::<Vec3>() / 3.0)
             .collect();
-        let mut order: Vec<u32> = (0..mesh.triangles.len() as u32).collect();
+        let codes = morton_codes(&centroids);
+        drop(centroids);
+        let order = radix_order(&codes);
+        let sorted: Vec<u32> = order.iter().map(|&t| codes[t as usize]).collect();
+        drop(codes);
         let empty = Node {
             min: Vec3::ZERO,
             max: Vec3::ZERO,
@@ -71,24 +82,7 @@ impl Bvh {
                 nodes[node].count = (end - start) as u32;
                 continue;
             }
-            let (lo, hi) = order[start..end]
-                .iter()
-                .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &t| {
-                    let c = centroids[t as usize];
-                    (lo.min(c), hi.max(c))
-                });
-            let extent = hi - lo;
-            let axis = if extent.x >= extent.y && extent.x >= extent.z {
-                0
-            } else if extent.y >= extent.z {
-                1
-            } else {
-                2
-            };
-            let mid = (start + end) / 2;
-            order[start..end].select_nth_unstable_by(mid - start, |&a, &b| {
-                centroids[a as usize][axis].total_cmp(&centroids[b as usize][axis])
-            });
+            let mid = start + split(&sorted[start..end]);
             let left = nodes.len();
             nodes.push(empty);
             nodes.push(empty);
@@ -269,6 +263,19 @@ impl Bvh {
             }
         }
     }
+}
+
+/// Where to split a run of sorted Morton codes: at the first code whose
+/// highest bit differing between the first and the last is set, so the
+/// halves lie on either side of a plane; in the middle when all are equal.
+/// Never 0 nor the whole run, for runs of two or more.
+fn split(codes: &[u32]) -> usize {
+    let (first, last) = (codes[0], codes[codes.len() - 1]);
+    if first == last {
+        return codes.len() / 2;
+    }
+    let bit = 31 - (first ^ last).leading_zeros();
+    codes.partition_point(|&c| (c ^ first) >> bit == 0)
 }
 
 fn ray_hits_box(origin: Vec3, inv_dir: Vec3, min: Vec3, max: Vec3, limit: f32) -> bool {
