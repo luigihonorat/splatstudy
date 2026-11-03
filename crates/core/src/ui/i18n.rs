@@ -173,8 +173,8 @@ pub const JA: Tr = Tr {
     navigation: "視点操作",
     hint_zbrush: "背景をドラッグ：回転
 Alt＋背景をドラッグ：移動
-Alt＋背景を押し、ドラッグしながら Alt を離す：拡大
-回転中に Shift：近い正面・側面・上面にそろえる
+Alt＋背景をドラッグし、Alt だけ離す：拡大
+回転中に Shift：正面・側面・上面にそろえる
 右ドラッグ：回転
 Alt＋右：移動
 Ctrl＋右：拡大
@@ -267,8 +267,8 @@ pub const EN: Tr = Tr {
     navigation: "navigation",
     hint_zbrush: "drag the background: turn
 Alt + drag the background: pan
-Alt + press the background, then let go of Alt while dragging: zoom
-Shift while turning: snap to the nearest front, side or top view
+Alt + drag the background, then let go of Alt: zoom
+Shift while turning: snap to front, side or top
 right drag: turn
 Alt + right: pan
 Ctrl + right: zoom
@@ -361,8 +361,8 @@ pub const FR: Tr = Tr {
     navigation: "navigation",
     hint_zbrush: "glisser le fond : tourner
 Alt + glisser le fond : déplacer
-Alt + appuyer sur le fond, puis lâcher Alt en glissant : zoomer
-Maj en tournant : vue de face, de côté ou de dessus la plus proche
+Alt + glisser le fond, puis lâcher Alt : zoomer
+Maj en tournant : aligner sur face, côté ou dessus
 clic droit : tourner
 Alt + droit : déplacer
 Ctrl + droit : zoomer
