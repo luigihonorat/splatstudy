@@ -36,6 +36,8 @@ pub struct StudyTr {
     pub studio: &'static str,
     pub raking: &'static str,
     pub top_light: &'static str,
+    /// The mesh's edges drawn over the clay, in the view menu.
+    pub wireframe: &'static str,
 }
 
 pub const JA: StudyTr = StudyTr {
@@ -60,6 +62,7 @@ pub const JA: StudyTr = StudyTr {
     studio: "スタジオ",
     raking: "斜光",
     top_light: "天窓",
+    wireframe: "ワイヤーフレーム",
 };
 
 pub const EN: StudyTr = StudyTr {
@@ -84,6 +87,7 @@ pub const EN: StudyTr = StudyTr {
     studio: "studio",
     raking: "raking",
     top_light: "top",
+    wireframe: "wireframe",
 };
 
 pub const FR: StudyTr = StudyTr {
@@ -108,6 +112,7 @@ pub const FR: StudyTr = StudyTr {
     studio: "atelier",
     raking: "rasant",
     top_light: "zénithal",
+    wireframe: "fil de fer",
 };
 
 fn ja_minutes(n: u32) -> String {

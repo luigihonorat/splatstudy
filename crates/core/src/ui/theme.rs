@@ -32,6 +32,10 @@ pub const CROP_LINE: Color32 = hex(0xEE8A2A);
 /// the form still reads through them.
 pub const CLAY_OVER: Color32 = hex(0xB0694A);
 pub const CLAY_UNDER: Color32 = hex(0x5B84A8);
+/// The wireframe over the clay: a dark grey line, blended so the shading
+/// still reads through it.
+pub const WIRE: Color32 = hex(0x262626);
+pub const WIRE_OPACITY: f32 = 0.6;
 /// How strongly the ghost of the reference shows over the sculpt.
 pub const GHOST_OPACITY: f32 = 0.35;
 

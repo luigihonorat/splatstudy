@@ -7,6 +7,19 @@
 //! A slot has two sets of uniforms: one for ordinary draws and one for the
 //! ghost, a see-through mesh laid over what the slot already shows (the
 //! reference over the sculpt). Both can be prepared for one submit.
+//!
+//! The wireframe is a second pass of the same triangles over the clay,
+//! without vertex buffers: its vertex shader reads each triangle's corners
+//! from the mesh's own vertex and index buffers (bound as storage too), so
+//! a corner knows which of the three it is, and the fragment shader draws
+//! the edges from the barycentric coordinates, about a pixel wide whatever
+//! line width the GPU allows (WebGPU has only 1, and no line polygon
+//! mode). A code per triangle hides the diagonal of each quad. Nothing is
+//! copied: strokes update the vertices the wireframe reads, and its one
+//! buffer of its own, two bits per triangle, is made the first time a mesh
+//! is drawn with it.
+
+use std::sync::OnceLock;
 
 use egui::Color32;
 use glam::{Mat4, Vec3};
@@ -14,6 +27,7 @@ use wgpu::util::DeviceExt;
 
 use super::{DEPTH_FORMAT, SAMPLES, Slot, VIEW_FORMAT};
 use crate::camera::OrbitCamera;
+use crate::sculpt::mesh::NO_DIAGONAL;
 use crate::sculpt::{Mesh, Vertex};
 use crate::ui::theme;
 
@@ -31,6 +45,10 @@ struct Uniforms {
     /// The strengths of the key light, the sky fill, the rim and the
     /// highlight.
     rig: [f32; 4],
+    /// xyz: the camera's position, which the wireframe is pulled towards.
+    eye: [f32; 4],
+    /// The wireframe's colour, linear RGB, and its opacity.
+    wire: [f32; 4],
 }
 
 /// How a mesh is shaded.
@@ -211,6 +229,9 @@ pub struct ClayPass {
     ghost_clear: Sides,
     ghost_depth: Sides,
     ghost_colour: Sides,
+    /// The wireframe over the clay, and its layout for a mesh's buffers.
+    wire: wgpu::RenderPipeline,
+    wire_layout: wgpu::BindGroupLayout,
     /// Uniforms and their bind group, per slot and layer.
     slots: Vec<[(wgpu::Buffer, wgpu::BindGroup); 2]>,
 }
@@ -220,24 +241,31 @@ pub struct GpuMesh {
     pub vertices: wgpu::Buffer,
     pub indices: wgpu::Buffer,
     pub index_count: u32,
+    /// What the wireframe reads, made when it is first drawn: the quads'
+    /// diagonal codes, and the bindings of them and both buffers above.
+    pub wire: OnceLock<(wgpu::Buffer, wgpu::BindGroup)>,
 }
 
 impl GpuMesh {
     pub fn new(device: &wgpu::Device, mesh: &Mesh) -> Self {
+        // Storage too, for the wireframe: a vertex is a whole number of
+        // words, which its shader reads as one array.
+        let storage = wgpu::BufferUsages::STORAGE;
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("clay vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices()),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | storage,
         });
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("clay indices"),
             contents: bytemuck::cast_slice(mesh.indices()),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: wgpu::BufferUsages::INDEX | storage,
         });
         Self {
             vertices,
             indices,
             index_count: mesh.indices().len() as u32,
+            wire: OnceLock::new(),
         }
     }
 
@@ -246,6 +274,13 @@ impl GpuMesh {
         let data: Vec<Vertex> = range.clone().map(|i| mesh.vertex(i)).collect();
         let offset = (range.start * size_of::<Vertex>()) as u64;
         queue.write_buffer(&self.vertices, offset, bytemuck::cast_slice(&data));
+    }
+}
+
+fn wire_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
     }
 }
 
@@ -293,6 +328,20 @@ impl ClayPass {
             (buffer, bind_group)
         };
         let slots = Slot::ALL.map(|_| [uniforms(), uniforms()]).into();
+        let read_only = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let wire_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wireframe"),
+            entries: &[read_only(0), read_only(1), read_only(2)],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("clay"),
             bind_group_layouts: &[Some(&layout)],
@@ -359,6 +408,48 @@ impl ClayPass {
         let pipeline =
             |v: Variant| [wgpu::Face::Front, wgpu::Face::Back].map(|cull| side(&v, cull));
         use wgpu::CompareFunction::{Always, Less, LessEqual};
+        let wire_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wireframe"),
+            bind_group_layouts: &[Some(&layout), Some(&wire_layout)],
+            immediate_size: 0,
+        });
+        let wire = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wireframe"),
+            layout: Some(&wire_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_wire"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_wire"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: VIEW_FORMAT,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            // Both sides at once: its shader doesn't ask which faces.
+            primitive: wgpu::PrimitiveState::default(),
+            // The clay's own surface passes the test, as each corner is
+            // pulled a little towards the camera; nearer clay hides it.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: SAMPLES,
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             pipeline: pipeline(Variant {
                 label: "clay",
@@ -388,6 +479,8 @@ impl ClayPass {
                 depth_compare: LessEqual,
                 colour: true,
             }),
+            wire,
+            wire_layout,
             slots,
         }
     }
@@ -442,6 +535,11 @@ impl ClayPass {
                 0.0,
             ],
             rig: [rig.key, rig.sky, rig.rim, rig.highlight],
+            eye: camera.eye().extend(1.0).to_array(),
+            wire: {
+                let [r, g, b, _] = super::linear(theme::WIRE);
+                [r, g, b, theme::WIRE_OPACITY]
+            },
         };
         let (buffer, _) = &self.slots[slot.index()][layer as usize];
         queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -468,6 +566,54 @@ impl ClayPass {
         }
     }
 
+    /// Draws the edges of `mesh`, built from `cpu`, over the clay just
+    /// drawn from it in this pass, as the slot's last
+    /// [`prepare`](Self::prepare) sees it: quads as their outline, other
+    /// triangles whole. Skipped for a mesh too big to bind as storage.
+    pub fn draw_wire(
+        &self,
+        device: &wgpu::Device,
+        pass: &mut wgpu::RenderPass<'_>,
+        slot: Slot,
+        mesh: &GpuMesh,
+        cpu: &Mesh,
+    ) {
+        let largest = device.limits().max_storage_buffer_binding_size;
+        let bindable = |b: &wgpu::Buffer| {
+            b.usage().contains(wgpu::BufferUsages::STORAGE) && b.size() <= largest
+        };
+        if mesh.index_count == 0 || !bindable(&mesh.vertices) || !bindable(&mesh.indices) {
+            return;
+        }
+        let (_, bind_group) = mesh.wire.get_or_init(|| {
+            // Four triangles to a byte; without quads, every edge shows.
+            let all = NO_DIAGONAL * 0b0101_0101;
+            let mut codes = cpu
+                .diagonals()
+                .unwrap_or_else(|| vec![all; cpu.triangles.len().div_ceil(4)]);
+            codes.resize(codes.len().next_multiple_of(4), all);
+            let diagonals = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("wireframe diagonals"),
+                contents: &codes,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("wireframe"),
+                layout: &self.wire_layout,
+                entries: &[
+                    wire_entry(0, &mesh.vertices),
+                    wire_entry(1, &mesh.indices),
+                    wire_entry(2, &diagonals),
+                ],
+            });
+            (diagonals, bind_group)
+        });
+        pass.set_pipeline(&self.wire);
+        pass.set_bind_group(0, &self.slots[slot.index()][Layer::Main as usize].1, &[]);
+        pass.set_bind_group(1, bind_group, &[]);
+        pass.draw(0..mesh.index_count, 0..1);
+    }
+
     fn draw_sides(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -487,5 +633,151 @@ impl ClayPass {
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::ViewTarget;
+    use crate::render::readback::Readback;
+
+    /// A square facing the camera, `half` wide each way at depth `z`, as
+    /// two triangles split along the diagonal from bottom left to top
+    /// right, starting at vertex `first`.
+    fn square(half: f32, z: f32, first: u32) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .map(|(x, y)| Vec3::new(x * half, y * half, z));
+        let [a, b, c, d] = [0, 1, 2, 3].map(|i| first + i);
+        (corners.to_vec(), vec![[a, b, c], [a, c, d]])
+    }
+
+    /// What the wireframe costs on the start clay two levels up (1.57M
+    /// vertices), drawn whole into a 1600×1000 view.
+    /// `cargo test --release -p splatstudy-core wireframe_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn wireframe_timing() {
+        use std::time::Instant;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        println!("{:?}", adapter.get_info());
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let (mesh, _) = crate::sculpt::cube_sphere(9);
+        let size = [1600, 1000];
+        let target = ViewTarget::new(&device, size);
+        let clay = ClayPass::new(&device);
+        let gpu = GpuMesh::new(&device, &mesh);
+        let camera = OrbitCamera::default();
+        let aspect = size[0] as f32 / size[1] as f32;
+        clay.prepare(
+            &queue,
+            Slot::SculptView,
+            &camera,
+            aspect,
+            &Look::lit(theme::CLAY),
+        );
+        let frames = |wire: bool, n: usize| {
+            let start = Instant::now();
+            for _ in 0..n {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = target.begin_pass(&mut encoder, theme::VIEW_BG);
+                    clay.draw(&mut pass, Slot::SculptView, &gpu);
+                    if wire {
+                        clay.draw_wire(&device, &mut pass, Slot::SculptView, &gpu, &mesh);
+                    }
+                }
+                queue.submit([encoder.finish()]);
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            }
+            start.elapsed().as_secs_f64() * 1e3 / n as f64
+        };
+        let start = Instant::now();
+        frames(true, 1);
+        println!(
+            "first wireframe frame (codes made and uploaded): {:.1} ms",
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        for _ in 0..2 {
+            let plain = frames(false, 30);
+            let wired = frames(true, 30);
+            println!(
+                "{} vertices: clay {plain:.2} ms a frame, with the wireframe {wired:.2} ms",
+                mesh.positions.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_wireframe_outlines_quads_and_hides_behind_the_clay() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Some((device, queue)) =
+            pollster::block_on(instance.request_adapter(&Default::default()))
+                .ok()
+                .and_then(|a| pollster::block_on(a.request_device(&Default::default())).ok())
+        else {
+            eprintln!("no GPU adapter; skipping render test");
+            return;
+        };
+        // A big square of two triangles, and in front of it a small one
+        // that is a quad.
+        let (mut positions, mut triangles) = square(1.0, 0.0, 0);
+        let (p, t) = square(0.3, 0.02, 4);
+        positions.extend(p);
+        triangles.extend(t);
+        let mut mesh = Mesh::from_ordered(positions, triangles);
+        mesh.quads = vec![[2, 3]];
+        let camera = OrbitCamera {
+            pitch: 0.0,
+            ..OrbitCamera::default()
+        };
+        let size = [96, 96];
+        let target = ViewTarget::new(&device, size);
+        let clay = ClayPass::new(&device);
+        let gpu = GpuMesh::new(&device, &mesh);
+        let render = |wire: bool| {
+            clay.prepare(
+                &queue,
+                Slot::SculptView,
+                &camera,
+                1.0,
+                &Look::lit(theme::CLAY),
+            );
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = target.begin_pass(&mut encoder, theme::VIEW_BG);
+                clay.draw(&mut pass, Slot::SculptView, &gpu);
+                if wire {
+                    clay.draw_wire(&device, &mut pass, Slot::SculptView, &gpu, &mesh);
+                }
+            }
+            let readback = Readback::copy(&device, &mut encoder, &target);
+            queue.submit([encoder.finish()]);
+            readback.map();
+            readback.wait(&device).expect("pixels")
+        };
+        let plain = render(false);
+        let wired = render(true);
+        let to_clip = camera.projection(1.0) * camera.view();
+        let red = |pixels: &[u8], x: f32, y: f32| {
+            let p = to_clip.project_point3(Vec3::new(x, y, 0.0));
+            let px = ((p.x * 0.5 + 0.5) * size[0] as f32) as usize;
+            let py = ((0.5 - p.y * 0.5) * size[1] as f32) as usize;
+            i32::from(pixels[(py * size[0] as usize + px) * 4])
+        };
+        let darker = |x, y| red(&plain, x, y) - red(&wired, x, y);
+        // The big square's diagonal shows where nothing is in front of it,
+        // and so do the small square's sides.
+        assert!(darker(0.6, 0.6) > 20, "{}", darker(0.6, 0.6));
+        assert!(darker(0.3, -0.1) > 20, "{}", darker(0.3, -0.1));
+        // The small square's diagonal is hidden, and the big one's behind
+        // it doesn't show through.
+        assert!(darker(0.0, 0.0).abs() <= 2, "{}", darker(0.0, 0.0));
+        assert!(darker(0.15, 0.15).abs() <= 2, "{}", darker(0.15, 0.15));
+        // Away from every edge, the clay is as it was.
+        assert!(darker(0.1, -0.15).abs() <= 2, "{}", darker(0.1, -0.15));
+        assert!(darker(-0.6, 0.2).abs() <= 2, "{}", darker(-0.6, 0.2));
     }
 }

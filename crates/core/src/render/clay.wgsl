@@ -17,6 +17,10 @@ struct Uniforms {
     params: vec4<f32>,
     // Strengths: x key, y sky, z rim, w highlight.
     rig: vec4<f32>,
+    // xyz: the camera's position, world space.
+    eye: vec4<f32>,
+    // The wireframe's colour, linear RGB, and its opacity.
+    wire: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -105,4 +109,59 @@ fn fs_far() -> Far {
 @fragment
 fn fs_blank() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0);
+}
+
+// The wireframe: the clay's triangles drawn again over it, each corner
+// read from the mesh's buffers by its place in the index buffer, so it
+// knows which of its triangle's three corners it is.
+
+// The vertices as words: position (3), normal (3), colour (1).
+@group(1) @binding(0) var<storage, read> vertices: array<f32>;
+@group(1) @binding(1) var<storage, read> indices: array<u32>;
+// Two bits per triangle, sixteen to a word: the corner opposite the edge
+// its quad hides (the diagonal), or 3 when every edge shows.
+@group(1) @binding(2) var<storage, read> diagonals: array<u32>;
+
+// How far each corner is pulled towards the camera, as a share of its
+// distance: enough to stay in front of the clay it lies on, far too
+// little to show through clay in front of it.
+const PULL: f32 = 1e-4;
+
+struct WireOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) bary: vec3<f32>,
+    @location(1) @interpolate(flat) hidden: u32,
+};
+
+@vertex
+fn vs_wire(@builtin(vertex_index) i: u32) -> WireOut {
+    let v = indices[i] * 7u;
+    let p = vec3<f32>(vertices[v], vertices[v + 1u], vertices[v + 2u]);
+    let pulled = u.eye.xyz + (p - u.eye.xyz) * (1.0 - PULL);
+    let corner = i % 3u;
+    let triangle = i / 3u;
+    var out: WireOut;
+    out.clip = u.view_proj * vec4<f32>(pulled, 1.0);
+    out.bary = vec3<f32>(f32(corner == 0u), f32(corner == 1u), f32(corner == 2u));
+    out.hidden = (diagonals[triangle / 16u] >> (triangle % 16u * 2u)) & 3u;
+    return out;
+}
+
+@fragment
+fn fs_wire(in: WireOut) -> @location(0) vec4<f32> {
+    // How far each edge is, in pixels: the coordinate that is 0 along it,
+    // over its change from one pixel to the next.
+    let step = max(fwidth(in.bary), vec3<f32>(1e-6));
+    let shown = vec3<bool>(in.hidden != 0u, in.hidden != 1u, in.hidden != 2u);
+    let d = select(vec3<f32>(1e6), in.bary / step, shown);
+    let nearest = min(d.x, min(d.y, d.z));
+    // Each triangle draws its half of the line along an edge: about a
+    // pixel wide in all, with soft sides.
+    let line = 1.0 - smoothstep(0.0, 1.0, nearest);
+    // Triangles a few pixels across would turn the clay solid: there the
+    // lines fade to an even tint, which says the mesh is dense.
+    let size = max(step.x, max(step.y, step.z));
+    let dense = smoothstep(0.15, 0.5, size);
+    let alpha = u.wire.w * line * mix(1.0, 0.35, dense);
+    return vec4<f32>(to_srgb(u.wire.rgb) * alpha, alpha);
 }

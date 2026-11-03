@@ -112,6 +112,7 @@ impl App {
                     (tr.silhouette, "K"),
                     (tr.study.difference, "Shift+K"),
                     (tr.ghost, "O"),
+                    (tr.study.wireframe, "Shift+W"),
                     (tr.plumb_line, "V"),
                     (tr.grid, "G"),
                     (tr.study.measure, "E"),

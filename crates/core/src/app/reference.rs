@@ -242,6 +242,7 @@ fn place_mesh(device: &wgpu::Device, r: &Reference) -> Drawn {
             vertices,
             indices,
             index_count: (triangles.len() * 3) as u32,
+            wire: Default::default(),
         }),
         coloured: colors.is_some(),
         built_for,

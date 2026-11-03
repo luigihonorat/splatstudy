@@ -55,6 +55,8 @@ pub(super) struct StudyState {
     pub(super) lighting: Lighting,
     pub(super) measure: Measure,
     pub(super) matching: SilhouetteMatch,
+    /// The clay's edges drawn over it: quads as quads.
+    pub(super) wireframe: bool,
 }
 
 /// The plumb line's bob: how high it hangs over the view's bottom edge,
@@ -333,6 +335,7 @@ impl Default for StudyState {
             lighting: Lighting::default(),
             measure: Measure::default(),
             matching: SilhouetteMatch::default(),
+            wireframe: false,
         }
     }
 }
@@ -364,6 +367,21 @@ impl App {
             Look::lit(theme::CLAY)
         };
         look.with_lighting(self.study.lighting)
+    }
+
+    /// Draws the clay's edges over the clay just drawn in the sculpt view,
+    /// when the wireframe is on: the live clay, or the timelapse's. Not
+    /// over a silhouette, which is all outline.
+    pub(super) fn draw_wireframe(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if !self.study.wireframe || self.study.silhouette {
+            return;
+        }
+        let (gpu, mesh) = match &self.playback {
+            Some(p) => (&p.gpu_mesh, &p.replay.sculpt.mesh),
+            None => (&self.gpu_mesh, &self.sculpt.mesh),
+        };
+        self.clay
+            .draw_wire(&self.device, pass, Slot::SculptView, gpu, mesh);
     }
 
     /// The reference's look in its own view.
@@ -444,6 +462,9 @@ impl App {
         }
         if menu::item(ui, tr.ghost, "O", self.study.ghost).clicked() {
             self.study.ghost = !self.study.ghost;
+        }
+        if menu::item(ui, st.wireframe, "Shift+W", self.study.wireframe).clicked() {
+            self.study.wireframe = !self.study.wireframe;
         }
         let tint = self.study.matching.tint;
         if menu::item(ui, st.difference, "Shift+K", tint).clicked() {
@@ -963,6 +984,10 @@ impl App {
             return;
         }
         let pressed = |key: Key| ui.input_mut(|i| i.consume_key(M::NONE, key));
+        // Before plain W, which would take Shift+W too.
+        if ui.input_mut(|i| i.consume_key(M::SHIFT, Key::W)) {
+            self.study.wireframe = !self.study.wireframe;
+        }
         if pressed(Key::W) {
             self.study.swapped = !self.study.swapped;
         }
@@ -1399,5 +1424,55 @@ mod tests {
         assert_eq!(h.app.study.measure.lines, [None; 2]);
         esc(&mut h);
         assert!(!h.app.study.measure.on);
+    }
+
+    #[test]
+    fn the_wireframe_shows_quads_live_after_an_autosave_and_in_the_timelapse() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        // Shift+W turns it on, and leaves swap sides (W) alone.
+        let shift = |h: &mut Harness, on: bool| {
+            h.app
+                .push_event(crate::InputEvent::Modifiers(crate::input::Modifiers {
+                    shift: on,
+                    ..Default::default()
+                }));
+        };
+        shift(&mut h, true);
+        for pressed in [true, false] {
+            h.app.push_event(crate::InputEvent::Key {
+                key: Key::W,
+                pressed,
+                repeat: false,
+            });
+        }
+        h.frames(1);
+        shift(&mut h, false);
+        assert!(h.app.study.wireframe);
+        assert!(!h.app.study.swapped);
+        let quads = h.app.sculpt.mesh.quads.len();
+        assert_eq!(quads, h.app.sculpt.mesh.triangles.len() / 2);
+        let c = h.app.view_rects[SCULPT].center();
+        h.drag(c, c + egui::vec2(40.0, 10.0));
+        assert!(!h.app.sculpt.log().is_empty());
+        h.frames(1);
+
+        let saved = h.app.autosave_bytes().expect("worth keeping").scene;
+        h.app.new_scene();
+        h.app.sculpt.mesh.quads.clear();
+        h.frames(1);
+        assert!(h.app.restore_autosave(&saved, None));
+        h.frames(1);
+        assert_eq!(h.app.sculpt.mesh.quads.len(), quads);
+
+        h.app.start_playback();
+        h.frames(3);
+        let playback = h.app.playback.as_ref().expect("playing");
+        assert_eq!(playback.replay.sculpt.mesh.quads.len(), quads);
+        // Over the silhouette it stays off.
+        h.app.study.silhouette = true;
+        h.frames(1);
     }
 }

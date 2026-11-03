@@ -439,6 +439,7 @@ impl App {
                 .map_or(&self.gpu_mesh, |p| &p.gpu_mesh);
             self.clay.draw(&mut pass, Slot::SculptView, mesh);
             if sculpt_shown {
+                self.draw_wireframe(&mut pass);
                 self.draw_ghost(&mut pass);
             }
         }
