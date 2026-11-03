@@ -19,7 +19,9 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(tr.menu_file, |ui| self.file_menu(ui));
             ui.menu_button(tr.menu_edit, |ui| self.edit_menu(ui));
+            ui.menu_button(tr.menu_object, |ui| self.object_menu(ui));
             ui.menu_button(tr.menu_view, |ui| self.view_menu(ui));
+            ui.menu_button(tr.menu_timelapse, |ui| self.timelapse_menu(ui));
             ui.menu_button(tr.navigation, |ui| self.navigation_menu(ui));
             ui.menu_button(tr.menu_language, |ui| self.language_menu(ui));
             ui.menu_button(tr.menu_help, |ui| self.help_menu(ui));
@@ -41,7 +43,6 @@ impl App {
         menu::submenu(ui, tr.export, |ui| {
             ui.set_min_width(120.0);
             self.mesh_export_items(ui);
-            self.video_export_items(ui);
         });
         if !WEB {
             ui.separator();
@@ -67,10 +68,29 @@ impl App {
             self.sculpt.redo();
         }
         ui.separator();
-        self.mesh_edit_items(ui);
         self.reference_edit_items(ui);
         ui.separator();
         self.preferences_item(ui);
+    }
+
+    fn object_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(menu::MIN_WIDTH);
+        self.mesh_edit_items(ui);
+    }
+
+    fn timelapse_menu(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        ui.set_min_width(menu::MIN_WIDTH);
+        let recorded = !self.sculpt.log().is_empty();
+        if menu::action(
+            ui,
+            recorded && self.playback.is_none(),
+            tr.watch_timelapse,
+            "",
+        ) {
+            self.start_playback();
+        }
+        self.video_export_items(ui);
     }
 
     fn view_menu(&mut self, ui: &mut egui::Ui) {
@@ -103,7 +123,7 @@ impl App {
     fn navigation_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(menu::MIN_WIDTH);
         for style in NavStyle::ALL {
-            if menu::item(ui, style.name(), "", self.nav == style).clicked() {
+            if menu::item(ui, self.nav_name(style), "", self.nav == style).clicked() {
                 self.nav = style;
             }
         }

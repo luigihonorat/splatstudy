@@ -55,6 +55,30 @@ pub(super) fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
     }
 }
 
+/// The brush's profile across its width, rim to rim: how much of the
+/// effect each point under it gets.
+fn falloff_curve(ui: &mut egui::Ui, falloff: Falloff) {
+    const STEPS: usize = 48;
+    let size = egui::vec2(ui.available_width().min(160.0), 30.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let visuals = ui.visuals();
+    let ink = visuals.widgets.active.fg_stroke.color;
+    let faint = visuals.widgets.inactive.fg_stroke.color.gamma_multiply(0.5);
+    let painter = ui.painter_at(rect.expand(1.0));
+    painter.hline(rect.x_range(), rect.bottom(), egui::Stroke::new(1.0, faint));
+    let points = (0..=STEPS)
+        .map(|i| {
+            let x = i as f32 / STEPS as f32 * 2.0 - 1.0;
+            let weight = falloff.weight(x.abs(), 1.0);
+            egui::pos2(
+                rect.center().x + x * rect.width() / 2.0,
+                rect.bottom() - weight * (rect.height() - 2.0),
+            )
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, ink)));
+}
+
 fn falloff_name(tr: &Tr, falloff: Falloff) -> &'static str {
     match falloff {
         Falloff::Smooth => tr.mesh.falloff_smooth,
@@ -72,8 +96,6 @@ pub(super) struct ToolSettings {
     /// How each tool fades towards its rim, in `Brush::ALL` order.
     pub(super) falloff: [Falloff; 7],
     pub(super) symmetry: bool,
-    /// Pen pressure scales the size as well as the strength.
-    pub(super) pressure_size: bool,
     /// Stroke stabiliser: how far the brush trails the pointer, in
     /// points; 0 is off.
     pub(super) stabiliser: f32,
@@ -102,7 +124,6 @@ impl Default for ToolSettings {
             strength: BRUSHES.map(|(_, _, strength)| strength),
             falloff: [Falloff::Smooth; 7],
             symmetry: true,
-            pressure_size: false,
             stabiliser: 0.0,
             resolution: voxel::DEFAULT_RESOLUTION as f32,
             threshold: voxel::DEFAULT_THRESHOLD,
@@ -403,17 +424,33 @@ impl App {
     pub(super) fn mesh_edit_items(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         let live = self.playback.is_none();
+        if menu::action(ui, live, tr.new_sphere, "") {
+            self.new_sphere();
+        }
+        if menu::action(ui, live && self.has_reference(), tr.mesh.from_reference, "") {
+            self.ask(Pending::FromReference, tr.mesh.from_reference);
+        }
+        ui.separator();
+        if menu::action(ui, live, tr.mesh.remesh, "Shift+R") {
+            self.ask_remesh();
+        }
+        if menu::action(ui, live, tr.mesh.subdivide, "Shift+U") {
+            self.ask_subdivide();
+        }
+        ui.separator();
         if menu::action(ui, live, tr.mirror_sculpt, "") {
             self.sculpt.mirror(true);
         }
         if menu::action(ui, live, tr.mesh.mirror_to_positive, "") {
             self.sculpt.mirror(false);
         }
-        if menu::action(ui, live, tr.mesh.remesh, "Shift+R") {
-            self.ask_remesh();
-        }
-        if menu::action(ui, live, tr.mesh.subdivide, "Shift+U") {
-            self.ask_subdivide();
+    }
+
+    /// Puts a fresh sphere in place of the clay, as one undoable step; the
+    /// reference, the views and the timelapse stay.
+    fn new_sphere(&mut self) {
+        if self.replace_clay(start_mesh()) {
+            self.frame_sculpt();
         }
     }
 
@@ -483,12 +520,10 @@ impl App {
                 }
             }
         });
+        falloff_curve(ui, self.tool.falloff[tool_index(self.tool.tool)]);
         ui.add_space(10.0);
         if ui::choice(ui, tr.symmetry, self.tool.symmetry).clicked() {
             self.tool.symmetry = !self.tool.symmetry;
-        }
-        if ui::choice(ui, tr.pressure_size, self.tool.pressure_size).clicked() {
-            self.tool.pressure_size = !self.tool.pressure_size;
         }
         ui.add_space(10.0);
         ui::section(ui, tr.mesh.mesh);
@@ -524,34 +559,6 @@ impl App {
             .clicked()
         {
             self.ask(Pending::FromReference, tr.mesh.from_reference);
-        }
-        ui.add_space(10.0);
-        ui::section(ui, tr.history);
-        let (can_undo, can_redo) = (self.sculpt.can_undo(), self.sculpt.can_redo());
-        if ui
-            .add_enabled_ui(can_undo, |ui| ui::choice(ui, tr.undo, false))
-            .inner
-            .clicked()
-        {
-            self.sculpt.undo();
-        }
-        if ui
-            .add_enabled_ui(can_redo, |ui| ui::choice(ui, tr.redo, false))
-            .inner
-            .clicked()
-        {
-            self.sculpt.redo();
-        }
-        if ui::choice(ui, tr.new_sphere, false).clicked() {
-            self.new_scene();
-        }
-        let recorded = !self.sculpt.log().is_empty();
-        if ui
-            .add_enabled_ui(recorded, |ui| ui::choice(ui, tr.watch_timelapse, false))
-            .inner
-            .clicked()
-        {
-            self.start_playback();
         }
         self.sculpt.refresh();
         self.sync_clay();
@@ -638,25 +645,18 @@ impl App {
         });
     }
 
-    /// One dab: pen pressure scales the tool's strength, and its size too if
-    /// that is on.
+    /// One dab: pen pressure scales the tool's strength.
     fn dab_at(&mut self, rect: Rect, pressure: f32, hit: Hit, direction: Vec3) {
         let (ctrl, shift) = self.ctx.input(|i| (i.modifiers.ctrl, i.modifiers.shift));
         let tool = if shift { Brush::Smooth } else { self.tool.tool };
         let pressure = pressure.clamp(0.0, 1.0);
         let strength = self.tool.strength[tool_index(tool)] * pressure;
-        let size = if self.tool.pressure_size {
-            // Never quite vanishing, so a light touch still shows.
-            0.1 + 0.9 * pressure
-        } else {
-            1.0
-        };
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
         self.sculpt.set_falloff(self.tool.falloff[tool_index(tool)]);
         self.sculpt.dab(Dab {
             brush: tool,
             centre: hit.point,
-            radius: self.tool.radius * size * scale,
+            radius: self.tool.radius * scale,
             strength,
             invert: ctrl,
             symmetry: self.tool.symmetry,

@@ -40,6 +40,16 @@ impl App {
         self.sculpt.refresh();
     }
 
+    /// A navigation preset as the menus name it.
+    pub(super) fn nav_name(&self, style: NavStyle) -> &'static str {
+        let tr = self.lang.tr();
+        match style {
+            NavStyle::ZBrush => tr.nav_zbrush,
+            NavStyle::Blender => tr.nav_blender,
+            NavStyle::Maya => tr.nav_maya,
+        }
+    }
+
     pub(super) fn nav_hint(&self) -> &'static str {
         let tr = self.lang.tr();
         match self.nav {
@@ -63,7 +73,10 @@ impl App {
         };
 
         let mut open = self.show_shortcuts;
+        let room = ui.ctx().content_rect().height() - 120.0;
         window(tr.shortcuts, 420.0)
+            .vscroll(true)
+            .max_height(room.max(120.0))
             .open(&mut open)
             .show(ui.ctx(), |ui| {
                 let muted = ui.visuals().widgets.inactive.fg_stroke.color;

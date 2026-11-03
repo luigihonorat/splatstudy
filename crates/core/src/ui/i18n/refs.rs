@@ -35,7 +35,7 @@ pub struct RefTr {
 pub const JA: RefTr = RefTr {
     up: "上方向",
     turn: "回転",
-    fit: "大きさを合わせる",
+    fit: "メッシュに合わせる",
     fit_image: "全体を表示",
     crop: "切り抜き",
     crop_left: "左",
@@ -56,7 +56,7 @@ pub const JA: RefTr = RefTr {
 pub const EN: RefTr = RefTr {
     up: "up axis",
     turn: "turn",
-    fit: "fit to the clay",
+    fit: "fit to the mesh",
     fit_image: "fit to view",
     crop: "crop",
     crop_left: "left",
@@ -77,7 +77,7 @@ pub const EN: RefTr = RefTr {
 pub const FR: RefTr = RefTr {
     up: "axe vertical",
     turn: "rotation",
-    fit: "ajuster à la terre",
+    fit: "ajuster au maillage",
     fit_image: "tout afficher",
     crop: "recadrer",
     crop_left: "gauche",

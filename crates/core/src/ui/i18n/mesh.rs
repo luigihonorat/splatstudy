@@ -20,11 +20,11 @@ pub struct MeshTr {
     pub imported_remeshed: &'static str,
     /// The other way from the shared "mirror sculpt" item (X+ → X−).
     pub mirror_to_positive: &'static str,
-    /// Making clay from the reference.
+    /// Making the sculpt's mesh from the reference.
     pub from_reference: &'static str,
     /// How dense the splats must be to count as material.
     pub threshold: &'static str,
-    /// Notice after clay was made from the reference.
+    /// Notice after the mesh was made from the reference.
     pub made_from_reference: &'static str,
     /// Splitting every triangle into four.
     pub subdivide: &'static str,
@@ -49,16 +49,16 @@ pub struct MeshTr {
 pub const JA: MeshTr = MeshTr {
     mesh: "メッシュ",
     resolution: "解像度",
-    remesh: "リメッシュ",
+    remesh: "ボクセルリメッシュ",
     remeshed: "リメッシュしました。元に戻すと前のメッシュに戻ります",
     vertices: "頂点",
     nothing_left: "形が残りませんでした",
     imported: "塑像として読み込みました。元に戻すと前の塑像に戻ります",
     imported_remeshed: "塑像として読み込み、彫りやすいようにリメッシュしました",
     mirror_to_positive: "左右を写す（X− → X+）",
-    from_reference: "モチーフから粘土を作る",
+    from_reference: "モチーフからメッシュを作る",
     threshold: "しきい値",
-    made_from_reference: "モチーフから粘土を作りました。元に戻すと前の塑像に戻ります",
+    made_from_reference: "モチーフからメッシュを作りました。元に戻すと前の塑像に戻ります",
     subdivide: "細分化",
     subdivided: "細分化しました。元に戻すと前のメッシュに戻ります",
     too_dense: "頂点が多すぎるため、これ以上細分化できません",
@@ -74,16 +74,16 @@ pub const JA: MeshTr = MeshTr {
 pub const EN: MeshTr = MeshTr {
     mesh: "mesh",
     resolution: "resolution",
-    remesh: "remesh",
+    remesh: "voxel remesh",
     remeshed: "remeshed; undo brings the previous mesh back",
     vertices: "vertices",
     nothing_left: "no shape was left",
     imported: "imported as the sculpt; undo brings the previous one back",
     imported_remeshed: "imported as the sculpt, and remeshed to sculpt on",
     mirror_to_positive: "mirror sculpt (X− → X+)",
-    from_reference: "clay from reference",
+    from_reference: "mesh from reference",
     threshold: "threshold",
-    made_from_reference: "clay made from the reference; undo brings the previous sculpt back",
+    made_from_reference: "mesh made from the reference; undo brings the previous sculpt back",
     subdivide: "subdivide",
     subdivided: "subdivided; undo brings the previous mesh back",
     too_dense: "too many vertices to subdivide again",
@@ -99,16 +99,16 @@ pub const EN: MeshTr = MeshTr {
 pub const FR: MeshTr = MeshTr {
     mesh: "maillage",
     resolution: "résolution",
-    remesh: "remailler",
+    remesh: "remaillage voxel",
     remeshed: "remaillé ; annuler rétablit le maillage précédent",
     vertices: "sommets",
     nothing_left: "aucune forme ne reste",
     imported: "importé comme sculpture ; annuler rétablit la précédente",
     imported_remeshed: "importé comme sculpture et remaillé pour être sculpté",
     mirror_to_positive: "symétriser (X− → X+)",
-    from_reference: "argile depuis la référence",
+    from_reference: "maillage depuis la référence",
     threshold: "seuil",
-    made_from_reference: "argile tirée de la référence ; annuler rétablit la sculpture précédente",
+    made_from_reference: "maillage tiré de la référence ; annuler rétablit la sculpture précédente",
     subdivide: "subdiviser",
     subdivided: "subdivisé ; annuler rétablit le maillage précédent",
     too_dense: "trop de sommets pour subdiviser encore",
