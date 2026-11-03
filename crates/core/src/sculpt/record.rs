@@ -98,6 +98,11 @@ pub struct Checkpoint {
     /// any. Saved apart from the rest (see `scene`), so it isn't part of
     /// [`Checkpoint::write`].
     pub levels: Option<Arc<Levels>>,
+    /// With the triangles, the clay's quads as
+    /// [diagonal codes](crate::sculpt::mesh::diagonals), if it had any:
+    /// export and the wireframe show them during the timelapse. Saved
+    /// apart, like the levels; they don't change a replay's clay.
+    pub diagonals: Option<Arc<[u8]>>,
 }
 
 impl Checkpoint {
@@ -114,6 +119,7 @@ impl Checkpoint {
             positions: mesh.positions.as_slice().into(),
             triangles: topology.then(|| mesh.triangles.as_slice().into()),
             levels: levels.filter(|_| topology),
+            diagonals: topology.then(|| mesh.diagonals()).flatten().map(Into::into),
         }
     }
 
@@ -133,7 +139,12 @@ impl Checkpoint {
     /// The whole mesh and its levels, for a checkpoint that has it.
     fn mesh(&self) -> Option<(Mesh, Option<Levels>)> {
         let triangles = self.triangles.as_ref().filter(|_| self.has_mesh())?;
-        let mesh = Mesh::from_ordered(self.positions.to_vec(), triangles.to_vec());
+        let mut mesh = Mesh::from_ordered(self.positions.to_vec(), triangles.to_vec());
+        if let Some(codes) = &self.diagonals
+            && !mesh.set_diagonals(codes)
+        {
+            log::warn!("checkpoint quads that don't fit its triangles, left out");
+        }
         Some((mesh, self.levels.as_deref().cloned()))
     }
 
@@ -197,6 +208,7 @@ impl Checkpoint {
             positions,
             triangles,
             levels: None,
+            diagonals: None,
         })
     }
 }

@@ -25,6 +25,11 @@
 //!   before it open the clay at the level it was saved at, without the
 //!   others; they can't read a log with level changes either, so they
 //!   open it without its timelapse.
+//! - `QUAD`: which triangles of the clay pair up into quads, and of the
+//!   checkpoints that had quads, as
+//!   [diagonal codes](crate::sculpt::mesh::diagonals). Readers from before
+//!   it open the clay as triangles. Codes that don't fit their clay are
+//!   dropped, and the clay opens as triangles.
 //!
 //! The log and checkpoints use the encodings next to their types, in
 //! `sculpt::record`, so whoever adds an event also adds how it is saved.
@@ -61,8 +66,9 @@ pub const REFERENCE: u32 = tag(b"REF_");
 pub const VIEW: u32 = tag(b"VIEW");
 pub const REFERENCE_BY_KEY: u32 = tag(b"REFH");
 pub const LEVELS: u32 = tag(b"LEVL");
+pub const QUADS: u32 = tag(b"QUAD");
 /// The chunks this version reads; others are skipped without inflating.
-const KNOWN: [u32; 7] = [
+const KNOWN: [u32; 8] = [
     MESH,
     CHECKPOINTS,
     LOG,
@@ -70,6 +76,7 @@ const KNOWN: [u32; 7] = [
     VIEW,
     REFERENCE_BY_KEY,
     LEVELS,
+    QUADS,
 ];
 
 const DEFLATED: u32 = 1;
@@ -235,6 +242,31 @@ impl SceneWriter {
             levels.write(&mut w, &checkpoint.positions);
         }
         self.chunk(LEVELS, self.pack, &w.finish())
+    }
+
+    /// The quads of the clay and of its checkpoints; no chunk at all when
+    /// there are none.
+    pub fn quads(&mut self, sculpt: &Sculpt) -> &mut Self {
+        let kept: Vec<(usize, &[u8])> = sculpt
+            .checkpoints()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| Some((i, c.diagonals.as_deref()?)))
+            .collect();
+        let live = sculpt.mesh.diagonals();
+        if live.is_none() && kept.is_empty() {
+            return self;
+        }
+        let mut w = Writer::new();
+        match &live {
+            Some(codes) => w.u8(1).bytes(codes),
+            None => w.u8(0),
+        };
+        w.len(kept.len());
+        for (i, codes) in kept {
+            w.u32(i as u32).bytes(codes);
+        }
+        self.chunk(QUADS, self.pack, &w.finish())
     }
 
     /// The reference file is stored as it came: most formats are packed
@@ -446,6 +478,7 @@ impl Scene {
         let mut reference = None;
         let mut view = None;
         let mut levels = None;
+        let mut quads = None;
         let mut history_damaged = false;
         let mut reference_damaged = false;
         // A damaged part is logged and left out; only damaged clay (or
@@ -485,13 +518,20 @@ impl Scene {
                 },
                 VIEW => view = Some(read_view(&mut r)?),
                 LEVELS => levels = Some(chunk.payload),
+                QUADS => quads = Some(chunk.payload),
                 _ => {}
             }
         }
-        let mesh = mesh.ok_or(ReadError::Invalid {
+        let mut mesh = mesh.ok_or(ReadError::Invalid {
             offset: data.len(),
             what: "a scene without clay",
         })?;
+        if let Some(payload) = quads
+            && let Err(err) = read_quads(&payload, &mut mesh, &mut checkpoints)
+        {
+            // Only the quads are lost: the clay and its history are whole.
+            damaged("quads", err);
+        }
         let levels = match levels {
             Some(payload) => match read_levels(&payload, &mesh, &mut checkpoints) {
                 Ok(levels) => levels,
@@ -551,6 +591,47 @@ fn read_levels(
         checkpoint.levels = Some(Arc::new(read));
     }
     Ok(levels)
+}
+
+/// Reads a `QUAD` chunk into the clay and its checkpoints. The clay's
+/// codes are checked against its triangles now; a checkpoint's when its
+/// mesh is built (see [`Checkpoint::diagonals`]), but they must already be
+/// one per triangle. Nothing is put in place unless the whole chunk fits.
+fn read_quads(
+    payload: &[u8],
+    mesh: &mut Mesh,
+    checkpoints: &mut [Checkpoint],
+) -> Result<(), ReadError> {
+    let mut r = Reader::new(payload);
+    let live = match r.u8()? {
+        0 => None,
+        1 => Some(r.bytes()?),
+        _ => return Err(r.invalid("unknown kind of quads")),
+    };
+    let count = r.len(12)?;
+    let mut kept = Vec::with_capacity(count.min(checkpoints.len()));
+    for _ in 0..count {
+        let i = r.u32()? as usize;
+        let codes = r.bytes()?;
+        let fits = checkpoints
+            .get(i)
+            .filter(|c| c.has_mesh())
+            .and_then(|c| c.triangles.as_ref())
+            .is_some_and(|t| t.len().div_ceil(4) == codes.len());
+        if !fits {
+            return Err(r.invalid("quads that don't fit their checkpoint"));
+        }
+        kept.push((i, codes));
+    }
+    if let Some(codes) = live
+        && !mesh.set_diagonals(codes)
+    {
+        return Err(r.invalid("quads that don't fit the clay"));
+    }
+    for (i, codes) in kept {
+        checkpoints[i].diagonals = Some(codes.into());
+    }
+    Ok(())
 }
 
 fn write_mesh(w: &mut Writer, mesh: &Mesh) {
@@ -709,6 +790,7 @@ mod tests {
             .checkpoints(s.checkpoints())
             .log(s.log())
             .levels(s)
+            .quads(s)
             .view(view);
         w.finish()
     }
@@ -1262,6 +1344,160 @@ mod tests {
             let scene = Scene::read(&next).expect("reads");
             s = Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
         }
+    }
+
+    /// A session on quads: the start clay with its levels, a stroke, a
+    /// remesh to triangles and then to quads again, and another stroke.
+    fn quad_session() -> Sculpt {
+        let (mesh, levels) = crate::sculpt::cube_sphere(3);
+        let mut s = Sculpt::with_levels(mesh, Some(levels));
+        let stroke = |s: &mut Sculpt, clock: f64| {
+            s.set_clock(clock);
+            s.begin_stroke();
+            s.dab(Dab {
+                brush: Brush::Clay,
+                centre: Vec3::new(0.2, 0.3, 1.0).normalize(),
+                radius: 0.4,
+                strength: 0.6,
+                invert: false,
+                symmetry: true,
+                direction: Vec3::X,
+            });
+            s.end_stroke();
+            s.refresh();
+        };
+        stroke(&mut s, 1.0);
+        s.set_clock(2.0);
+        s.replace_mesh(Mesh::icosphere(2));
+        stroke(&mut s, 3.0);
+        s.set_clock(4.0);
+        s.replace_mesh(crate::sculpt::cube_sphere(2).0);
+        stroke(&mut s, 5.0);
+        s
+    }
+
+    fn sorted(quads: &[[u32; 2]]) -> Vec<[u32; 2]> {
+        let mut q: Vec<[u32; 2]> = quads.iter().map(|&[a, b]| [a.min(b), a.max(b)]).collect();
+        q.sort_unstable();
+        q
+    }
+
+    #[test]
+    fn quads_come_back_in_a_scene_and_an_autosave() {
+        let live = quad_session();
+        assert!(!live.mesh.quads.is_empty());
+        let with_quads: Vec<bool> = live
+            .checkpoints()
+            .iter()
+            .filter(|c| c.triangles.is_some())
+            .map(|c| c.diagonals.is_some())
+            .collect();
+        assert_eq!(with_quads, [true, false, true]);
+        let stored = {
+            let mut w = SceneWriter::stored();
+            w.mesh(&live.mesh)
+                .history(&live, &mut HistoryCache::default())
+                .levels(&live)
+                .quads(&live);
+            w.finish()
+        };
+        for data in [save(&live, &view()), stored] {
+            let scene = Scene::read(&data).expect("reads back");
+            assert!(!scene.history_damaged);
+            assert_eq!(scene.mesh.quads, sorted(&live.mesh.quads));
+            assert_eq!(scene.checkpoints, live.checkpoints());
+            // Export writes the quads again.
+            let obj = String::from_utf8(crate::meshio::obj::write(&scene.mesh)).unwrap();
+            let faces = |obj: &str, corners: usize| {
+                obj.lines()
+                    .filter(|l| l.starts_with("f ") && l.split(' ').count() == corners + 1)
+                    .count()
+            };
+            assert_eq!(faces(&obj, 4), live.mesh.quads.len());
+            assert_eq!(faces(&obj, 3), 0);
+            // The timelapse has them at each checkpoint, and its clay is
+            // still the saved clay bit for bit.
+            let mut replay = Replay::new(scene.checkpoints.clone(), scene.log.clone());
+            assert!(replay.seek(0.5, usize::MAX));
+            assert_eq!(
+                replay.sculpt.mesh.quads.len(),
+                live.checkpoints()[0].triangles.as_ref().unwrap().len() / 2
+            );
+            assert!(replay.seek(2.5, usize::MAX));
+            assert!(replay.sculpt.mesh.quads.is_empty());
+            assert!(replay.seek(f64::INFINITY, usize::MAX));
+            assert_eq!(replay.sculpt.mesh.quads, scene.mesh.quads);
+            assert_eq!(
+                position_bits(&replay.sculpt.mesh.positions),
+                position_bits(&live.mesh.positions)
+            );
+            // Reopened, the levels above keep the quads.
+            let mut resumed =
+                Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
+            resumed.set_clock(9.0);
+            assert!(resumed.subdivide());
+            assert_eq!(resumed.mesh.quads.len(), resumed.mesh.triangles.len() / 2);
+        }
+        // Saved again untouched, it is the same file.
+        let data = save(&live, &view());
+        let scene = Scene::read(&data).unwrap();
+        let reopened = Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
+        assert_eq!(save(&reopened, &view()), data);
+    }
+
+    #[test]
+    fn damaged_quads_open_the_clay_as_triangles() {
+        let live = quad_session();
+        let codes = live.mesh.diagonals().unwrap();
+        let triangles = live.mesh.triangles.len();
+        let chunk = |payload: &[u8]| {
+            let mut w = SceneWriter::new();
+            w.mesh(&live.mesh)
+                .history(&live, &mut HistoryCache::default())
+                .levels(&live)
+                .chunk(QUADS, true, payload);
+            Scene::read(&w.finish()).expect("the clay still opens")
+        };
+        let mut bent = codes.clone();
+        bent[0] ^= 1;
+        let mut short = Writer::new();
+        short.u8(1).bytes(&codes[1..]).len(0);
+        let mut other = Writer::new();
+        other.u8(1).bytes(&codes).len(1).u32(1).bytes(&codes);
+        let mut unknown = Writer::new();
+        unknown.u8(1).bytes(&codes).len(1).u32(99).bytes(&codes);
+        let mut kind = Writer::new();
+        kind.u8(7);
+        for payload in [
+            b"not quads".to_vec(),
+            Vec::new(),
+            {
+                let mut w = Writer::new();
+                w.u8(1).bytes(&bent).len(0);
+                w.finish()
+            },
+            short.finish(),
+            // Codes for the start sphere given to the icosphere's checkpoint.
+            other.finish(),
+            unknown.finish(),
+            kind.finish(),
+        ] {
+            let scene = chunk(&payload);
+            assert!(scene.mesh.quads.is_empty());
+            assert!(scene.checkpoints.iter().all(|c| c.diagonals.is_none()));
+            assert!(!scene.history_damaged, "the timelapse is whole");
+            assert_eq!(scene.mesh.triangles.len(), triangles);
+        }
+        // Every truncation of a good chunk: never a panic, and never quads
+        // that don't fit.
+        let mut good = Writer::new();
+        good.u8(1).bytes(&codes).len(0);
+        let good = good.finish();
+        for cut in (0..good.len()).step_by(7) {
+            let scene = chunk(&good[..cut]);
+            assert!(scene.mesh.quads.is_empty());
+        }
+        assert_eq!(chunk(&good).mesh.quads, sorted(&live.mesh.quads));
     }
 
     #[test]

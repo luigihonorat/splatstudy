@@ -206,6 +206,100 @@ impl Mesh {
     pub fn indices(&self) -> &[u32] {
         bytemuck::cast_slice(&self.triangles)
     }
+
+    /// The quads as [diagonal codes](diagonals), or `None` without quads.
+    pub fn diagonals(&self) -> Option<Vec<u8>> {
+        (!self.quads.is_empty()).then(|| diagonals(&self.triangles, &self.quads))
+    }
+
+    /// Pairs the triangles into quads as the [diagonal codes](diagonals)
+    /// say. Codes that don't fit this mesh (the wrong length, a diagonal
+    /// no other triangle shares, a triangle claimed twice) leave it
+    /// without quads: false then.
+    pub fn set_diagonals(&mut self, codes: &[u8]) -> bool {
+        self.quads.clear();
+        let n = self.triangles.len();
+        if codes.len() != n.div_ceil(4) {
+            return false;
+        }
+        let code = |t: usize| (codes[t / 4] >> (t % 4 * 2)) & 3;
+        // The diagonal's corners, either way round.
+        let diagonal = |t: usize| {
+            let k = code(t) as usize;
+            let tri = self.triangles[t];
+            let (a, b) = (tri[(k + 1) % 3], tri[(k + 2) % 3]);
+            (a.min(b), a.max(b))
+        };
+        let mut partner = vec![u32::MAX; n];
+        for (t, partner) in partner.iter_mut().enumerate() {
+            if code(t) == NO_DIAGONAL {
+                continue;
+            }
+            let edge = diagonal(t);
+            let Some(&u) = self.vertex_faces.of(edge.0).iter().find(|&&u| {
+                u as usize != t && code(u as usize) != NO_DIAGONAL && diagonal(u as usize) == edge
+            }) else {
+                return false;
+            };
+            *partner = u;
+        }
+        // Each pair both ways, so no triangle is in two quads.
+        let mut quads = Vec::new();
+        for (t, &u) in partner.iter().enumerate() {
+            if u == u32::MAX {
+                continue;
+            }
+            if partner[u as usize] != t as u32 {
+                return false;
+            }
+            if (t as u32) < u {
+                quads.push([t as u32, u]);
+            }
+        }
+        self.quads = quads;
+        true
+    }
+}
+
+/// The diagonal code of a triangle that isn't half of a quad.
+pub const NO_DIAGONAL: u8 = 3;
+
+/// The quads (see [`Mesh::quads`]) as one code per triangle, saying which
+/// of its edges is the diagonal its quad hides: `k` for the edge opposite
+/// corner `k`, [`NO_DIAGONAL`] for a triangle on its own. Two bits per
+/// triangle, four to a byte, the first in the low bits, so the bytes read
+/// as little-endian `u32`s hold sixteen each. A pair that isn't two
+/// triangles sharing an edge, or that has a triangle already paired, is
+/// left out.
+pub fn diagonals(triangles: &[[u32; 3]], quads: &[[u32; 2]]) -> Vec<u8> {
+    let mut codes = vec![0xff; triangles.len().div_ceil(4)];
+    let code = |codes: &[u8], t: usize| (codes[t / 4] >> (t % 4 * 2)) & 3;
+    let set = |codes: &mut [u8], t: usize, k: usize| {
+        codes[t / 4] &= !(3 << (t % 4 * 2));
+        codes[t / 4] |= (k as u8) << (t % 4 * 2);
+    };
+    for &[s, t] in quads {
+        let (s, t) = (s as usize, t as usize);
+        let (Some(&ts), Some(&tt)) = (triangles.get(s), triangles.get(t)) else {
+            continue;
+        };
+        if s == t || code(&codes, s) != NO_DIAGONAL || code(&codes, t) != NO_DIAGONAL {
+            continue;
+        }
+        // The one corner of each the other doesn't have.
+        let alone = |a: [u32; 3], b: [u32; 3]| {
+            let mut off = (0..3).filter(|&k| !b.contains(&a[k]));
+            match (off.next(), off.next()) {
+                (Some(k), None) => Some(k),
+                _ => None,
+            }
+        };
+        if let (Some(ks), Some(kt)) = (alone(ts, tt), alone(tt, ts)) {
+            set(&mut codes, s, ks);
+            set(&mut codes, t, kt);
+        }
+    }
+    codes
 }
 
 /// The normal of triangle `t`, as long as twice its area: larger
@@ -551,6 +645,81 @@ mod tests {
         for (a, b) in local.iter().zip(&mesh.normals) {
             assert!(a.distance(*b) < 1e-5);
         }
+    }
+
+    #[test]
+    fn diagonal_codes_give_back_the_quads() {
+        let (mut mesh, _) = crate::sculpt::cube_sphere(3);
+        let mut quads = mesh.quads.clone();
+        assert_eq!(quads.len(), mesh.triangles.len() / 2);
+        let codes = mesh.diagonals().expect("quads");
+        assert_eq!(codes.len(), mesh.triangles.len().div_ceil(4));
+        assert!(mesh.set_diagonals(&codes));
+        quads.iter_mut().for_each(|q| q.sort_unstable());
+        quads.sort_unstable();
+        assert_eq!(mesh.quads, quads);
+        // Without quads there are no codes; codes of none pair nothing.
+        mesh.quads.clear();
+        assert_eq!(mesh.diagonals(), None);
+        assert!(mesh.set_diagonals(&vec![0xff; codes.len()]));
+        assert!(mesh.quads.is_empty());
+    }
+
+    #[test]
+    fn diagonal_codes_that_dont_fit_leave_triangles() {
+        let (mut mesh, _) = crate::sculpt::cube_sphere(2);
+        let codes = mesh.diagonals().expect("quads");
+        // The wrong length.
+        assert!(!mesh.set_diagonals(&codes[1..]));
+        assert!(mesh.quads.is_empty());
+        // A triangle whose diagonal no neighbour shares: the first one's
+        // turned to another edge.
+        let mut bent = codes.clone();
+        let first = bent[0] & 3;
+        bent[0] = (bent[0] & !3) | ((first + 1) % 3);
+        assert!(!mesh.set_diagonals(&bent));
+        assert!(mesh.quads.is_empty());
+        // One half of a quad alone.
+        let mut half = codes.clone();
+        half[0] |= 3;
+        assert!(!mesh.set_diagonals(&half));
+        // Garbage of the right length never panics.
+        for seed in 0..64u32 {
+            let junk: Vec<u8> = (0..codes.len() as u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761).wrapping_add(seed * 977) >> 13) as u8)
+                .collect();
+            let fits = mesh.set_diagonals(&junk);
+            assert_eq!(
+                fits,
+                !mesh.quads.is_empty() || junk.iter().all(|&b| b == 0xff)
+            );
+        }
+        assert!(mesh.set_diagonals(&codes));
+    }
+
+    #[test]
+    fn pairs_that_are_not_quads_get_no_code() {
+        let mesh = Mesh::icosphere(1);
+        // Not sharing an edge, the same triangle twice, out of range, and a
+        // triangle in a second pair.
+        let t = &mesh.triangles;
+        let neighbour = (1..t.len() as u32)
+            .find(|&u| t[u as usize].iter().filter(|v| t[0].contains(v)).count() == 2)
+            .unwrap();
+        let far = (1..t.len() as u32)
+            .find(|&u| !t[u as usize].iter().any(|v| t[0].contains(v)))
+            .unwrap();
+        let codes = diagonals(
+            t,
+            &[[0, far], [3, 3], [0, 999], [0, neighbour], [neighbour, 0]],
+        );
+        let code = |i: usize| (codes[i / 4] >> (i % 4 * 2)) & 3;
+        let paired: Vec<usize> = (0..t.len()).filter(|&i| code(i) != NO_DIAGONAL).collect();
+        assert_eq!(paired, {
+            let mut p = vec![0, neighbour as usize];
+            p.sort_unstable();
+            p
+        });
     }
 
     /// Where [`Mesh::new`] spends its time, on a remeshed sphere.

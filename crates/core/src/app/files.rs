@@ -261,7 +261,8 @@ impl App {
     fn write_scene(&mut self, mut w: SceneWriter, key: Option<BlobKey>) -> Vec<u8> {
         w.mesh(&self.sculpt.mesh)
             .history(&self.sculpt, &mut self.files.history)
-            .levels(&self.sculpt);
+            .levels(&self.sculpt)
+            .quads(&self.sculpt);
         match (self.scene_reference(), key) {
             (Some(reference), Some(key)) => w.reference_by_key(reference, key),
             (Some(reference), None) => w.reference(reference),
