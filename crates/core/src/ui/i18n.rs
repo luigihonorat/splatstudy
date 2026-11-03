@@ -172,9 +172,13 @@ pub const JA: Tr = Tr {
     reference_tools: "モチーフ",
     navigation: "視点操作",
     hint_zbrush: "背景をドラッグ：回転
-Alt：移動
+Alt＋背景をドラッグ：移動
+Alt＋背景を押し、ドラッグしながら Alt を離す：拡大
+回転中に Shift：近い正面・側面・上面にそろえる
 右ドラッグ：回転
-Ctrl＋右：拡大",
+Alt＋右：移動
+Ctrl＋右：拡大
+粘土の上で Alt：逆の動き",
     hint_blender: "中ボタン：回転
 Shift＋中：移動
 Ctrl＋中：拡大",
@@ -262,9 +266,13 @@ pub const EN: Tr = Tr {
     reference_tools: "reference",
     navigation: "navigation",
     hint_zbrush: "drag the background: turn
-Alt: pan
+Alt + drag the background: pan
+Alt + press the background, then let go of Alt while dragging: zoom
+Shift while turning: snap to the nearest front, side or top view
 right drag: turn
-Ctrl + right: zoom",
+Alt + right: pan
+Ctrl + right: zoom
+Alt on the clay: opposite action",
     hint_blender: "middle: turn
 Shift + middle: pan
 Ctrl + middle: zoom",
@@ -352,9 +360,13 @@ pub const FR: Tr = Tr {
     reference_tools: "modèle",
     navigation: "navigation",
     hint_zbrush: "glisser le fond : tourner
-Alt : déplacer
+Alt + glisser le fond : déplacer
+Alt + appuyer sur le fond, puis lâcher Alt en glissant : zoomer
+Maj en tournant : vue de face, de côté ou de dessus la plus proche
 clic droit : tourner
-Ctrl + droit : zoomer",
+Alt + droit : déplacer
+Ctrl + droit : zoomer
+Alt sur l'argile : action inverse",
     hint_blender: "milieu : tourner
 Maj + milieu : déplacer
 Ctrl + milieu : zoomer",
