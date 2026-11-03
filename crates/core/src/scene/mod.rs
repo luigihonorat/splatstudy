@@ -20,6 +20,11 @@
 //!   file named by a [`BlobKey`] and stored apart, so the file is written
 //!   once rather than with every save. Readers from before it skip it and
 //!   open the scene without its reference.
+//! - `LEVL`: the clay's subdivision levels, if it has any, and those of
+//!   the checkpoints that kept some (see [`Levels::write`]). Readers from
+//!   before it open the clay at the level it was saved at, without the
+//!   others; they can't read a log with level changes either, so they
+//!   open it without its timelapse.
 //!
 //! The log and checkpoints use the encodings next to their types, in
 //! `sculpt::record`, so whoever adds an event also adds how it is saved.
@@ -36,7 +41,7 @@ use crate::camera::OrbitCamera;
 use crate::io::{ReadError, Reader, Writer};
 use crate::reference::Reference;
 use crate::sculpt::record::{read_checkpoints, read_log, write_checkpoints, write_log};
-use crate::sculpt::{Checkpoint, Entry, Mesh, Sculpt};
+use crate::sculpt::{Checkpoint, Entry, Levels, Mesh, Sculpt};
 
 pub use blob::BlobKey;
 pub use reference::SavedReference;
@@ -55,8 +60,17 @@ pub const LOG: u32 = tag(b"LOG_");
 pub const REFERENCE: u32 = tag(b"REF_");
 pub const VIEW: u32 = tag(b"VIEW");
 pub const REFERENCE_BY_KEY: u32 = tag(b"REFH");
+pub const LEVELS: u32 = tag(b"LEVL");
 /// The chunks this version reads; others are skipped without inflating.
-const KNOWN: [u32; 6] = [MESH, CHECKPOINTS, LOG, REFERENCE, VIEW, REFERENCE_BY_KEY];
+const KNOWN: [u32; 7] = [
+    MESH,
+    CHECKPOINTS,
+    LOG,
+    REFERENCE,
+    VIEW,
+    REFERENCE_BY_KEY,
+    LEVELS,
+];
 
 const DEFLATED: u32 = 1;
 /// Deflate effort: the clay is mostly floats, which barely compress past
@@ -74,6 +88,8 @@ const MAX_TRIANGLES: usize = 8 << 20;
 pub struct Scene {
     /// The clay as it was saved.
     pub mesh: Mesh,
+    /// The clay's other subdivision levels, if it has any.
+    pub levels: Option<Levels>,
     /// The clay at points of the log; the first is where it starts.
     pub checkpoints: Vec<Checkpoint>,
     pub log: Vec<Entry>,
@@ -189,6 +205,36 @@ impl SceneWriter {
         let pack = self.pack;
         self.chunk(CHECKPOINTS, pack, &cache.checkpoints.bytes)
             .chunk(LOG, pack, &cache.log.bytes)
+    }
+
+    /// The clay's subdivision levels and those its checkpoints kept; no
+    /// chunk at all when there are none.
+    pub fn levels(&mut self, sculpt: &Sculpt) -> &mut Self {
+        let kept: Vec<(usize, &Checkpoint, &Levels)> = sculpt
+            .checkpoints()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| Some((i, c, c.levels.as_deref()?)))
+            .collect();
+        if sculpt.level_data().is_none() && kept.is_empty() {
+            return self;
+        }
+        let mut w = Writer::new();
+        match sculpt.level_data() {
+            Some(levels) => {
+                w.u8(1);
+                levels.write(&mut w, &sculpt.mesh.positions);
+            }
+            None => {
+                w.u8(0);
+            }
+        }
+        w.len(kept.len());
+        for (i, checkpoint, levels) in kept {
+            w.u32(i as u32);
+            levels.write(&mut w, &checkpoint.positions);
+        }
+        self.chunk(LEVELS, self.pack, &w.finish())
     }
 
     /// The reference file is stored as it came: most formats are packed
@@ -399,6 +445,7 @@ impl Scene {
         let mut log = Vec::new();
         let mut reference = None;
         let mut view = None;
+        let mut levels = None;
         let mut history_damaged = false;
         let mut reference_damaged = false;
         // A damaged part is logged and left out; only damaged clay (or
@@ -437,6 +484,7 @@ impl Scene {
                     }
                 },
                 VIEW => view = Some(read_view(&mut r)?),
+                LEVELS => levels = Some(chunk.payload),
                 _ => {}
             }
         }
@@ -444,6 +492,19 @@ impl Scene {
             offset: data.len(),
             what: "a scene without clay",
         })?;
+        let levels = match levels {
+            Some(payload) => match read_levels(&payload, &mesh, &mut checkpoints) {
+                Ok(levels) => levels,
+                Err(err) => {
+                    // The clay opens at the level it was saved at; a history
+                    // through levels can't be replayed without them.
+                    damaged("levels", err);
+                    history_damaged = true;
+                    None
+                }
+            },
+            None => None,
+        };
         if history_damaged {
             // Half a history can't be replayed; the clay itself is fine.
             checkpoints.clear();
@@ -454,6 +515,7 @@ impl Scene {
         }
         Ok(Scene {
             mesh,
+            levels,
             checkpoints,
             log,
             reference,
@@ -462,6 +524,33 @@ impl Scene {
             reference_damaged,
         })
     }
+}
+
+/// Reads a `LEVL` chunk: the clay's levels, and those of the checkpoints,
+/// which it puts in place. Levels that don't fit their clay are an error.
+fn read_levels(
+    payload: &[u8],
+    mesh: &Mesh,
+    checkpoints: &mut [Checkpoint],
+) -> Result<Option<Levels>, ReadError> {
+    let mut r = Reader::new(payload);
+    let levels = match r.u8()? {
+        0 => None,
+        1 => Some(Levels::read(&mut r, &mesh.positions, &mesh.triangles)?),
+        _ => return Err(r.invalid("unknown kind of levels")),
+    };
+    let kept = r.len(5)?;
+    for _ in 0..kept {
+        let i = r.u32()? as usize;
+        let checkpoint = checkpoints
+            .get_mut(i)
+            .filter(|c| c.has_mesh())
+            .ok_or_else(|| r.invalid("levels for a checkpoint that has no mesh"))?;
+        let triangles = checkpoint.triangles.clone().unwrap_or_default();
+        let read = Levels::read(&mut r, &checkpoint.positions, &triangles)?;
+        checkpoint.levels = Some(Arc::new(read));
+    }
+    Ok(levels)
 }
 
 fn write_mesh(w: &mut Writer, mesh: &Mesh) {
@@ -588,7 +677,7 @@ mod tests {
     use glam::Vec3;
 
     use super::*;
-    use crate::sculpt::{Brush, Dab, Replay, Sculpt};
+    use crate::sculpt::{Brush, Dab, Event, Replay, Sculpt};
 
     /// A short session on a small sphere: a few strokes, an undo.
     fn session() -> Sculpt {
@@ -619,6 +708,7 @@ mod tests {
         w.mesh(&s.mesh)
             .checkpoints(s.checkpoints())
             .log(s.log())
+            .levels(s)
             .view(view);
         w.finish()
     }
@@ -670,7 +760,7 @@ mod tests {
             position_bits(&live.mesh.positions)
         );
         // The sculpt the app makes of it saves to the same bytes.
-        let resumed = Sculpt::with_history(scene.mesh, scene.log, scene.checkpoints);
+        let resumed = Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
         assert_eq!(save(&resumed, &view), data);
     }
 
@@ -703,7 +793,7 @@ mod tests {
             position_bits(&replay.sculpt.mesh.positions),
             position_bits(&live.mesh.positions)
         );
-        let resumed = Sculpt::with_history(scene.mesh, scene.log, scene.checkpoints);
+        let resumed = Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
         assert_eq!(save(&resumed, &view()), data);
     }
 
@@ -825,6 +915,192 @@ mod tests {
             (a.checkpoints, a.log, a.view),
             (b.checkpoints, b.log, b.view)
         );
+    }
+
+    /// A session through subdivision levels, with a remesh undone so that
+    /// a checkpoint keeps levels too, ending below the top.
+    fn leveled_session() -> Sculpt {
+        let mut s = Sculpt::new(Mesh::icosphere(2));
+        s.set_clock(1.0);
+        s.subdivide();
+        s.subdivide();
+        let dab = |s: &mut Sculpt, at: Vec3, brush: Brush| {
+            s.begin_stroke();
+            s.dab(Dab {
+                brush,
+                centre: at.normalize(),
+                radius: 0.3,
+                strength: 0.7,
+                invert: false,
+                symmetry: true,
+                direction: Vec3::X,
+            });
+            s.end_stroke();
+            s.refresh();
+        };
+        dab(&mut s, Vec3::new(0.1, 0.2, 1.0), Brush::Crease);
+        s.set_clock(2.0);
+        s.change_level(false);
+        dab(&mut s, Vec3::new(-0.3, 0.1, 1.0), Brush::Inflate);
+        s.set_clock(3.0);
+        s.replace_mesh(Mesh::icosphere(1));
+        s.undo();
+        s.change_level(false);
+        dab(&mut s, Vec3::new(0.0, -0.4, 1.0), Brush::Clay);
+        s
+    }
+
+    #[test]
+    fn a_scene_keeps_every_level_and_replays_through_them() {
+        let live = leveled_session();
+        assert_eq!(live.levels(), Some((0, 3)));
+        assert!(live.checkpoints().iter().any(|c| c.levels.is_some()));
+        for data in [save(&live, &view()), {
+            let mut w = SceneWriter::stored();
+            w.mesh(&live.mesh)
+                .history(&live, &mut HistoryCache::default())
+                .levels(&live);
+            w.finish()
+        }] {
+            let scene = Scene::read(&data).expect("reads back");
+            assert!(!scene.history_damaged);
+            assert_eq!(scene.levels.as_ref(), live.level_data());
+            assert_eq!(scene.checkpoints, live.checkpoints());
+            let mut replay = Replay::new(scene.checkpoints.clone(), scene.log.clone());
+            assert!(replay.seek(f64::INFINITY, usize::MAX));
+            assert_eq!(
+                position_bits(&replay.sculpt.mesh.positions),
+                position_bits(&live.mesh.positions)
+            );
+            assert_eq!(replay.sculpt.level_data(), live.level_data());
+
+            // Reopened, it goes up to the finest level as the live sculpt
+            // does, sculpts on, and still replays bit for bit.
+            let mut resumed =
+                Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
+            let mut live = leveled_session();
+            for s in [&mut resumed, &mut live] {
+                s.set_clock(9.0);
+                assert!(s.change_level(true));
+                assert!(s.change_level(true));
+            }
+            assert_eq!(resumed.mesh.positions, live.mesh.positions);
+            let rebuilds = resumed.log().iter().filter(|e| e.event == Event::Rebuild);
+            assert_eq!(rebuilds.count(), 1, "reopened without a whole checkpoint");
+            let mut replay = Replay::of(&resumed);
+            assert!(replay.seek(f64::INFINITY, usize::MAX));
+            assert_eq!(replay.sculpt.mesh.positions, resumed.mesh.positions);
+            assert_eq!(replay.sculpt.level_data(), resumed.level_data());
+        }
+    }
+
+    /// Writes two scenes into the folder named by `SPLATSTUDY_DEMO_DIR`, for
+    /// looking at levels in the app: a sphere subdivided three times, fine
+    /// grooves cut at the top level, then a broad pull made two levels
+    /// down; saved at that low level, and again back at the top.
+    /// `SPLATSTUDY_DEMO_DIR=… cargo test -p splatstudy-core demo_scenes -- --ignored`
+    #[test]
+    #[ignore]
+    fn demo_scenes() {
+        let dir = std::env::var("SPLATSTUDY_DEMO_DIR").expect("SPLATSTUDY_DEMO_DIR");
+        let mut s = Sculpt::new(Mesh::icosphere(4));
+        let mut clock = 0.0;
+        for _ in 0..3 {
+            clock += 1.0;
+            s.set_clock(clock);
+            assert!(s.subdivide());
+        }
+        for row in 0..5 {
+            clock += 1.0;
+            s.set_clock(clock);
+            s.begin_stroke();
+            let y = -0.3 + row as f32 * 0.15;
+            for i in 0..40 {
+                let x = -0.45 + i as f32 * 0.0225;
+                s.dab(Dab {
+                    brush: Brush::Crease,
+                    centre: Vec3::new(x, y, 1.0).normalize(),
+                    radius: 0.06,
+                    strength: 1.0,
+                    invert: false,
+                    symmetry: false,
+                    direction: Vec3::X,
+                });
+                if i % 4 == 3 {
+                    s.refresh();
+                }
+            }
+            s.end_stroke();
+            s.refresh();
+        }
+        s.change_level(false);
+        s.change_level(false);
+        clock += 1.0;
+        s.set_clock(clock);
+        s.begin_stroke();
+        s.grab(Vec3::new(0.0, 0.0, 1.0), 0.7, false);
+        s.drag(Vec3::new(0.0, 0.25, 0.45));
+        s.end_stroke();
+        s.refresh();
+        let save = |s: &Sculpt, name: &str| {
+            let mut w = SceneWriter::new();
+            w.mesh(&s.mesh)
+                .checkpoints(s.checkpoints())
+                .log(s.log())
+                .levels(s);
+            std::fs::write(format!("{dir}/{name}"), w.finish()).unwrap();
+        };
+        save(&s, "levels-low.splatstudy");
+        s.change_level(true);
+        s.change_level(true);
+        save(&s, "levels-high.splatstudy");
+    }
+
+    #[test]
+    fn a_reopened_scene_with_levels_saves_the_same_bytes() {
+        let live = leveled_session();
+        let data = save(&live, &view());
+        let scene = Scene::read(&data).unwrap();
+        let resumed = Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
+        assert_eq!(save(&resumed, &view()), data);
+    }
+
+    #[test]
+    fn damaged_levels_open_the_clay_without_them() {
+        let live = leveled_session();
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh)
+            .checkpoints(live.checkpoints())
+            .log(live.log())
+            .chunk(LEVELS, true, b"not levels");
+        let scene = Scene::read(&w.finish()).expect("the clay opens");
+        assert!(scene.levels.is_none() && scene.history_damaged);
+        assert!(scene.log.is_empty());
+        // Levels that belong to other clay are refused the same way.
+        let mut other = Sculpt::new(Mesh::icosphere(3));
+        other.subdivide();
+        let mut w = SceneWriter::new();
+        w.mesh(&Mesh::icosphere(4)).levels(&other);
+        let scene = Scene::read(&w.finish()).expect("the clay opens");
+        assert!(scene.levels.is_none());
+        // Corrupted bytes anywhere: an error or a scene, never a panic.
+        let data = save(&live, &view());
+        let mut seed = 777u32;
+        for _ in 0..60 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let mut bad = data.clone();
+            let at = (seed as usize >> 4) % bad.len();
+            bad[at] ^= (seed >> 24) as u8 | 1;
+            if let Ok(scene) = Scene::read(&bad) {
+                let mut replay = Replay::new(scene.checkpoints.clone(), scene.log.clone());
+                replay.seek(f64::INFINITY, usize::MAX);
+                let mut s =
+                    Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
+                s.change_level(true);
+                s.change_level(false);
+                s.subdivide();
+            }
+        }
     }
 
     #[test]
@@ -984,7 +1260,7 @@ mod tests {
                 next.len() as f64 / 1e6,
             );
             let scene = Scene::read(&next).expect("reads");
-            s = Sculpt::with_history(scene.mesh, scene.log, scene.checkpoints);
+            s = Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
         }
     }
 

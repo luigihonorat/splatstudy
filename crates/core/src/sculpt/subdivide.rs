@@ -1,78 +1,186 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Subdivision: every triangle split into four, for finer detail where the
-//! clay is already shaped.
+//! Subdivision: every triangle split into four, with Loop's smoothing, so a
+//! coarse mesh becomes a finer, rounder one.
 //!
-//! The old vertices stay where they are, so nothing sculpted is lost. Each
-//! edge gets a new vertex at its midpoint, which then moves off the flat
-//! triangle towards the curved surface that the normals at the edge's two
-//! ends describe (as Phong tessellation does): without that, every old
-//! triangle would stay a flat facet.
+//! The finer mesh keeps the coarse one's vertices first, in their order,
+//! then one new vertex per edge; its triangles come in fours, one group
+//! per coarse triangle, in the coarse order. So the coarse triangles can
+//! always be read back from the fine ones (see [`parents`]), which is
+//! what lets the clay go up and down subdivision levels (`levels.rs`).
+//!
+//! Loop's scheme moves every vertex: a new one goes to 3/8 of each end of
+//! its edge plus 1/8 of the two vertices facing it, an old one towards
+//! the average of its ring. Along an edge that doesn't join exactly two
+//! triangles (an open border, a fin) a new vertex stays at the midpoint
+//! and the old vertices there stay put. Only arithmetic, no trigonometry:
+//! the result is the same on every machine that rounds as IEEE 754 says.
 
 use glam::Vec3;
 
 use super::mesh::Mesh;
 
-/// How far a new vertex moves from the edge's midpoint towards the tangent
-/// planes at its ends. One half puts it back on a sphere, to second order.
-const BULGE: f32 = 0.5;
+/// How a mesh splits into the next level: which edge each new vertex
+/// sits on, and which new vertices border each triangle.
+pub struct Split {
+    /// Vertices before the split.
+    old: usize,
+    /// The two ends of each edge, in the order of their new vertices: the
+    /// new vertex of edge `e` is vertex `old + e`.
+    edges: Vec<[u32; 2]>,
+    /// For each triangle `[a, b, c]`, the edges `ab`, `bc` and `ca`.
+    sides: Vec<[u32; 3]>,
+}
+
+impl Split {
+    /// The split of `mesh`. Edges are numbered by their lower vertex, then
+    /// by where the other one comes in its ring, so the new vertices lie
+    /// in the same spatial order as the old. `None` if a triangle has a
+    /// corner twice: it has no edges to split.
+    pub fn of(mesh: &Mesh) -> Option<Split> {
+        let n = mesh.positions.len();
+        let mut slot_edge = vec![u32::MAX; mesh.neighbours.len()];
+        let mut edges = Vec::new();
+        for v in 0..n as u32 {
+            let start = mesh.neighbours.start(v);
+            for (i, &u) in mesh.neighbours.of(v).iter().enumerate() {
+                if u > v {
+                    slot_edge[start + i] = edges.len() as u32;
+                    edges.push([v, u]);
+                }
+            }
+        }
+        let edge = |a: u32, b: u32| -> Option<u32> {
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            let at = mesh.neighbours.of(lo).iter().position(|&u| u == hi)?;
+            Some(slot_edge[mesh.neighbours.start(lo) + at])
+        };
+        let sides = mesh
+            .triangles
+            .iter()
+            .map(|&[a, b, c]| Some([edge(a, b)?, edge(b, c)?, edge(c, a)?]))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Split {
+            old: n,
+            edges,
+            sides,
+        })
+    }
+
+    /// Vertices after the split.
+    pub fn len(&self) -> usize {
+        self.old + self.edges.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The finer triangles: four per coarse triangle `[a, b, c]`, as
+    /// `[a, ab, ca]`, `[b, bc, ab]`, `[c, ca, bc]` and `[ab, bc, ca]`.
+    pub fn triangles(&self, mesh: &Mesh) -> Vec<[u32; 3]> {
+        let old = self.old as u32;
+        let mut triangles = Vec::with_capacity(mesh.triangles.len() * 4);
+        for (&[a, b, c], s) in mesh.triangles.iter().zip(&self.sides) {
+            let [ab, bc, ca] = s.map(|e| old + e);
+            triangles.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+        }
+        triangles
+    }
+
+    /// Loop's scheme applied to `positions` on the mesh's triangles: the
+    /// finer level's positions, old vertices first.
+    pub fn positions(&self, mesh: &Mesh, positions: &[Vec3]) -> Vec<Vec3> {
+        let e = self.edges.len();
+        // The vertices facing each edge, summed, and how many triangles
+        // it borders, in triangle order so the sums are always the same.
+        let mut facing = vec![Vec3::ZERO; e];
+        let mut faces = vec![0u8; e];
+        for (&[a, b, c], s) in mesh.triangles.iter().zip(&self.sides) {
+            for (edge, opposite) in s.iter().zip([c, a, b]) {
+                facing[*edge as usize] += positions[opposite as usize];
+                faces[*edge as usize] = faces[*edge as usize].saturating_add(1);
+            }
+        }
+        // Old vertices on an edge that isn't between two triangles stay.
+        let mut fixed = vec![false; self.old];
+        for (&[a, b], &count) in self.edges.iter().zip(&faces) {
+            if count != 2 {
+                fixed[a as usize] = true;
+                fixed[b as usize] = true;
+            }
+        }
+        let mut out = Vec::with_capacity(self.len());
+        for v in 0..self.old {
+            let p = positions[v];
+            let ring = mesh.neighbours.of(v as u32);
+            if fixed[v] || ring.is_empty() {
+                out.push(p);
+                continue;
+            }
+            // Warren's weights: Loop's own, without the cosine.
+            let k = ring.len() as f32;
+            let beta = if ring.len() == 3 {
+                3.0 / 16.0
+            } else {
+                3.0 / (8.0 * k)
+            };
+            let sum = ring
+                .iter()
+                .fold(Vec3::ZERO, |s, &u| s + positions[u as usize]);
+            out.push(p * (1.0 - k * beta) + sum * beta);
+        }
+        for ((&[a, b], &count), &facing) in self.edges.iter().zip(&faces).zip(&facing) {
+            let ends = positions[a as usize] + positions[b as usize];
+            out.push(if count == 2 {
+                ends * 0.375 + facing * 0.125
+            } else {
+                ends * 0.5
+            });
+        }
+        out
+    }
+}
 
 /// Vertices the clay would have after [`subdivide`]: one more per edge.
 pub fn subdivided_len(mesh: &Mesh) -> usize {
-    mesh.positions.len() + edge_count(mesh)
+    mesh.positions.len()
+        + (0..mesh.positions.len() as u32)
+            .map(|v| mesh.neighbours.of(v).iter().filter(|&&u| u > v).count())
+            .sum::<usize>()
 }
 
-fn edge_count(mesh: &Mesh) -> usize {
-    (0..mesh.positions.len() as u32)
-        .map(|v| mesh.neighbours.of(v).iter().filter(|&&u| u > v).count())
-        .sum()
+/// The mesh with every triangle split into four and smoothed, its
+/// vertices in the order [`Split`] gives. `None` if a triangle has a
+/// corner twice.
+pub fn subdivide(mesh: &Mesh) -> Option<Mesh> {
+    let split = Split::of(mesh)?;
+    Some(Mesh::from_ordered(
+        split.positions(mesh, &mesh.positions),
+        split.triangles(mesh),
+    ))
 }
 
-/// The mesh with every triangle split into four, its new vertices eased
-/// onto the curve of the surface.
-pub fn subdivide(mesh: &Mesh) -> Mesh {
-    let mut positions = mesh.positions.clone();
-    positions.reserve(edge_count(mesh));
-    // The new vertex of each edge, stored at the edge's place in the
-    // neighbour list of its lower vertex.
-    // `None` for a pair that isn't an edge: a vertex with itself, in a
-    // triangle with a corner twice.
-    let slot = |a: u32, b: u32| -> Option<usize> {
-        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-        let at = mesh.neighbours.of(lo).iter().position(|&u| u == hi)?;
-        Some(mesh.neighbours.start(lo) + at)
-    };
-    let mut middle = vec![u32::MAX; mesh.neighbours.len()];
-    let mut midpoint = |s: usize, a: u32, b: u32, positions: &mut Vec<Vec3>| -> u32 {
-        if middle[s] == u32::MAX {
-            middle[s] = positions.len() as u32;
-            positions.push(eased_midpoint(mesh, a, b));
-        }
-        middle[s]
-    };
-    let mut triangles = Vec::with_capacity(mesh.triangles.len() * 4);
-    for &[a, b, c] in &mesh.triangles {
-        // A triangle with no area has nothing to split: it is left out.
-        let (Some(sab), Some(sbc), Some(sca)) = (slot(a, b), slot(b, c), slot(c, a)) else {
-            continue;
-        };
-        let ab = midpoint(sab, a, b, &mut positions);
-        let bc = midpoint(sbc, b, c, &mut positions);
-        let ca = midpoint(sca, c, a, &mut positions);
-        triangles.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+/// The coarse triangles that `triangles` were split from (see
+/// [`Split::triangles`]), the coarse mesh having `coarse` vertices. `None`
+/// unless every group of four has that shape, with the corners among the
+/// coarse vertices and the edge vertices after them.
+pub fn parents(triangles: &[[u32; 3]], coarse: usize) -> Option<Vec<[u32; 3]>> {
+    let (groups, rest) = triangles.as_chunks::<4>();
+    if !rest.is_empty() {
+        return None;
     }
-    Mesh::new(positions, triangles)
-}
-
-/// The midpoint of edge `ab`, moved towards the tangent planes at `a` and
-/// `b`.
-fn eased_midpoint(mesh: &Mesh, a: u32, b: u32) -> Vec3 {
-    let (pa, pb) = (mesh.positions[a as usize], mesh.positions[b as usize]);
-    let (na, nb) = (mesh.normals[a as usize], mesh.normals[b as usize]);
-    let m = (pa + pb) * 0.5;
-    let on_a = m - na * (m - pa).dot(na);
-    let on_b = m - nb * (m - pb).dot(nb);
-    m.lerp((on_a + on_b) * 0.5, BULGE)
+    let coarse = u32::try_from(coarse).ok()?;
+    groups
+        .iter()
+        .map(|&four| {
+            let [[a, ab, ca], [b, bc, ab1], [c, ca1, bc1], last] = four;
+            let shaped = ab1 == ab && ca1 == ca && bc1 == bc && last == [ab, bc, ca];
+            let corners = a < coarse && b < coarse && c < coarse;
+            let middles = ab >= coarse && bc >= coarse && ca >= coarse;
+            (shaped && corners && middles).then_some([a, b, c])
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -94,65 +202,76 @@ mod tests {
     #[test]
     fn splits_every_triangle_in_four_and_stays_closed() {
         let mesh = Mesh::icosphere(2);
-        let fine = subdivide(&mesh);
+        let fine = subdivide(&mesh).unwrap();
         assert_eq!(fine.triangles.len(), mesh.triangles.len() * 4);
         assert_eq!(fine.positions.len(), subdivided_len(&mesh));
         // The same as one more level of the icosphere, in size.
         assert_eq!(fine.positions.len(), Mesh::icosphere(3).positions.len());
         assert!(closed(&fine));
-        // Every old vertex is still there, exactly.
-        for p in &mesh.positions {
-            assert!(fine.positions.contains(p));
-        }
         for &t in &fine.triangles {
             let [a, b, c] = t.map(|v| fine.positions[v as usize]);
             assert!((b - a).cross(c - a).dot(a + b + c) > 0.0, "winds inward");
         }
-    }
-
-    #[test]
-    fn new_vertices_follow_the_curve_instead_of_the_facets() {
-        let mesh = Mesh::icosphere(2);
-        let fine = subdivide(&mesh);
-        // Plain midpoints of a level-2 icosphere sink up to ~1.6 % inside
-        // the sphere; eased ones stay much closer to it.
-        let worst = fine
-            .positions
-            .iter()
-            .map(|p| (p.length() - 1.0).abs())
-            .fold(0.0, f32::max);
-        assert!(worst < 0.003, "{worst}");
-    }
-
-    #[test]
-    fn a_triangle_with_a_corner_twice_is_left_out_not_a_panic() {
-        let positions = vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
-        let mesh = Mesh::from_ordered(positions, vec![[0, 1, 2], [0, 2, 1], [3, 3, 1]]);
-        let fine = subdivide(&mesh);
-        assert_eq!(fine.triangles.len(), 8);
-        assert!(
-            fine.triangles
-                .iter()
-                .flatten()
-                .all(|&v| (v as usize) < fine.positions.len())
+        // The coarse triangles read back from the fine ones.
+        assert_eq!(
+            parents(&fine.triangles, mesh.positions.len()).as_deref(),
+            Some(mesh.triangles.as_slice())
         );
     }
 
     #[test]
-    fn subdividing_through_the_sculpt_undoes_and_replays() {
-        use crate::sculpt::{Replay, Sculpt};
-        let mut s = Sculpt::new(Mesh::icosphere(3));
-        let coarse = s.mesh.positions.clone();
-        let fine = subdivide(&s.mesh);
-        s.set_clock(1.0);
-        s.replace_mesh(fine);
-        assert_eq!(s.mesh.triangles.len(), 1280 * 4);
-        let mut replay = Replay::of(&s);
-        assert!(replay.seek(f64::INFINITY, usize::MAX));
-        assert_eq!(replay.sculpt.mesh.positions, s.mesh.positions);
-        assert_eq!(replay.sculpt.mesh.triangles, s.mesh.triangles);
-        s.undo();
-        assert_eq!(s.mesh.positions, coarse);
+    fn the_surface_comes_out_smooth_and_round() {
+        // A coarse icosahedron, subdivided three times: Loop's surface is
+        // smooth, so the sphere's bumps even out level by level.
+        let mut mesh = Mesh::icosphere(0);
+        let spread = |m: &Mesh| {
+            let r: Vec<f32> = m.positions.iter().map(|p| p.length()).collect();
+            let (lo, hi) = r
+                .iter()
+                .fold((f32::MAX, 0f32), |(lo, hi), &r| (lo.min(r), hi.max(r)));
+            (hi - lo) / hi
+        };
+        let first = spread(&mesh);
+        for _ in 0..3 {
+            mesh = subdivide(&mesh).unwrap();
+        }
+        assert!(first < 1e-6, "the icosahedron's corners are on the sphere");
+        // Plain midpoints would leave the facets' centres 21 % lower.
+        assert!(spread(&mesh) < 0.03, "{}", spread(&mesh));
+        assert!(closed(&mesh));
+    }
+
+    #[test]
+    fn an_open_border_keeps_its_corners_and_midpoints() {
+        // Two triangles making a square: every edge but the diagonal is a
+        // border.
+        let positions = vec![Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y];
+        let mesh = Mesh::from_ordered(positions.clone(), vec![[0, 1, 2], [0, 2, 3]]);
+        let fine = subdivide(&mesh).unwrap();
+        assert_eq!(&fine.positions[..4], &positions[..]);
+        assert_eq!(fine.positions.len(), 9);
+        assert!(fine.positions.iter().all(|p| p.z == 0.0));
+    }
+
+    #[test]
+    fn a_triangle_with_a_corner_twice_has_no_split() {
+        let positions = vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
+        let mesh = Mesh::from_ordered(positions, vec![[0, 1, 2], [0, 2, 1], [3, 3, 1]]);
+        assert!(subdivide(&mesh).is_none());
+    }
+
+    #[test]
+    fn parents_refuse_what_no_split_made() {
+        let mesh = Mesh::icosphere(1);
+        let fine = subdivide(&mesh).unwrap();
+        let n = mesh.positions.len();
+        assert!(parents(&fine.triangles[..fine.triangles.len() - 1], n).is_none());
+        let mut swapped = fine.triangles.clone();
+        swapped.swap(0, 1);
+        assert!(parents(&swapped, n).is_none());
+        // Too few coarse vertices: a corner would be an edge vertex.
+        assert!(parents(&fine.triangles, n - 1).is_none());
+        assert!(parents(&mesh.triangles, 0).is_none());
     }
 
     /// How heavy the clay gets: subdividing the default sphere twice, and
@@ -202,7 +321,7 @@ mod tests {
             );
             if round < 2 {
                 let start = Instant::now();
-                mesh = subdivide(&mesh);
+                mesh = subdivide(&mesh).unwrap();
                 println!(
                     "  subdivided to {} vertices in {:.0} ms",
                     mesh.positions.len(),

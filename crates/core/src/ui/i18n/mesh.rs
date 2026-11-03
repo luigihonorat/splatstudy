@@ -28,7 +28,7 @@ pub struct MeshTr {
     pub made_from_reference: &'static str,
     /// Splitting every triangle into four.
     pub subdivide: &'static str,
-    /// Notice after a subdivision.
+    /// Notice after a subdivision: a new level.
     pub subdivided: &'static str,
     /// Notice when the clay already has too many vertices to subdivide.
     pub too_dense: &'static str,
@@ -44,6 +44,16 @@ pub struct MeshTr {
     pub falloff_sharp: &'static str,
     /// Notice when a mesh has too many vertices or triangles to sculpt.
     pub too_heavy: &'static str,
+    /// Before "2 / 4": the subdivision level the clay is at, of how many.
+    pub level: &'static str,
+    /// Going one subdivision level down or up, keeping the detail.
+    pub level_down: &'static str,
+    pub level_up: &'static str,
+    /// Dropping the subdivision levels above or below the current one.
+    pub delete_higher: &'static str,
+    pub delete_lower: &'static str,
+    /// Notice when the clay can't be split into levels (a broken triangle).
+    pub cannot_subdivide: &'static str,
 }
 
 pub const JA: MeshTr = MeshTr {
@@ -60,7 +70,7 @@ pub const JA: MeshTr = MeshTr {
     threshold: "しきい値",
     made_from_reference: "モチーフからメッシュを作りました。元に戻すと前の塑像に戻ります",
     subdivide: "細分化",
-    subdivided: "細分化しました。元に戻すと前のメッシュに戻ります",
+    subdivided: "細分化しました。レベルを下げると大きな形を直せます",
     too_dense: "頂点が多すぎるため、これ以上細分化できません",
     stabiliser: "手ぶれ補正",
     off: "オフ",
@@ -69,6 +79,12 @@ pub const JA: MeshTr = MeshTr {
     falloff_linear: "直線",
     falloff_sharp: "鋭い",
     too_heavy: "頂点が多すぎて彫刻できません",
+    level: "レベル",
+    level_down: "レベルを下げる",
+    level_up: "レベルを上げる",
+    delete_higher: "上のレベルを外す",
+    delete_lower: "下のレベルを外す",
+    cannot_subdivide: "このメッシュは細分化できません",
 };
 
 pub const EN: MeshTr = MeshTr {
@@ -85,7 +101,7 @@ pub const EN: MeshTr = MeshTr {
     threshold: "threshold",
     made_from_reference: "mesh made from the reference; undo brings the previous sculpt back",
     subdivide: "subdivide",
-    subdivided: "subdivided; undo brings the previous mesh back",
+    subdivided: "subdivided; go a level down to change the broad forms",
     too_dense: "too many vertices to subdivide again",
     stabiliser: "stabiliser",
     off: "off",
@@ -94,6 +110,12 @@ pub const EN: MeshTr = MeshTr {
     falloff_linear: "linear",
     falloff_sharp: "sharp",
     too_heavy: "too many vertices to sculpt",
+    level: "level",
+    level_down: "level down",
+    level_up: "level up",
+    delete_higher: "delete higher levels",
+    delete_lower: "delete lower levels",
+    cannot_subdivide: "this mesh can't be subdivided",
 };
 
 pub const FR: MeshTr = MeshTr {
@@ -110,7 +132,7 @@ pub const FR: MeshTr = MeshTr {
     threshold: "seuil",
     made_from_reference: "maillage tiré du modèle ; annuler rétablit la sculpture précédente",
     subdivide: "subdiviser",
-    subdivided: "subdivisé ; annuler rétablit le maillage précédent",
+    subdivided: "subdivisé ; descendre d'un niveau pour reprendre les grandes formes",
     too_dense: "trop de sommets pour subdiviser encore",
     stabiliser: "stabilisateur",
     off: "aucun",
@@ -119,4 +141,10 @@ pub const FR: MeshTr = MeshTr {
     falloff_linear: "linéaire",
     falloff_sharp: "vive",
     too_heavy: "trop de sommets pour sculpter",
+    level: "niveau",
+    level_down: "niveau inférieur",
+    level_up: "niveau supérieur",
+    delete_higher: "supprimer les niveaux supérieurs",
+    delete_lower: "supprimer les niveaux inférieurs",
+    cannot_subdivide: "ce maillage ne peut pas être subdivisé",
 };

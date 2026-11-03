@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Sculpting: the tools, strokes on the clay and the sculpt panel.
 
+mod levels;
+
 use std::sync::Arc;
 
 use egui::{Key, Pos2, Rect, Stroke};
@@ -13,9 +15,7 @@ use crate::input::{FilePurpose, PointerKind};
 use crate::meshio::{self, Soup};
 use crate::reference::Content;
 use crate::render::clay::GpuMesh;
-use crate::sculpt::{
-    Brush, DEFAULT_LEVEL, Dab, Falloff, Hit, MAX_TRIANGLES, MAX_VERTICES, Mesh, subdivide,
-};
+use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Falloff, Hit, MAX_TRIANGLES, MAX_VERTICES, Mesh};
 use crate::ui::{self, i18n::Tr, menu, theme};
 use crate::voxel;
 
@@ -114,6 +114,8 @@ enum Pending {
     Remesh,
     Subdivide,
     FromReference,
+    /// One subdivision level up (true) or down.
+    Level(bool),
 }
 
 impl Default for ToolSettings {
@@ -248,6 +250,7 @@ impl App {
             if pressed(M::SHIFT, Key::U) {
                 self.ask_subdivide();
             }
+            self.level_shortcuts(ui);
         }
         if pressed(M::NONE, Key::OpenBracket) {
             self.tool.radius = (self.tool.radius / 1.2).max(4.0);
@@ -357,6 +360,7 @@ impl App {
             Some(Pending::Remesh) => self.remesh(),
             Some(Pending::Subdivide) => self.subdivide(),
             Some(Pending::FromReference) => self.clay_from_reference(),
+            Some(Pending::Level(up)) => self.change_level(up),
             None => {}
         }
     }
@@ -380,7 +384,7 @@ impl App {
     /// why not, if the result would be too heavy to sculpt.
     fn ask_subdivide(&mut self) {
         let m = self.lang.tr().mesh;
-        if subdivide::subdivided_len(&self.sculpt.mesh) > MAX_SUBDIVIDED_VERTICES {
+        if self.sculpt.subdivided_len() > MAX_SUBDIVIDED_VERTICES {
             if self.playback.is_none() {
                 self.notify(m.too_dense);
             }
@@ -389,13 +393,17 @@ impl App {
         }
     }
 
-    /// Splits every triangle of the clay into four.
+    /// Adds a subdivision level above the top one, going up to the top
+    /// first: every triangle of the clay split into four and smoothed.
     pub(super) fn subdivide(&mut self) {
-        let mesh = subdivide::subdivide(&self.sculpt.mesh);
-        let count = mesh.positions.len();
-        if self.replace_clay(mesh) {
-            let m = self.lang.tr().mesh;
+        while self.sculpt.change_level(true) {}
+        let m = self.lang.tr().mesh;
+        if self.sculpt.subdivide() {
+            self.sync_clay();
+            let count = self.sculpt.mesh.positions.len();
             self.notify(format!("{} ({count} {})", m.subdivided, m.vertices));
+        } else {
+            self.notify(m.cannot_subdivide);
         }
     }
 
@@ -452,6 +460,7 @@ impl App {
         if self.replace_clay(start_mesh()) {
             self.frame_sculpt();
         }
+        self.level_items(ui);
     }
 
     /// Makes the clay's GPU buffers again after its mesh was replaced (a
@@ -541,6 +550,7 @@ impl App {
         if ui::choice(ui, tr.mesh.subdivide, false).clicked() {
             self.ask_subdivide();
         }
+        self.levels_panel(ui);
         // Clay from the reference: the threshold only matters for splats.
         let loaded = self.has_reference();
         let splats = matches!(

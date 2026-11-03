@@ -6,6 +6,7 @@
 //! samples into world-space dabs (`dab`) or grabs (`grab`, `drag`).
 
 pub mod bvh;
+pub mod levels;
 pub mod mesh;
 pub mod record;
 pub mod subdivide;
@@ -16,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use glam::Vec3;
 
 pub use bvh::{Bvh, Hit};
+pub use levels::Levels;
 pub use mesh::{Mesh, Stamp, Vertex};
 pub use record::{Checkpoint, Entry, Event, Replay};
 
@@ -129,10 +131,18 @@ struct Edit {
 /// One step on the undo or redo stack.
 enum Step {
     Move(Edit),
-    /// The mesh was replaced (remesh, import): the other mesh, to swap
-    /// back. Strokes before a topology change can't be undone, so this is
-    /// always alone on its stack.
-    Topology(Box<Mesh>),
+    /// The mesh was replaced (remesh, import): the other mesh and its
+    /// levels, to swap back. Strokes before a topology change can't be
+    /// undone, so this is always alone on its stack.
+    Topology(Box<(Mesh, Option<Levels>)>),
+    /// The clay went one level up or down (see `levels.rs`); also alone.
+    Level {
+        up: bool,
+    },
+    /// A level was added at the top; also alone.
+    Subdivide,
+    /// Levels were deleted: the levels before, to swap back.
+    Levels(Option<Box<Levels>>),
 }
 
 pub struct Sculpt {
@@ -178,6 +188,11 @@ pub struct Sculpt {
     resume: Resume,
     /// Tells this sculpt from every other made in this run.
     id: u64,
+    /// The clay's other subdivision levels, once it has some.
+    levels: Option<Levels>,
+    /// The levels changed since this sculpt was built from a checkpoint:
+    /// a replay can't just rewind its positions (see `Replay::restart`).
+    releveled: bool,
 }
 
 /// What a reopened sculpt logs before its first change.
@@ -204,10 +219,18 @@ fn tangent(v: Vec3, n: Vec3) -> Vec3 {
 impl Sculpt {
     /// A sculpt starting from `mesh`, which becomes the first checkpoint.
     pub fn new(mesh: Mesh) -> Sculpt {
-        let mut sculpt = Sculpt::bare(mesh);
-        sculpt
-            .checkpoints
-            .push(Checkpoint::of(&sculpt.mesh, 0, 0.0, true));
+        Sculpt::with_levels(mesh, None)
+    }
+
+    /// A sculpt starting from `mesh` at one of its `levels` (read with
+    /// [`Levels::read`] for that mesh); both become the first checkpoint.
+    pub fn with_levels(mesh: Mesh, levels: Option<Levels>) -> Sculpt {
+        let mut sculpt = Sculpt {
+            levels,
+            ..Sculpt::bare(mesh)
+        };
+        let start = Checkpoint::of(&sculpt.mesh, sculpt.levels_for_checkpoint(), 0, 0.0, true);
+        sculpt.checkpoints.push(start);
         sculpt
     }
 
@@ -243,6 +266,8 @@ impl Sculpt {
             logged_falloff: Falloff::Smooth,
             resume: Resume::Settled,
             mesh,
+            levels: None,
+            releveled: false,
         }
     }
 
@@ -259,10 +284,17 @@ impl Sculpt {
     /// When the log doesn't lead to `mesh`'s triangles (a history from a
     /// damaged or edited file), a replay can't reach `mesh` by itself: a
     /// whole checkpoint of it is logged instead.
-    pub fn with_history(mesh: Mesh, log: Vec<Entry>, checkpoints: Vec<Checkpoint>) -> Sculpt {
+    ///
+    /// `levels` are the clay's subdivision levels, read for `mesh`.
+    pub fn with_history(
+        mesh: Mesh,
+        levels: Option<Levels>,
+        log: Vec<Entry>,
+        checkpoints: Vec<Checkpoint>,
+    ) -> Sculpt {
         let resume = if log.is_empty() {
             Resume::Settled
-        } else if record::ends_on_triangles_of(&mesh, &log, &checkpoints) {
+        } else if record::ends_on_triangles_of(&mesh, levels.as_ref(), &log, &checkpoints) {
             Resume::Rebuild
         } else {
             Resume::Checkpoint
@@ -271,6 +303,7 @@ impl Sculpt {
             resume,
             log,
             checkpoints,
+            levels,
             ..Sculpt::bare(mesh)
         }
     }
@@ -331,15 +364,17 @@ impl Sculpt {
 
     /// Replaces the whole mesh (a remesh or an import). The log and the
     /// clock go on; the new mesh is saved as a checkpoint for replay.
-    /// Strokes made before can no longer be undone, but this can: undo
-    /// brings the previous mesh back.
+    /// Its subdivision levels go: they belong to the old mesh. Strokes
+    /// made before can no longer be undone, but this can: undo brings the
+    /// previous mesh back, with its levels.
     pub fn replace_mesh(&mut self, mesh: Mesh) {
         // Its own checkpoint follows.
         self.resume = Resume::Settled;
         let old = self.swap_mesh(mesh);
+        let levels = self.levels.take();
         self.undo.clear();
         self.redo.clear();
-        self.undo.push(Step::Topology(Box::new(old)));
+        self.undo.push(Step::Topology(Box::new((old, levels))));
         self.checkpoint(true);
     }
 
@@ -375,7 +410,8 @@ impl Sculpt {
         self.record(Event::Checkpoint(index));
         // A replay that starts or snaps here starts with the default.
         self.logged_falloff = Falloff::Smooth;
-        let checkpoint = Checkpoint::of(&self.mesh, self.log.len(), self.clock, topology);
+        let levels = topology.then(|| self.levels_for_checkpoint()).flatten();
+        let checkpoint = Checkpoint::of(&self.mesh, levels, self.log.len(), self.clock, topology);
         self.checkpoints.push(checkpoint);
         self.last_checkpoint = self.clock;
     }
@@ -535,16 +571,27 @@ impl Sculpt {
                 self.apply_positions(&edit.indices, &edit.before);
                 self.redo.push(Step::Move(edit));
             }
-            Some(Step::Topology(mesh)) => {
+            Some(Step::Topology(old)) => {
                 // Logged as a checkpoint of the mesh it brings back.
-                let current = self.swap_mesh(*mesh);
+                let current = self.swap_topology(*old);
                 self.undo.clear();
                 self.redo.clear();
                 self.redo.push(Step::Topology(Box::new(current)));
                 self.checkpoint(true);
             }
+            Some(step) => {
+                self.record(Event::Undo);
+                let step = self.undo_level_step(step, true);
+                self.redo.push(step);
+            }
             None => {}
         }
+    }
+
+    /// Puts a mesh and its levels in place; returns those they replaced.
+    fn swap_topology(&mut self, (mesh, levels): (Mesh, Option<Levels>)) -> (Mesh, Option<Levels>) {
+        let mesh = self.swap_mesh(mesh);
+        (mesh, std::mem::replace(&mut self.levels, levels))
     }
 
     pub fn redo(&mut self) {
@@ -554,12 +601,17 @@ impl Sculpt {
                 self.apply_positions(&edit.indices, &edit.after);
                 self.undo.push(Step::Move(edit));
             }
-            Some(Step::Topology(mesh)) => {
-                let current = self.swap_mesh(*mesh);
+            Some(Step::Topology(new)) => {
+                let current = self.swap_topology(*new);
                 self.undo.clear();
                 self.redo.clear();
                 self.undo.push(Step::Topology(Box::new(current)));
                 self.checkpoint(true);
+            }
+            Some(step) => {
+                self.record(Event::Redo);
+                let step = self.undo_level_step(step, false);
+                self.undo.push(step);
             }
             None => {}
         }

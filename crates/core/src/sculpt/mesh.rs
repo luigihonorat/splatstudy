@@ -150,28 +150,13 @@ impl Mesh {
         Mesh::new(positions, triangles)
     }
 
-    fn face_normal(&self, [a, b, c]: [u32; 3]) -> Vec3 {
-        let (pa, pb, pc) = (
-            self.positions[a as usize],
-            self.positions[b as usize],
-            self.positions[c as usize],
-        );
-        // The cross product's length is twice the area: larger triangles weigh more.
-        (pb - pa).cross(pc - pa)
+    fn face_normal(&self, t: [u32; 3]) -> Vec3 {
+        face_normal(&self.positions, t)
     }
 
     /// Area-weighted vertex normals from the triangles.
     pub fn recompute_normals(&mut self) {
-        self.normals.iter_mut().for_each(|n| *n = Vec3::ZERO);
-        for &t in &self.triangles {
-            let n = self.face_normal(t);
-            for i in t {
-                self.normals[i as usize] += n;
-            }
-        }
-        self.normals
-            .iter_mut()
-            .for_each(|n| *n = n.normalize_or(Vec3::Y));
+        area_normals(&self.positions, &self.triangles, &mut self.normals);
     }
 
     /// Updates the normals that depend on the `moved` vertices: theirs and
@@ -215,6 +200,33 @@ impl Mesh {
     pub fn indices(&self) -> &[u32] {
         bytemuck::cast_slice(&self.triangles)
     }
+}
+
+/// The normal of triangle `t`, as long as twice its area: larger
+/// triangles weigh more.
+fn face_normal(positions: &[Vec3], [a, b, c]: [u32; 3]) -> Vec3 {
+    let (pa, pb, pc) = (
+        positions[a as usize],
+        positions[b as usize],
+        positions[c as usize],
+    );
+    (pb - pa).cross(pc - pa)
+}
+
+/// Area-weighted vertex normals of `positions` on `triangles`, into
+/// `normals` (one per position). Every caller gets the same bits for the
+/// same input: the multiresolution levels rely on it.
+pub fn area_normals(positions: &[Vec3], triangles: &[[u32; 3]], normals: &mut [Vec3]) {
+    normals.iter_mut().for_each(|n| *n = Vec3::ZERO);
+    for &t in triangles {
+        let n = face_normal(positions, t);
+        for i in t {
+            normals[i as usize] += n;
+        }
+    }
+    normals
+        .iter_mut()
+        .for_each(|n| *n = n.normalize_or(Vec3::Y));
 }
 
 /// Marks items as seen without clearing a whole array between uses.

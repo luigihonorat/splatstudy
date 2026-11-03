@@ -230,12 +230,7 @@ impl App {
         }
         // Only the times matter here, so a tiny start mesh will do.
         let tiny = Mesh::icosphere(0);
-        let start = Checkpoint {
-            log_index: 0,
-            time: 0.0,
-            positions: tiny.positions.as_slice().into(),
-            triangles: Some(tiny.triangles.as_slice().into()),
-        };
+        let start = Checkpoint::start(&tiny);
         self.export.duration = Replay::new(vec![start], log.to_vec()).duration();
         self.export.duration_for = key;
     }

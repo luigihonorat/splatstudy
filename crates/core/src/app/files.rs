@@ -204,6 +204,7 @@ impl App {
     fn show_scene(&mut self, scene: Scene) -> bool {
         let Scene {
             mesh,
+            levels,
             checkpoints,
             log,
             reference,
@@ -223,9 +224,9 @@ impl App {
         self.playback = None;
         self.drags = [None; 2];
         self.sculpt = if usable {
-            Sculpt::with_history(mesh, log, checkpoints)
+            Sculpt::with_history(mesh, levels, log, checkpoints)
         } else {
-            Sculpt::new(mesh)
+            Sculpt::with_levels(mesh, levels)
         };
         self.sculpt.take_topology_changed();
         self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
@@ -259,7 +260,8 @@ impl App {
     /// left out.
     fn write_scene(&mut self, mut w: SceneWriter, key: Option<BlobKey>) -> Vec<u8> {
         w.mesh(&self.sculpt.mesh)
-            .history(&self.sculpt, &mut self.files.history);
+            .history(&self.sculpt, &mut self.files.history)
+            .levels(&self.sculpt);
         match (self.scene_reference(), key) {
             (Some(reference), Some(key)) => w.reference_by_key(reference, key),
             (Some(reference), None) => w.reference(reference),

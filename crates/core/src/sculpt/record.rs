@@ -13,8 +13,10 @@ use std::sync::Arc;
 
 use glam::Vec3;
 
+use super::subdivide::parents;
 use super::{
-    Brush, Bvh, DEFAULT_LEVEL, Dab, Falloff, MAX_TRIANGLES, MAX_VERTICES, Mesh, Resume, Sculpt,
+    Brush, Bvh, DEFAULT_LEVEL, Dab, Falloff, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, Resume,
+    Sculpt,
 };
 use crate::io::{ReadError, Reader, Writer};
 
@@ -51,6 +53,26 @@ pub enum Event {
     /// the default. The clay itself didn't change, so this holds no mesh
     /// (see `Sculpt::with_history`).
     Rebuild,
+    /// A subdivision level was added at the top (see `Sculpt::subdivide`).
+    Subdivide,
+    /// The clay went one subdivision level up or down.
+    Level {
+        up: bool,
+    },
+    /// The levels above the clay (`higher`) or below it were deleted.
+    DeleteLevels {
+        higher: bool,
+    },
+}
+
+impl Event {
+    /// True for the events that change the clay's subdivision levels.
+    fn changes_levels(&self) -> bool {
+        matches!(
+            self,
+            Event::Subdivide | Event::Level { .. } | Event::DeleteLevels { .. }
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,16 +94,32 @@ pub struct Checkpoint {
     /// The triangles, when the mesh changed; `None` keeps the triangles of
     /// the clay at that point (a checkpoint of the positions only).
     pub triangles: Option<Arc<[[u32; 3]]>>,
+    /// With the triangles, the clay's other subdivision levels, if it had
+    /// any. Saved apart from the rest (see `scene`), so it isn't part of
+    /// [`Checkpoint::write`].
+    pub levels: Option<Arc<Levels>>,
 }
 
 impl Checkpoint {
-    pub(super) fn of(mesh: &Mesh, log_index: usize, time: f64, topology: bool) -> Checkpoint {
+    pub(super) fn of(
+        mesh: &Mesh,
+        levels: Option<Arc<Levels>>,
+        log_index: usize,
+        time: f64,
+        topology: bool,
+    ) -> Checkpoint {
         Checkpoint {
             log_index,
             time,
             positions: mesh.positions.as_slice().into(),
             triangles: topology.then(|| mesh.triangles.as_slice().into()),
+            levels: levels.filter(|_| topology),
         }
+    }
+
+    /// A checkpoint of a whole mesh, without levels.
+    pub fn start(mesh: &Mesh) -> Checkpoint {
+        Checkpoint::of(mesh, None, 0, 0.0, true)
     }
 
     /// True if it holds a whole mesh, with triangles that all fit.
@@ -92,13 +130,11 @@ impl Checkpoint {
         })
     }
 
-    /// The whole mesh, for a checkpoint that has it.
-    fn mesh(&self) -> Option<Mesh> {
+    /// The whole mesh and its levels, for a checkpoint that has it.
+    fn mesh(&self) -> Option<(Mesh, Option<Levels>)> {
         let triangles = self.triangles.as_ref().filter(|_| self.has_mesh())?;
-        Some(Mesh::from_ordered(
-            self.positions.to_vec(),
-            triangles.to_vec(),
-        ))
+        let mesh = Mesh::from_ordered(self.positions.to_vec(), triangles.to_vec());
+        Some((mesh, self.levels.as_deref().cloned()))
     }
 
     pub fn write(&self, w: &mut Writer) {
@@ -160,6 +196,7 @@ impl Checkpoint {
             time,
             positions,
             triangles,
+            levels: None,
         })
     }
 }
@@ -178,6 +215,9 @@ mod tag {
     pub const MIRROR: u8 = 9;
     pub const FALLOFF: u8 = 10;
     pub const REBUILD: u8 = 11;
+    pub const SUBDIVIDE: u8 = 12;
+    pub const LEVEL: u8 = 13;
+    pub const DELETE_LEVELS: u8 = 14;
 }
 
 impl Entry {
@@ -234,6 +274,15 @@ impl Entry {
             Event::Rebuild => {
                 w.u8(tag::REBUILD);
             }
+            Event::Subdivide => {
+                w.u8(tag::SUBDIVIDE);
+            }
+            Event::Level { up } => {
+                w.u8(tag::LEVEL).u8(u8::from(up));
+            }
+            Event::DeleteLevels { higher } => {
+                w.u8(tag::DELETE_LEVELS).u8(u8::from(higher));
+            }
         }
     }
 
@@ -285,6 +334,9 @@ impl Entry {
                     .ok_or_else(|| r.invalid("unknown falloff"))?,
             ),
             tag::REBUILD => Event::Rebuild,
+            tag::SUBDIVIDE => Event::Subdivide,
+            tag::LEVEL => Event::Level { up: flag(r)? },
+            tag::DELETE_LEVELS => Event::DeleteLevels { higher: flag(r)? },
             _ => return Err(r.invalid("unknown log event")),
         };
         Ok(Entry { time, event })
@@ -333,30 +385,65 @@ pub fn starts_with_mesh(checkpoints: &[Checkpoint]) -> bool {
 /// those of the last whole-mesh checkpoint the log snaps to, or of the
 /// start. Only then can a replay go on from its own clay where a reopened
 /// sculpt goes on from `mesh` (see [`Event::Rebuild`]).
-pub(super) fn ends_on_triangles_of(mesh: &Mesh, log: &[Entry], checkpoints: &[Checkpoint]) -> bool {
+///
+/// With subdivision levels on either side, the triangles at every level
+/// come from the base's: the bases must match.
+pub(super) fn ends_on_triangles_of(
+    mesh: &Mesh,
+    levels: Option<&Levels>,
+    log: &[Entry],
+    checkpoints: &[Checkpoint],
+) -> bool {
     if !starts_with_mesh(checkpoints) {
         return false;
     }
     // As `Replay::snap` does: a checkpoint without a usable mesh is skipped.
-    let last = log
+    let (at, last) = log
         .iter()
+        .enumerate()
         .rev()
-        .filter_map(|e| match e.event {
-            Event::Checkpoint(n) => checkpoints.get(n as usize),
+        .filter_map(|(i, e)| match e.event {
+            Event::Checkpoint(n) => Some((i, checkpoints.get(n as usize)?)),
             _ => None,
         })
-        .find(|c| c.has_mesh())
-        .unwrap_or(&checkpoints[0]);
+        .find(|(_, c)| c.has_mesh())
+        .unwrap_or((0, &checkpoints[0]));
     let triangles = last.triangles.as_deref().unwrap_or_default();
-    last.positions.len() == mesh.positions.len() && triangles == mesh.triangles.as_slice()
+    let releveled = log[at..].iter().any(|e| e.event.changes_levels());
+    if !releveled && levels.is_none() && last.levels.is_none() {
+        return last.positions.len() == mesh.positions.len()
+            && triangles == mesh.triangles.as_slice();
+    }
+    let ours = base_of(&mesh.triangles, mesh.positions.len(), levels);
+    let theirs = base_of(triangles, last.positions.len(), last.levels.as_deref());
+    ours.is_some() && ours == theirs
+}
+
+/// The base level's vertex count and triangles, for clay with `triangles`
+/// and `vertices` at the current one of its `levels`.
+fn base_of(
+    triangles: &[[u32; 3]],
+    vertices: usize,
+    levels: Option<&Levels>,
+) -> Option<(usize, Vec<[u32; 3]>)> {
+    let mut t = triangles.to_vec();
+    let Some(levels) = levels else {
+        return Some((vertices, t));
+    };
+    let counts = levels.counts();
+    for &count in counts[..levels.current()].iter().rev() {
+        t = parents(&t, count)?;
+    }
+    Some((counts[0], t))
 }
 
 impl Sculpt {
     /// A sculpt that keeps no log of its own, for playing one back.
-    fn replaying(mesh: Mesh) -> Sculpt {
+    fn replaying((mesh, levels): (Mesh, Option<Levels>)) -> Sculpt {
         Sculpt {
             recording: false,
             topology_changed: true,
+            levels,
             ..Sculpt::bare(mesh)
         }
     }
@@ -411,6 +498,15 @@ impl Sculpt {
             Event::Mirror { to_negative } => self.mirror(to_negative),
             Event::Falloff(falloff) => self.falloff = falloff,
             Event::Rebuild => self.rebuild(),
+            Event::Subdivide => {
+                self.subdivide();
+            }
+            Event::Level { up } => {
+                self.change_level(up);
+            }
+            Event::DeleteLevels { higher } => {
+                self.delete_levels(higher);
+            }
         }
     }
 
@@ -478,7 +574,7 @@ impl Replay {
         let usable = |c: &Checkpoint| c.log_index <= entries.len() && c.has_mesh();
         if !starts_with_mesh(&checkpoints) {
             let sphere = Mesh::icosphere(DEFAULT_LEVEL);
-            checkpoints.insert(0, Checkpoint::of(&sphere, 0, 0.0, true));
+            checkpoints.insert(0, Checkpoint::start(&sphere));
         }
         // Sorted by log index, the first is checkpoint 0, at the start.
         let mut starts: Vec<usize> = (0..checkpoints.len())
@@ -503,9 +599,9 @@ impl Replay {
     fn restart(&mut self, index: usize) {
         let checkpoint = &self.checkpoints[index];
         self.next = checkpoint.log_index;
-        if index == self.built_from {
-            // Scrubbing back within the same mesh: no new adjacency,
-            // hierarchy or GPU buffers.
+        if index == self.built_from && !self.sculpt.releveled {
+            // Scrubbing back within the same mesh and levels: no new
+            // adjacency, hierarchy or GPU buffers.
             self.sculpt.rewind(&checkpoint.positions, self.reshaped);
         } else {
             let mesh = checkpoint.mesh().expect("starts have triangles");
@@ -525,10 +621,12 @@ impl Replay {
         self.sculpt.falloff = Falloff::Smooth;
         if checkpoint.triangles.is_none() {
             self.sculpt.snap_positions(&checkpoint.positions);
-        } else if let Some(mesh) = checkpoint.mesh() {
+        } else if let Some((mesh, levels)) = checkpoint.mesh() {
             self.built_from = n as usize;
             self.reshaped = false;
             self.sculpt.swap_mesh(mesh);
+            self.sculpt.levels = levels;
+            self.sculpt.releveled = false;
             self.sculpt.undo.clear();
             self.sculpt.redo.clear();
         }
@@ -772,7 +870,7 @@ mod tests {
 
         // A scene reopened: the current mesh in its order, and its history.
         let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
-        let reopened = Sculpt::with_history(current, log, checkpoints);
+        let reopened = Sculpt::with_history(current, None, log, checkpoints);
         let mut replay = Replay::of(&reopened);
         assert!(replay.seek(f64::INFINITY, usize::MAX));
         assert_same(&replay, &live);
@@ -787,7 +885,7 @@ mod tests {
         live.end_stroke();
         assert_eq!(live.log(), &log[..]);
         let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
-        let mut reopened = Sculpt::with_history(current, log.clone(), checkpoints.clone());
+        let mut reopened = Sculpt::with_history(current, None, log.clone(), checkpoints.clone());
         reopened.end_stroke();
         assert_eq!(reopened.log(), &log[..], "no stray End");
         assert_eq!(
@@ -810,7 +908,7 @@ mod tests {
         let mut r = Reader::new(&bytes);
         let (log, checkpoints) = (read_log(&mut r).unwrap(), read_checkpoints(&mut r).unwrap());
         let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
-        let mut reopened = Sculpt::with_history(current, log, checkpoints);
+        let mut reopened = Sculpt::with_history(current, None, log, checkpoints);
         // Untouched, it saves what it read.
         assert_eq!(reopened.log(), live.log());
         assert_eq!(reopened.checkpoints(), live.checkpoints());
@@ -824,6 +922,7 @@ mod tests {
         );
         let mut again = Sculpt::with_history(
             current,
+            None,
             reopened.log().to_vec(),
             reopened.checkpoints().to_vec(),
         );
@@ -866,6 +965,7 @@ mod tests {
         let other = Mesh::icosphere(2);
         let mut reopened = Sculpt::with_history(
             other.clone(),
+            None,
             live.log().to_vec(),
             live.checkpoints().to_vec(),
         );
@@ -884,7 +984,7 @@ mod tests {
     #[test]
     fn a_first_checkpoint_without_triangles_is_no_start() {
         let sphere = Mesh::icosphere(1);
-        let mut start = Checkpoint::of(&sphere, 0, 0.0, true);
+        let mut start = Checkpoint::start(&sphere);
         assert!(starts_with_mesh(std::slice::from_ref(&start)));
         start.triangles = Some(Vec::new().into());
         assert!(!starts_with_mesh(std::slice::from_ref(&start)));
@@ -895,7 +995,7 @@ mod tests {
 
     #[test]
     fn a_checkpoint_with_a_triangle_corner_twice_is_refused() {
-        let mut bad = Checkpoint::of(&Mesh::icosphere(1), 0, 0.0, true);
+        let mut bad = Checkpoint::start(&Mesh::icosphere(1));
         let mut triangles = bad.triangles.as_deref().unwrap().to_vec();
         triangles[5][2] = triangles[5][0];
         bad.triangles = Some(triangles.into());
@@ -935,7 +1035,7 @@ mod tests {
         // A position that isn't a number, or more vertices than the clay
         // may have: errors.
         let mut w = Writer::new();
-        let mut bad = Checkpoint::of(&Mesh::icosphere(1), 0, 0.0, true);
+        let mut bad = Checkpoint::start(&Mesh::icosphere(1));
         let mut positions = bad.positions.to_vec();
         positions[3].y = f32::NAN;
         bad.positions = positions.into();
