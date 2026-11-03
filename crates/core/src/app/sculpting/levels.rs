@@ -58,18 +58,19 @@ impl App {
         }
     }
 
-    /// Shift+D or Page Down goes a level down, Page Up a level up. (D is
-    /// the measuring tool; Shift+D is taken here first.)
+    /// As in ZBrush, D goes a level up and Shift+D a level down; Page Up
+    /// and Page Down too.
     pub(super) fn level_shortcuts(&mut self, ui: &egui::Ui) {
         use egui::Modifiers as M;
         let pressed = |m: M, key: Key| ui.input_mut(|i| i.consume_key(m, key));
         if self.sculpt.levels().is_none() {
             return;
         }
+        // Shift+D first: plain D would take it too.
         if pressed(M::SHIFT, Key::D) || pressed(M::NONE, Key::PageDown) {
             self.ask_level(false);
         }
-        if pressed(M::NONE, Key::PageUp) {
+        if pressed(M::NONE, Key::D) || pressed(M::NONE, Key::PageUp) {
             self.ask_level(true);
         }
     }
@@ -85,7 +86,7 @@ impl App {
         if menu::action(ui, down, &level_down, "Shift+D") {
             self.ask_level(false);
         }
-        if menu::action(ui, up, m.level_up, "PgUp") {
+        if menu::action(ui, up, m.level_up, "D") {
             self.ask_level(true);
         }
         if menu::action(ui, up, m.delete_higher, "") {

@@ -114,13 +114,13 @@ impl App {
                     (tr.ghost, "O"),
                     (tr.plumb_line, "V"),
                     (tr.grid, "G"),
-                    (tr.study.measure, "D"),
+                    (tr.study.measure, "E"),
                     (tr.study.lighting, "B"),
                     (tr.mesh.remesh, "Shift+R"),
                     (tr.mesh.quad_remesh, "Shift+Q"),
                     (tr.mesh.subdivide, "Shift+U"),
                     (tr.mesh.level_down, "Shift+D / PgDn"),
-                    (tr.mesh.level_up, "PgUp"),
+                    (tr.mesh.level_up, "D / PgUp"),
                 ] {
                     rows.push((label, key.to_owned()));
                 }

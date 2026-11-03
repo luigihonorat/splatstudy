@@ -466,7 +466,7 @@ impl App {
                 }
             }
         });
-        if menu::item(ui, st.measure, "D", self.study.measure.on).clicked() {
+        if menu::item(ui, st.measure, "E", self.study.measure.on).clicked() {
             self.toggle_measure();
         }
         menu::submenu(ui, st.lighting, |ui| {
@@ -988,7 +988,7 @@ impl App {
         if pressed(Key::G) {
             self.study.grid = !self.study.grid;
         }
-        if pressed(Key::D) {
+        if pressed(Key::E) {
             self.toggle_measure();
         }
         // Esc clears the measured lines, then puts the measure away.
