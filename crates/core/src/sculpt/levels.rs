@@ -994,8 +994,8 @@ mod tests {
     fn level_timing() {
         use std::time::Instant;
         let ms = |since: Instant| since.elapsed().as_secs_f64() * 1e3;
-        // A remeshed sphere of about 23,000 vertices, subdivided three
-        // times to about 1.5 million, near the app's limit.
+        // A remeshed sphere of about 35,000 vertices, subdivided three
+        // times to about 2.2 million, a little past the app's limit (1.5).
         let base = crate::voxel::remesh(&Mesh::icosphere(4), 86).unwrap();
         println!("base: {} vertices", base.positions.len());
         let mut s = Sculpt::new(base);
