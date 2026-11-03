@@ -76,6 +76,7 @@ impl App {
         let room = ui.ctx().content_rect().height() - 120.0;
         window(tr.shortcuts, 420.0)
             .vscroll(true)
+            .default_height(room.max(120.0))
             .max_height(room.max(120.0))
             .open(&mut open)
             .show(ui.ctx(), |ui| {
