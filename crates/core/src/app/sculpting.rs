@@ -445,6 +445,7 @@ impl App {
         if menu::action(ui, live, tr.mesh.subdivide, "Shift+U") {
             self.ask_subdivide();
         }
+        self.level_items(ui);
         ui.separator();
         if menu::action(ui, live, tr.mirror_sculpt, "") {
             self.sculpt.mirror(true);
@@ -460,7 +461,6 @@ impl App {
         if self.replace_clay(start_mesh()) {
             self.frame_sculpt();
         }
-        self.level_items(ui);
     }
 
     /// Makes the clay's GPU buffers again after its mesh was replaced (a
