@@ -201,7 +201,7 @@ impl App {
         for view in &mut views {
             view.register(&device, &mut renderer);
         }
-        let sculpt = Sculpt::new(sculpting::start_mesh());
+        let sculpt = sculpting::start_sculpt();
         let gpu_mesh = GpuMesh::new(&device, &sculpt.mesh);
         let clay = ClayPass::new(&device);
         Self {

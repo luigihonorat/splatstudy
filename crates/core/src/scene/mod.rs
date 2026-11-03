@@ -1240,7 +1240,7 @@ mod tests {
             w.finish()
         };
         let ms = |since: Instant| since.elapsed().as_secs_f64() * 1e3;
-        let mut s = Sculpt::new(Mesh::icosphere(crate::sculpt::DEFAULT_LEVEL));
+        let mut s = Sculpt::new(Mesh::icosphere(crate::sculpt::OLD_START_LEVEL));
         for reload in 0..8 {
             // Each page load starts the clock near 0 again.
             let mut clock = 1.0;

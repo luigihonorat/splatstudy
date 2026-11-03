@@ -88,6 +88,19 @@ impl Split {
         triangles
     }
 
+    /// `values` at the old vertices, then each edge's average of its two
+    /// ends: a plain midpoint split, without smoothing.
+    pub fn midpoints(&self, values: &[Vec3]) -> Vec<Vec3> {
+        let mut out = Vec::with_capacity(self.len());
+        out.extend_from_slice(&values[..self.old]);
+        out.extend(
+            self.edges
+                .iter()
+                .map(|&[a, b]| (values[a as usize] + values[b as usize]) * 0.5),
+        );
+        out
+    }
+
     /// Loop's scheme applied to `positions` on the mesh's triangles: the
     /// finer level's positions, old vertices first.
     pub fn positions(&self, mesh: &Mesh, positions: &[Vec3]) -> Vec<Vec3> {
@@ -284,7 +297,7 @@ mod tests {
 
         use crate::sculpt::{Brush, Dab, Sculpt};
         let ms = |since: Instant| since.elapsed().as_secs_f64() * 1e3;
-        let mut mesh = Mesh::icosphere(crate::sculpt::DEFAULT_LEVEL);
+        let mut mesh = Mesh::icosphere(crate::sculpt::OLD_START_LEVEL);
         for round in 0..3 {
             let n = mesh.positions.len();
             let start = Instant::now();

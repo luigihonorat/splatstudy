@@ -16,7 +16,10 @@ use crate::meshio::{self, Soup};
 use crate::quad;
 use crate::reference::Content;
 use crate::render::clay::GpuMesh;
-use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Falloff, Hit, MAX_TRIANGLES, MAX_VERTICES, Mesh};
+use crate::sculpt::{
+    Brush, Dab, Falloff, Hit, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, START_LEVEL, Sculpt,
+    cube_sphere,
+};
 use crate::ui::{self, i18n::Tr, menu, theme};
 use crate::voxel;
 
@@ -140,8 +143,9 @@ impl Default for ToolSettings {
 }
 
 /// Subdivision stops short of this many vertices: beyond it, strokes in
-/// the browser stop following the pen smoothly.
-const MAX_SUBDIVIDED_VERTICES: usize = 1_500_000;
+/// the browser stop following the pen smoothly. The start clay's second
+/// subdivision (1,572,866) just fits.
+const MAX_SUBDIVIDED_VERTICES: usize = 1_600_000;
 
 /// Imported meshes with fewer vertices are too coarse to sculpt: remeshed.
 const MIN_IMPORT_VERTICES: usize = 5_000;
@@ -227,9 +231,16 @@ fn tool_index(tool: Brush) -> usize {
     tool as usize
 }
 
-/// The clay every scene starts from, and every timelapse.
-pub(super) fn start_mesh() -> Mesh {
-    Mesh::icosphere(DEFAULT_LEVEL)
+/// The clay every new scene starts from: a sphere with the topology of a
+/// subdivided cube, with the levels below it to step down to.
+pub(super) fn start_clay() -> (Mesh, Levels) {
+    cube_sphere(START_LEVEL)
+}
+
+/// A new sculpt of the start clay; its levels are in its first checkpoint.
+pub(super) fn start_sculpt() -> Sculpt {
+    let (mesh, levels) = start_clay();
+    Sculpt::with_levels(mesh, Some(levels))
 }
 
 impl App {
@@ -319,11 +330,16 @@ impl App {
     /// makes its GPU buffers. Refuses, with a notice, a mesh too heavy to
     /// sculpt or to fit the GPU's buffers; true if it was put in place.
     pub(super) fn replace_clay(&mut self, mesh: Mesh) -> bool {
+        self.replace_clay_with_levels(mesh, None)
+    }
+
+    /// [`App::replace_clay`], with subdivision levels built for `mesh`.
+    fn replace_clay_with_levels(&mut self, mesh: Mesh, levels: Option<Levels>) -> bool {
         if mesh.positions.len() > MAX_VERTICES || mesh.triangles.len() > MAX_TRIANGLES {
             self.notify(self.lang.tr().mesh.too_heavy);
             return false;
         }
-        self.sculpt.replace_mesh(mesh);
+        self.sculpt.replace_mesh_with_levels(mesh, levels);
         self.sync_clay();
         true
     }
@@ -491,7 +507,8 @@ impl App {
     /// Puts a fresh sphere in place of the clay, as one undoable step; the
     /// reference, the views and the timelapse stay.
     fn new_sphere(&mut self) {
-        if self.replace_clay(start_mesh()) {
+        let (mesh, levels) = start_clay();
+        if self.replace_clay_with_levels(mesh, Some(levels)) {
             self.frame_sculpt();
         }
     }

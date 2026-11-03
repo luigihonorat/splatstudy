@@ -7,7 +7,7 @@ use std::sync::Arc;
 use egui::Key;
 
 use super::reference::REFERENCE_EXTENSIONS;
-use super::sculpting::start_mesh;
+use super::sculpting::start_sculpt;
 use super::study::Layout as ViewLayout;
 use super::{App, Drag, REFERENCE, Request, SCULPT, WEB};
 use crate::input::FilePurpose;
@@ -448,7 +448,7 @@ impl App {
     pub(super) fn new_scene(&mut self) {
         self.cancel_export();
         self.playback = None;
-        self.sculpt = Sculpt::new(start_mesh());
+        self.sculpt = start_sculpt();
         self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
         self.files.name = None;
         self.files.saved = None;

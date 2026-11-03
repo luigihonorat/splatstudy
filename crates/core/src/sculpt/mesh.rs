@@ -559,7 +559,7 @@ mod tests {
     #[ignore]
     fn mesh_new_timing() {
         use std::time::Instant;
-        let sphere = Mesh::icosphere(crate::sculpt::DEFAULT_LEVEL);
+        let sphere = Mesh::icosphere(crate::sculpt::OLD_START_LEVEL);
         // Surface nets' output, in the grid's order, as a remesh gives it.
         let raw = {
             use crate::voxel::{nets, sdf};

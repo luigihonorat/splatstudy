@@ -908,7 +908,7 @@ mod tests {
     #[ignore]
     fn timing() {
         use std::time::Instant;
-        let sphere = Mesh::icosphere(crate::sculpt::DEFAULT_LEVEL);
+        let sphere = Mesh::icosphere(crate::sculpt::OLD_START_LEVEL);
         let positions = sphere
             .positions
             .iter()

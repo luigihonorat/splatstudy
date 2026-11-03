@@ -1260,9 +1260,9 @@ mod tests {
         assert_eq!(image.pixels[3], Color32::TRANSPARENT, "neither");
     }
 
-    /// The icosphere the clay starts as, written as an OBJ.
+    /// The sphere the clay starts as, written as an OBJ.
     fn clay_as_obj() -> Vec<u8> {
-        let mesh = super::super::sculpting::start_mesh();
+        let (mesh, _) = super::super::sculpting::start_clay();
         let mut obj = String::new();
         for p in &mesh.positions {
             obj += &format!("v {} {} {}\n", p.x, p.y, p.z);

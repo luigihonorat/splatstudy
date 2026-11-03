@@ -133,6 +133,15 @@ fn decode(mesh: &Mesh, detail: &Detail) -> Vec<Vec3> {
         .collect()
 }
 
+/// The level above `live` as Loop's scheme makes it, with its rings and
+/// the normals of the smooth surface.
+fn smoothed(live: &Mesh, split: &Split) -> Mesh {
+    Mesh::from_ordered(
+        split.positions(live, &live.positions),
+        split.triangles(live),
+    )
+}
+
 /// A change of the vertices of a level, brought down to the `coarse`
 /// vertices of the level below (`triangles` being the finer level's): half
 /// each vertex's own change, half the average over its triangles' other
@@ -188,6 +197,18 @@ impl Levels {
         self.counts.is_empty()
     }
 
+    /// Roughly how many bytes the levels hold.
+    pub fn memory(&self) -> usize {
+        let detail = |d: &Detail| d.0.len() * 12;
+        self.below
+            .iter()
+            .map(|b| b.positions.len() * 12 + b.detail.as_ref().map_or(0, detail))
+            .sum::<usize>()
+            + self.above.iter().map(detail).sum::<usize>()
+            + self.arrival.len() * 12
+            + self.detail.as_ref().map_or(0, detail)
+    }
+
     /// Vertices of the finest level.
     pub fn finest(&self) -> usize {
         self.counts.last().copied().unwrap_or(0)
@@ -236,18 +257,47 @@ impl Levels {
             return None;
         }
         self.settle(live);
-        let smooth = split.positions(live, &live.positions);
-        let mut mesh = Mesh::from_ordered(smooth, split.triangles(live));
+        let smooth = smoothed(live, &split);
         let detail = self.above.remove(0);
-        mesh.positions = decode(&mesh, &detail);
+        Some(self.enter_above(live, smooth, detail))
+    }
+
+    /// Goes up from `live` to `smooth`, the level above as Loop's scheme
+    /// makes it from `live`, with `detail` added back: the clay it becomes.
+    fn enter_above(&mut self, live: &Mesh, mut smooth: Mesh, detail: Detail) -> Mesh {
+        smooth.positions = decode(&smooth, &detail);
         self.below.push(Below {
             positions: live.positions.clone(),
             detail: self.detail.take(),
         });
         self.detail = Some(detail);
-        self.arrival.clone_from(&mesh.positions);
+        self.arrival.clone_from(&smooth.positions);
         self.current += 1;
-        Some(mesh)
+        smooth
+    }
+
+    /// Levels built up from `base`, `top` times: each level is the one
+    /// below smoothed up with detail making it `target(level, split, below)`
+    /// (up to rounding), exactly as going up to it would rebuild it. The
+    /// clay at the top, and its levels. `None` if `base` has a triangle with
+    /// a corner twice.
+    pub fn build(
+        base: Mesh,
+        top: usize,
+        mut target: impl FnMut(usize, &Split, &Mesh) -> Vec<Vec3>,
+    ) -> Option<(Mesh, Levels)> {
+        let mut levels = Levels::start(&base);
+        let mut live = base;
+        for level in 1..=top.min(MAX_LEVELS - 1) {
+            let split = Split::of(&live)?;
+            let smooth = smoothed(&live, &split);
+            let detail = encode(&smooth.positions, &smooth, &target(level, &split, &live));
+            levels.counts.push(split.len());
+            live = levels.enter_above(&live, smooth, detail);
+        }
+        // As `Sculpt::swap_mesh` would have them.
+        live.recompute_normals();
+        Some((live, levels))
     }
 
     /// One level down from `live`: the clay it becomes. `None`, with

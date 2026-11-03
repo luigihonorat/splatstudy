@@ -15,7 +15,7 @@ use glam::Vec3;
 
 use super::subdivide::parents;
 use super::{
-    Brush, Bvh, DEFAULT_LEVEL, Dab, Falloff, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, Resume,
+    Brush, Bvh, Dab, Falloff, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, OLD_START_LEVEL, Resume,
     Sculpt,
 };
 use crate::io::{ReadError, Reader, Writer};
@@ -573,7 +573,7 @@ impl Replay {
         }
         let usable = |c: &Checkpoint| c.log_index <= entries.len() && c.has_mesh();
         if !starts_with_mesh(&checkpoints) {
-            let sphere = Mesh::icosphere(DEFAULT_LEVEL);
+            let sphere = Mesh::icosphere(OLD_START_LEVEL);
             checkpoints.insert(0, Checkpoint::start(&sphere));
         }
         // Sorted by log index, the first is checkpoint 0, at the start.
@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     #[ignore]
     fn scrub_timing() {
-        let mut live = Sculpt::new(Mesh::icosphere(DEFAULT_LEVEL));
+        let mut live = Sculpt::new(Mesh::icosphere(OLD_START_LEVEL));
         let mut clock = 0.0;
         for k in 0..3 {
             clock = session_at(&mut live, clock + 1.0, k as f32 * 0.05);

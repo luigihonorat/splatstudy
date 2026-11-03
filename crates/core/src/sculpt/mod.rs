@@ -9,6 +9,7 @@ pub mod bvh;
 pub mod levels;
 pub mod mesh;
 pub mod record;
+pub mod sphere;
 pub mod subdivide;
 
 use std::ops::Range;
@@ -20,10 +21,13 @@ pub use bvh::{Bvh, Hit};
 pub use levels::Levels;
 pub use mesh::{Mesh, Stamp, Vertex};
 pub use record::{Checkpoint, Entry, Event, Replay};
+pub use sphere::{START_LEVEL, cube_sphere};
 
-/// Subdivision level of the default sphere: 163,842 vertices, 327,680
-/// triangles; enough for a head study, light enough for the browser.
-pub const DEFAULT_LEVEL: u32 = 7;
+/// Subdivision level of the icosphere the first versions started from
+/// (163,842 vertices). A replay of a log without a start of its own still
+/// starts there, so old logs play as they were recorded; new scenes start
+/// from [`cube_sphere`].
+pub const OLD_START_LEVEL: u32 = 7;
 
 /// The most vertices and triangles the clay may have, from any source
 /// (import, remesh, subdivision, a saved scene): its GPU buffers (28 and
@@ -368,10 +372,16 @@ impl Sculpt {
     /// made before can no longer be undone, but this can: undo brings the
     /// previous mesh back, with its levels.
     pub fn replace_mesh(&mut self, mesh: Mesh) {
+        self.replace_mesh_with_levels(mesh, None);
+    }
+
+    /// [`Sculpt::replace_mesh`], with subdivision levels of its own (read
+    /// or built for `mesh`), saved in its checkpoint too.
+    pub fn replace_mesh_with_levels(&mut self, mesh: Mesh, levels: Option<Levels>) {
         // Its own checkpoint follows.
         self.resume = Resume::Settled;
         let old = self.swap_mesh(mesh);
-        let levels = self.levels.take();
+        let levels = std::mem::replace(&mut self.levels, levels);
         self.undo.clear();
         self.redo.clear();
         self.undo.push(Step::Topology(Box::new((old, levels))));
