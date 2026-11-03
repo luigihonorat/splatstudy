@@ -150,16 +150,12 @@ impl Checkpoint {
 
     pub fn write(&self, w: &mut Writer) {
         w.u64(self.log_index as u64).f64(self.time);
-        w.len(self.positions.len());
-        for &p in self.positions.iter() {
-            w.vec3(p);
-        }
+        w.len(self.positions.len()).vec3s(&self.positions);
         match &self.triangles {
             Some(triangles) => {
-                w.u8(1).len(triangles.len());
-                for t in triangles.iter() {
-                    w.u32(t[0]).u32(t[1]).u32(t[2]);
-                }
+                w.u8(1)
+                    .len(triangles.len())
+                    .u32s(bytemuck::cast_slice(triangles));
             }
             None => {
                 w.u8(0);

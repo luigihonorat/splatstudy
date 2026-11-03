@@ -184,11 +184,29 @@ impl SceneWriter {
         self
     }
 
+    /// Appends a chunk that `write` fills, about `size` bytes long.
+    /// Stored as it is, it goes straight into the file rather than
+    /// through a copy: a fine clay's chunks are tens of megabytes.
+    fn chunk_with(&mut self, tag: u32, size: usize, write: impl FnOnce(&mut Writer)) -> &mut Self {
+        if self.pack {
+            let mut w = Writer::new();
+            w.reserve(size);
+            write(&mut w);
+            return self.chunk(tag, true, &w.finish());
+        }
+        self.out.reserve(size + 16).u32(tag).u32(0);
+        let at = self.out.position();
+        self.out.len(0);
+        write(&mut self.out);
+        let len = self.out.position() - at - 8;
+        self.out.set_u64(at, len as u64);
+        self
+    }
+
     /// The clay as it is now.
     pub fn mesh(&mut self, mesh: &Mesh) -> &mut Self {
-        let mut w = Writer::new();
-        write_mesh(&mut w, mesh);
-        self.chunk(MESH, self.pack, &w.finish())
+        let size = 16 + 12 * (mesh.positions.len() + mesh.triangles.len());
+        self.chunk_with(MESH, size, |w| write_mesh(w, mesh))
     }
 
     /// The clay's checkpoints, the first being the start of the log.
@@ -226,22 +244,24 @@ impl SceneWriter {
         if sculpt.level_data().is_none() && kept.is_empty() {
             return self;
         }
-        let mut w = Writer::new();
-        match sculpt.level_data() {
-            Some(levels) => {
-                w.u8(1);
-                levels.write(&mut w, &sculpt.mesh.positions);
+        let size = sculpt.level_data().map_or(0, Levels::memory)
+            + kept.iter().map(|(_, _, l)| l.memory()).sum::<usize>();
+        self.chunk_with(LEVELS, size, |w| {
+            match sculpt.level_data() {
+                Some(levels) => {
+                    w.u8(1);
+                    levels.write(w, &sculpt.mesh.positions);
+                }
+                None => {
+                    w.u8(0);
+                }
             }
-            None => {
-                w.u8(0);
+            w.len(kept.len());
+            for (i, checkpoint, levels) in kept {
+                w.u32(i as u32);
+                levels.write(w, &checkpoint.positions);
             }
-        }
-        w.len(kept.len());
-        for (i, checkpoint, levels) in kept {
-            w.u32(i as u32);
-            levels.write(&mut w, &checkpoint.positions);
-        }
-        self.chunk(LEVELS, self.pack, &w.finish())
+        })
     }
 
     /// The quads of the clay and of its checkpoints; no chunk at all when
@@ -635,14 +655,10 @@ fn read_quads(
 }
 
 fn write_mesh(w: &mut Writer, mesh: &Mesh) {
-    w.len(mesh.positions.len());
-    for &p in &mesh.positions {
-        w.vec3(p);
-    }
-    w.len(mesh.triangles.len());
-    for t in &mesh.triangles {
-        w.u32(t[0]).u32(t[1]).u32(t[2]);
-    }
+    w.len(mesh.positions.len())
+        .vec3s(&mesh.positions)
+        .len(mesh.triangles.len())
+        .u32s(mesh.indices());
 }
 
 /// Reads a mesh in its saved order, refusing indices out of range and
@@ -1498,6 +1514,84 @@ mod tests {
             assert!(scene.mesh.quads.is_empty());
         }
         assert_eq!(chunk(&good).mesh.quads, sorted(&live.mesh.quads));
+    }
+
+    /// What the heavy operations cost on the start clay subdivided to
+    /// 1.57 million vertices: subdividing, levels, a stroke, the autosave
+    /// and a saved scene.
+    /// `cargo test --release -p splatstudy-core heavy_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn heavy_timing() {
+        use std::time::Instant;
+        let ms = |since: Instant| since.elapsed().as_secs_f64() * 1e3;
+        let (mesh, levels) = crate::sculpt::cube_sphere(crate::sculpt::START_LEVEL);
+        let mut s = Sculpt::with_levels(mesh, Some(levels));
+        for _ in 0..2 {
+            let t = Instant::now();
+            s.subdivide();
+            println!("subdivide to {}: {:.0} ms", s.mesh.positions.len(), ms(t));
+        }
+        let stroke = |s: &mut Sculpt, radius: f32| {
+            let t = Instant::now();
+            s.begin_stroke();
+            for i in 0..40 {
+                s.dab(Dab {
+                    brush: Brush::Clay,
+                    centre: Vec3::new(-0.4 + i as f32 * 0.02, 0.2, 0.9).normalize(),
+                    radius,
+                    strength: 0.5,
+                    invert: false,
+                    symmetry: true,
+                    direction: Vec3::X,
+                });
+                s.refresh();
+            }
+            s.end_stroke();
+            ms(t) / 40.0
+        };
+        println!(
+            "dab, radius 0.1: {:.1} ms; radius 0.5: {:.1} ms",
+            stroke(&mut s, 0.1),
+            stroke(&mut s, 0.5)
+        );
+        for up in [false, false, true, true] {
+            let t = Instant::now();
+            s.change_level(up);
+            println!(
+                "level {}: {:.0} ms, now {}",
+                if up { "up" } else { "down" },
+                ms(t),
+                s.mesh.positions.len()
+            );
+        }
+        let mut cache = HistoryCache::default();
+        for _ in 0..2 {
+            let t = Instant::now();
+            let mut w = SceneWriter::stored();
+            w.mesh(&s.mesh).history(&s, &mut cache).levels(&s);
+            let bytes = w.finish();
+            println!(
+                "autosave: {:.1} MB in {:.0} ms",
+                bytes.len() as f64 / 1e6,
+                ms(t)
+            );
+        }
+        let t = Instant::now();
+        let mut w = SceneWriter::new();
+        w.mesh(&s.mesh)
+            .history(&s, &mut HistoryCache::default())
+            .levels(&s);
+        let bytes = w.finish();
+        println!(
+            "saved scene: {:.1} MB in {:.0} ms",
+            bytes.len() as f64 / 1e6,
+            ms(t)
+        );
+        let t = Instant::now();
+        let scene = Scene::read(&bytes).expect("reads");
+        println!("read scene: {:.0} ms", ms(t));
+        drop(scene);
     }
 
     #[test]

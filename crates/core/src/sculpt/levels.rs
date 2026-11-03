@@ -400,16 +400,11 @@ impl Levels {
                 w.u8(1);
             }
             Some(d) => {
-                w.u8(2);
-                d.0.iter().for_each(|&p| {
-                    w.vec3(p);
-                });
+                w.u8(2).vec3s(&d.0);
             }
         };
         for (j, below) in self.below.iter().enumerate() {
-            below.positions.iter().for_each(|&p| {
-                w.vec3(p);
-            });
+            w.vec3s(&below.positions);
             if j > 0 {
                 detail(w, below.detail.as_ref());
             }

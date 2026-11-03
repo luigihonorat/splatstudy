@@ -147,6 +147,38 @@ impl Writer {
         self.f32(v.x).f32(v.y).f32(v.z)
     }
 
+    /// Each vector as [`Writer::vec3`] writes it, in one copy: a clay of a
+    /// million vertices is written in milliseconds, not a tenth of a second.
+    pub fn vec3s(&mut self, vs: &[Vec3]) -> &mut Self {
+        if cfg!(target_endian = "little") {
+            self.raw(bytemuck::cast_slice(vs))
+        } else {
+            vs.iter().fold(self, |w, &v| w.vec3(v))
+        }
+    }
+
+    /// Each number as [`Writer::u32`] writes it, in one copy.
+    pub fn u32s(&mut self, vs: &[u32]) -> &mut Self {
+        if cfg!(target_endian = "little") {
+            self.raw(bytemuck::cast_slice(vs))
+        } else {
+            vs.iter().fold(self, |w, &v| w.u32(v))
+        }
+    }
+
+    /// Makes room for `n` more bytes at once.
+    pub fn reserve(&mut self, n: usize) -> &mut Self {
+        self.buf.reserve(n);
+        self
+    }
+
+    /// Overwrites the eight bytes at `at` with `v`, as [`Writer::u64`]
+    /// wrote them: for a length known only once what follows is written.
+    pub fn set_u64(&mut self, at: usize, v: u64) -> &mut Self {
+        self.buf[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        self
+    }
+
     /// A count of items that follow, read back by [`Reader::len`].
     pub fn len(&mut self, n: usize) -> &mut Self {
         self.u64(n as u64)
@@ -200,6 +232,27 @@ mod tests {
         assert_eq!(r.str().as_deref(), Ok("塑像 sculpt"));
         assert_eq!(r.bytes(), Ok(&[1u8, 2, 3][..]));
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn many_values_write_as_one_at_a_time() {
+        let vs = [
+            Vec3::new(1.0, -2.5, f32::MIN_POSITIVE),
+            Vec3::NAN,
+            Vec3::ZERO,
+        ];
+        let us = [0, 7, u32::MAX, 0x0102_0304];
+        let mut each = Writer::new();
+        vs.iter().for_each(|&v| {
+            each.vec3(v);
+        });
+        us.iter().for_each(|&u| {
+            each.u32(u);
+        });
+        each.u64(9);
+        let mut many = Writer::new();
+        many.reserve(64).vec3s(&vs).u32s(&us).u64(0).set_u64(52, 9);
+        assert_eq!(each.finish(), many.finish());
     }
 
     #[test]
