@@ -13,6 +13,7 @@ use super::{App, Drag, Request, SCULPT};
 use crate::camera::OrbitCamera;
 use crate::input::{FilePurpose, PointerKind};
 use crate::meshio::{self, Soup};
+use crate::quad;
 use crate::reference::Content;
 use crate::render::clay::GpuMesh;
 use crate::sculpt::{Brush, DEFAULT_LEVEL, Dab, Falloff, Hit, MAX_TRIANGLES, MAX_VERTICES, Mesh};
@@ -103,6 +104,8 @@ pub(super) struct ToolSettings {
     pub(super) resolution: f32,
     /// Clay from splats: the density that counts as material, 0..1.
     pub(super) threshold: f32,
+    /// Quad remesh: about how many quads.
+    pub(super) quads: f32,
     /// Asked for in this frame, done at the start of the next, so the
     /// notice saying so shows while it runs.
     pending: Option<Pending>,
@@ -112,6 +115,7 @@ pub(super) struct ToolSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pending {
     Remesh,
+    QuadRemesh,
     Subdivide,
     FromReference,
     /// One subdivision level up (true) or down.
@@ -129,6 +133,7 @@ impl Default for ToolSettings {
             stabiliser: 0.0,
             resolution: voxel::DEFAULT_RESOLUTION as f32,
             threshold: voxel::DEFAULT_THRESHOLD,
+            quads: quad::DEFAULT_QUADS as f32,
             pending: None,
         }
     }
@@ -247,6 +252,9 @@ impl App {
             if pressed(M::SHIFT, Key::R) {
                 self.ask_remesh();
             }
+            if pressed(M::SHIFT, Key::Q) {
+                self.ask_quad_remesh();
+            }
             if pressed(M::SHIFT, Key::U) {
                 self.ask_subdivide();
             }
@@ -358,6 +366,7 @@ impl App {
     fn run_pending(&mut self) {
         match self.tool.pending.take() {
             Some(Pending::Remesh) => self.remesh(),
+            Some(Pending::QuadRemesh) => self.quad_remesh(),
             Some(Pending::Subdivide) => self.subdivide(),
             Some(Pending::FromReference) => self.clay_from_reference(),
             Some(Pending::Level(up)) => self.change_level(up),
@@ -377,6 +386,27 @@ impl App {
                 }
             }
             None => self.notify(tr.mesh.nothing_left),
+        }
+    }
+
+    /// Quad remeshes the clay at the next frame, saying so first.
+    fn ask_quad_remesh(&mut self) {
+        self.ask(Pending::QuadRemesh, self.lang.tr().mesh.quad_remesh);
+    }
+
+    /// Rebuilds the clay as even quads following its shape (see
+    /// [`quad::remesh`]); leaves it as it is, with a notice, if that fails.
+    pub(super) fn quad_remesh(&mut self) {
+        let m = self.lang.tr().mesh;
+        let quads = (self.tool.quads / 100.0).round() as u32 * 100;
+        match quad::remesh(&self.sculpt.mesh, quads) {
+            Some(mesh) => {
+                let count = mesh.positions.len();
+                if self.replace_clay(mesh) {
+                    self.notify(format!("{} ({count} {})", m.quad_remeshed, m.vertices));
+                }
+            }
+            None => self.notify(m.quad_failed),
         }
     }
 
@@ -441,6 +471,9 @@ impl App {
         ui.separator();
         if menu::action(ui, live, tr.mesh.remesh, "Shift+R") {
             self.ask_remesh();
+        }
+        if menu::action(ui, live, tr.mesh.quad_remesh, "Shift+Q") {
+            self.ask_quad_remesh();
         }
         if menu::action(ui, live, tr.mesh.subdivide, "Shift+U") {
             self.ask_subdivide();
@@ -546,6 +579,13 @@ impl App {
         );
         if ui::choice(ui, tr.mesh.remesh, false).clicked() {
             self.ask_remesh();
+        }
+        let range = quad::MIN_QUADS as f32..=quad::MAX_QUADS as f32;
+        ui::slider(ui, tr.mesh.quads, &mut self.tool.quads, range, |v| {
+            format!("{:.0}", (v / 100.0).round() * 100.0)
+        });
+        if ui::choice(ui, tr.mesh.quad_remesh, false).clicked() {
+            self.ask_quad_remesh();
         }
         if ui::choice(ui, tr.mesh.subdivide, false).clicked() {
             self.ask_subdivide();

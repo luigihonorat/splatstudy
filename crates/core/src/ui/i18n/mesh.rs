@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Strings for mesh operations: export, import, remesh and mirror.
+//! Strings for mesh operations: export, import, remesh (voxel and quad)
+//! and mirror.
 
 pub struct MeshTr {
     /// Heading of the remesh controls in the sculpt panel.
@@ -54,6 +55,14 @@ pub struct MeshTr {
     pub delete_lower: &'static str,
     /// Notice when the clay can't be split into levels (a broken triangle).
     pub cannot_subdivide: &'static str,
+    /// Rebuilding the clay as even quads that follow its curves.
+    pub quad_remesh: &'static str,
+    /// The quad remesh's slider: about how many quads to make.
+    pub quads: &'static str,
+    /// Notice after a quad remesh.
+    pub quad_remeshed: &'static str,
+    /// Notice when no clean quad mesh came out.
+    pub quad_failed: &'static str,
 }
 
 pub const JA: MeshTr = MeshTr {
@@ -85,6 +94,10 @@ pub const JA: MeshTr = MeshTr {
     delete_higher: "上のレベルを外す",
     delete_lower: "下のレベルを外す",
     cannot_subdivide: "このメッシュは細分化できません",
+    quad_remesh: "クアッドリメッシュ",
+    quads: "クアッド数",
+    quad_remeshed: "クアッドでリメッシュしました。元に戻すと前のメッシュに戻ります",
+    quad_failed: "この形はクアッドリメッシュできませんでした。塑像はそのままです",
 };
 
 pub const EN: MeshTr = MeshTr {
@@ -116,6 +129,10 @@ pub const EN: MeshTr = MeshTr {
     delete_higher: "delete higher levels",
     delete_lower: "delete lower levels",
     cannot_subdivide: "this mesh can't be subdivided",
+    quad_remesh: "quad remesh",
+    quads: "quads",
+    quad_remeshed: "quad remeshed; undo brings the previous mesh back",
+    quad_failed: "this shape could not be quad remeshed; the sculpt is unchanged",
 };
 
 pub const FR: MeshTr = MeshTr {
@@ -147,4 +164,8 @@ pub const FR: MeshTr = MeshTr {
     delete_higher: "supprimer les niveaux supérieurs",
     delete_lower: "supprimer les niveaux inférieurs",
     cannot_subdivide: "ce maillage ne peut pas être subdivisé",
+    quad_remesh: "remaillage quad",
+    quads: "quads",
+    quad_remeshed: "remaillé en quads ; annuler rétablit le maillage précédent",
+    quad_failed: "cette forme n'a pas pu être remaillée en quads ; la sculpture est inchangée",
 };
