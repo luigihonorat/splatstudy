@@ -369,24 +369,7 @@ impl Stamp {
 /// with the same code, and triangles with the same first vertex, keep
 /// their order, so the result is always the same for the same input.
 fn spatial_order(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
-    let (min, max) = positions
-        .iter()
-        .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &p| {
-            (lo.min(p), hi.max(p))
-        });
-    let scale = 1023.0 / (max - min).max_element().max(1e-12);
-    let spread = |v: u32| {
-        let mut x = v & 0x3ff;
-        x = (x | (x << 16)) & 0x0300_00ff;
-        x = (x | (x << 8)) & 0x0300_f00f;
-        x = (x | (x << 4)) & 0x030c_30c3;
-        (x | (x << 2)) & 0x0924_9249
-    };
-    let code = |p: Vec3| {
-        let q = ((p - min) * scale).as_uvec3();
-        spread(q.x) | (spread(q.y) << 1) | (spread(q.z) << 2)
-    };
-    let codes: Vec<u32> = positions.iter().map(|&p| code(p)).collect();
+    let codes = morton_codes(&positions);
     let order = radix_order(&codes);
     let mut remap = vec![0u32; positions.len()];
     for (new, &old) in order.iter().enumerate() {
@@ -412,31 +395,61 @@ fn spatial_order(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> (Vec<Vec3>, 
     (positions, sorted)
 }
 
+/// Each point's 30-bit Morton (Z-order) code in the points' bounding box:
+/// ten bits per axis, interleaved.
+pub(super) fn morton_codes(points: &[Vec3]) -> Vec<u32> {
+    let (min, max) = points.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &p| {
+        (lo.min(p), hi.max(p))
+    });
+    let scale = 1023.0 / (max - min).max_element().max(1e-12);
+    let spread = |v: u32| {
+        let mut x = v & 0x3ff;
+        x = (x | (x << 16)) & 0x0300_00ff;
+        x = (x | (x << 8)) & 0x0300_f00f;
+        x = (x | (x << 4)) & 0x030c_30c3;
+        (x | (x << 2)) & 0x0924_9249
+    };
+    let code = |p: Vec3| {
+        let q = ((p - min) * scale).as_uvec3();
+        spread(q.x) | (spread(q.y) << 1) | (spread(q.z) << 2)
+    };
+    points.iter().map(|&p| code(p)).collect()
+}
+
 /// The indices of `codes` (30-bit Morton codes) in increasing order of
 /// their code, ties in index order: a least-significant-digit radix sort,
 /// three passes of ten bits.
-fn radix_order(codes: &[u32]) -> Vec<u32> {
+pub(super) fn radix_order(codes: &[u32]) -> Vec<u32> {
     const BITS: u32 = 10;
     const BUCKETS: usize = 1 << BITS;
-    let mut order: Vec<u32> = (0..codes.len() as u32).collect();
-    let mut next = vec![0u32; codes.len()];
-    for pass in 0..3 {
-        let digit = |i: u32| (codes[i as usize] >> (pass * BITS)) as usize & (BUCKETS - 1);
-        let mut start = [0u32; BUCKETS + 1];
-        for &i in &order {
-            start[digit(i) + 1] += 1;
+    // Each code travels with its index, so every pass reads in order
+    // instead of looking codes up at random: on millions of items most
+    // of the time went to cache misses.
+    let mut items: Vec<u64> = codes
+        .iter()
+        .zip(0u32..)
+        .map(|(&code, i)| u64::from(code) << 32 | u64::from(i))
+        .collect();
+    let mut next = vec![0u64; items.len()];
+    let digit = |item: u64, pass: u32| (item >> (32 + pass * BITS)) as usize & (BUCKETS - 1);
+    let mut starts = [[0u32; BUCKETS + 1]; 3];
+    for &item in &items {
+        for (pass, start) in (0..).zip(&mut starts) {
+            start[digit(item, pass) + 1] += 1;
         }
+    }
+    for (pass, start) in (0..).zip(&mut starts) {
         for b in 1..=BUCKETS {
             start[b] += start[b - 1];
         }
-        for &i in &order {
-            let d = digit(i);
-            next[start[d] as usize] = i;
+        for &item in &items {
+            let d = digit(item, pass);
+            next[start[d] as usize] = item;
             start[d] += 1;
         }
-        std::mem::swap(&mut order, &mut next);
+        std::mem::swap(&mut items, &mut next);
     }
-    order
+    items.into_iter().map(|item| item as u32).collect()
 }
 
 fn vertex_faces(vertex_count: usize, triangles: &[[u32; 3]]) -> Adjacency {
@@ -460,6 +473,10 @@ fn vertex_faces(vertex_count: usize, triangles: &[[u32; 3]]) -> Adjacency {
     Adjacency { offsets, items }
 }
 
+/// Vertices with at most this many triangles find their ring by looking
+/// through it; those with more use a stamp.
+const SMALL_RING: usize = 16;
+
 /// The vertices around each vertex, in the order its triangles first
 /// reach them. A stamp keeps each ring free of repeats in time linear in
 /// its size, even around a crafted vertex with a million triangles.
@@ -470,12 +487,26 @@ fn neighbours(mesh: &Mesh) -> Adjacency {
     offsets.push(0);
     let mut seen = Stamp::new(n);
     for v in 0..n as u32 {
-        seen.next();
-        seen.mark(v);
-        for &f in mesh.vertex_faces.of(v) {
-            for u in mesh.triangles[f as usize] {
-                if seen.mark(u) {
-                    items.push(u);
+        let faces = mesh.vertex_faces.of(v);
+        let ring = items.len();
+        if faces.len() <= SMALL_RING {
+            // Most vertices: looking through the few found so far is
+            // quicker than the stamp, which is scattered over memory.
+            for &f in faces {
+                for u in mesh.triangles[f as usize] {
+                    if u != v && !items[ring..].contains(&u) {
+                        items.push(u);
+                    }
+                }
+            }
+        } else {
+            seen.next();
+            seen.mark(v);
+            for &f in faces {
+                for u in mesh.triangles[f as usize] {
+                    if seen.mark(u) {
+                        items.push(u);
+                    }
                 }
             }
         }
