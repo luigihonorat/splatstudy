@@ -35,6 +35,10 @@ strip = true
 inherits = "release"
 opt-level = "s"
 
+# The app's own code, where the heavy work is, for speed: about +1 MiB.
+[profile.web.package.splatstudy-core]
+opt-level = 3
+
 # Keep debug builds fast enough to sculpt and load real splats.
 [profile.dev.package."*"]
 opt-level = 2
