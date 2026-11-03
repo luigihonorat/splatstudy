@@ -203,25 +203,33 @@ impl Grid {
 pub fn outside(grid: &Grid, wall: &[bool], close: usize) -> Vec<bool> {
     let n = grid.len();
     let mut blocked = wall.to_vec();
+    // The nodes the thickening blocks.
+    let mut thick = Vec::new();
     let mut front: Vec<usize> = (0..n).filter(|&i| wall[i]).collect();
     for _ in 0..close {
-        let mut next = Vec::new();
+        let start = thick.len();
         for &i in &front {
             for j in grid.neighbours(i) {
                 if !blocked[j] {
                     blocked[j] = true;
-                    next.push(j);
+                    thick.push(j);
                 }
             }
         }
-        front = next;
+        front = thick[start..].to_vec();
     }
     let mut out = vec![false; n];
     let seeds: Vec<usize> = grid.border().into_iter().filter(|&i| !blocked[i]).collect();
     grid.flood(&mut out, seeds, |j| !blocked[j]);
     if close > 0 {
-        let mut front: Vec<usize> = (0..n).filter(|&i| out[i]).collect();
-        for _ in 0..close {
+        // Only blocked nodes can be next to the outside without being in
+        // it: the first step grows into those.
+        let mut front: Vec<usize> = thick
+            .into_iter()
+            .filter(|&j| !out[j] && grid.neighbours(j).any(|i| out[i]))
+            .collect();
+        front.iter().for_each(|&j| out[j] = true);
+        for _ in 1..close {
             let mut next = Vec::new();
             for &i in &front {
                 for j in grid.neighbours(i) {
