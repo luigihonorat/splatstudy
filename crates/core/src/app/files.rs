@@ -7,7 +7,7 @@ use std::sync::Arc;
 use egui::Key;
 
 use super::reference::REFERENCE_EXTENSIONS;
-use super::sculpting::start_sculpt;
+use super::sculpting::{Pending, start_sculpt};
 use super::study::Layout as ViewLayout;
 use super::{App, Drag, REFERENCE, Request, SCULPT, WEB};
 use crate::input::FilePurpose;
@@ -26,6 +26,9 @@ use crate::ui::menu;
 
 /// Scene files' extension.
 pub(super) const SCENE_EXTENSION: &str = "splatstudy";
+/// Saving a clay with more vertices than this takes long enough (about a
+/// second at 1.5 million in the browser) to say so first.
+const SAVE_NOTICE_VERTICES: usize = 300_000;
 /// Scenes download as plain bytes; no browser knows the type.
 const SCENE_MIME: &str = "application/octet-stream";
 
@@ -229,7 +232,7 @@ impl App {
             Sculpt::with_levels(mesh, levels)
         };
         self.sculpt.take_topology_changed();
-        self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
+        self.gpu_mesh = GpuMesh::upload(&self.device, &self.queue, &self.sculpt.mesh);
         if let Some(view) = view {
             self.cameras = view.cameras;
             self.split = view.split;
@@ -276,8 +279,18 @@ impl App {
         w.finish()
     }
 
+    /// Saves the scene, at the next frame and after a notice if the clay
+    /// is fine enough to take a moment to pack.
+    fn ask_save(&mut self) {
+        if self.sculpt.mesh.positions.len() > SAVE_NOTICE_VERTICES {
+            self.ask(Pending::SaveScene, self.lang.tr().save_scene);
+        } else {
+            self.save_scene();
+        }
+    }
+
     /// Saves the scene: a save dialog on desktop, a download on the web.
-    fn save_scene(&mut self) {
+    pub(super) fn save_scene(&mut self) {
         let bytes = self.scene_bytes();
         let name = self.files.name.clone().unwrap_or_else(|| {
             let tr = self.lang.tr();
@@ -390,12 +403,12 @@ impl App {
             menu::action(ui, false, tr.open_recent, "");
         }
         if menu::action(ui, true, tr.save_scene, &self.keys("S")) {
-            self.save_scene();
+            self.ask_save();
         }
         // On the web every save is a download, so "save as" would do the same.
         if !WEB && menu::action(ui, true, tr.save_scene_as, &self.keys("Shift+S")) {
             self.files.name = None;
-            self.save_scene();
+            self.ask_save();
         }
         if menu::action(ui, self.files.saved.is_some(), tr.revert, "") {
             self.revert_scene();
@@ -438,9 +451,9 @@ impl App {
             if !WEB {
                 self.files.name = None;
             }
-            self.save_scene();
+            self.ask_save();
         } else if pressed(M::COMMAND, Key::S) {
-            self.save_scene();
+            self.ask_save();
         }
     }
 
@@ -450,7 +463,7 @@ impl App {
         self.cancel_export();
         self.playback = None;
         self.sculpt = start_sculpt();
-        self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
+        self.gpu_mesh = GpuMesh::upload(&self.device, &self.queue, &self.sculpt.mesh);
         self.files.name = None;
         self.files.saved = None;
         self.files.restored = false;

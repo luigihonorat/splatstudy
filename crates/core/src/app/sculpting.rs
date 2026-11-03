@@ -109,20 +109,23 @@ pub(super) struct ToolSettings {
     pub(super) threshold: f32,
     /// Quad remesh: about how many quads.
     pub(super) quads: f32,
-    /// Asked for in this frame, done at the start of the next, so the
-    /// notice saying so shows while it runs.
-    pending: Option<Pending>,
+    /// Asked for in the frame at this time, done at the start of the next,
+    /// so the notice saying so shows while it runs.
+    pending: Option<(Pending, f64)>,
 }
 
-/// A slow mesh operation waiting for the next frame.
+/// A slow operation waiting for the next frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Pending {
+pub(super) enum Pending {
     Remesh,
     QuadRemesh,
     Subdivide,
     FromReference,
     /// One subdivision level up (true) or down.
     Level(bool),
+    /// Saving the scene (see `files.rs`): a fine clay takes a second to
+    /// pack.
+    SaveScene,
 }
 
 impl Default for ToolSettings {
@@ -371,22 +374,32 @@ impl App {
     }
 
     /// Runs a slow operation at the next frame, after a notice saying so.
-    fn ask(&mut self, pending: Pending, what: &str) {
-        if self.playback.is_none() {
-            self.tool.pending = Some(pending);
+    /// Edits of the clay wait while the timelapse shows.
+    pub(super) fn ask(&mut self, pending: Pending, what: &str) {
+        if self.playback.is_none() || pending == Pending::SaveScene {
+            self.tool.pending = Some((pending, self.now));
             self.notify(format!("{what}…"));
         }
     }
 
-    /// Does the operation asked for in the last frame.
+    /// Does the operation asked for in an earlier frame. One asked for in
+    /// this frame (from a menu, which comes before the panel) waits for
+    /// the next, so the frame showing its notice is drawn first.
     fn run_pending(&mut self) {
-        match self.tool.pending.take() {
-            Some(Pending::Remesh) => self.remesh(),
-            Some(Pending::QuadRemesh) => self.quad_remesh(),
-            Some(Pending::Subdivide) => self.subdivide(),
-            Some(Pending::FromReference) => self.clay_from_reference(),
-            Some(Pending::Level(up)) => self.change_level(up),
-            None => {}
+        let Some((pending, asked)) = self.tool.pending else {
+            return;
+        };
+        if asked >= self.now {
+            return;
+        }
+        self.tool.pending = None;
+        match pending {
+            Pending::Remesh => self.remesh(),
+            Pending::QuadRemesh => self.quad_remesh(),
+            Pending::Subdivide => self.subdivide(),
+            Pending::FromReference => self.clay_from_reference(),
+            Pending::Level(up) => self.change_level(up),
+            Pending::SaveScene => self.save_scene(),
         }
     }
 
@@ -519,7 +532,7 @@ impl App {
     /// uploads the clay, so checking here catches every case.
     pub(super) fn sync_clay(&mut self) {
         if self.sculpt.take_topology_changed() {
-            self.gpu_mesh = GpuMesh::new(&self.device, &self.sculpt.mesh);
+            self.gpu_mesh = GpuMesh::upload(&self.device, &self.queue, &self.sculpt.mesh);
             self.sculpt.take_dirty();
             // A stroke in progress held vertices of the old mesh.
             if !matches!(self.drags[SCULPT], Some(Drag::Navigate { .. })) {
