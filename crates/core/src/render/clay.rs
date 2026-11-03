@@ -246,7 +246,14 @@ pub struct GpuMesh {
     pub wire: OnceLock<(wgpu::Buffer, wgpu::BindGroup)>,
 }
 
+/// Vertices, and indices, per write when uploading a whole mesh: a few
+/// megabytes at a time.
+const UPLOAD_CHUNK: usize = 1 << 17;
+
 impl GpuMesh {
+    /// The mesh's buffers, filled in one go as they are made (mapped at
+    /// creation). Fine for small meshes and offscreen work; the app's clay
+    /// uses [`GpuMesh::upload`].
     pub fn new(device: &wgpu::Device, mesh: &Mesh) -> Self {
         // Storage too, for the wireframe: a vertex is a whole number of
         // words, which its shader reads as one array.
@@ -269,11 +276,67 @@ impl GpuMesh {
         }
     }
 
+    /// The mesh's buffers, filled through the queue a few megabytes at a
+    /// time. In the browser, a buffer mapped at creation needs one block
+    /// of shared memory for all of it, and making one throws when the
+    /// browser can't find that much (a fine level is 80 MB); queued
+    /// writes go in pieces, and the vertices are never all copied at once.
+    pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Self {
+        let indices = mesh.indices();
+        let buffer = |label, size: usize, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size as u64,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        // Storage too, for the wireframe, as in `new`.
+        let storage = wgpu::BufferUsages::STORAGE;
+        let gpu = Self {
+            vertices: buffer(
+                "clay vertices",
+                mesh.positions.len() * size_of::<Vertex>(),
+                wgpu::BufferUsages::VERTEX | storage,
+            ),
+            indices: buffer(
+                "clay indices",
+                size_of_val(indices),
+                wgpu::BufferUsages::INDEX | storage,
+            ),
+            index_count: indices.len() as u32,
+            wire: OnceLock::new(),
+        };
+        for (i, chunk) in indices.chunks(UPLOAD_CHUNK).enumerate() {
+            let offset = (i * UPLOAD_CHUNK * size_of::<u32>()) as u64;
+            queue.write_buffer(&gpu.indices, offset, bytemuck::cast_slice(chunk));
+        }
+        let n = mesh.positions.len();
+        for start in (0..n).step_by(UPLOAD_CHUNK) {
+            gpu.write(queue, mesh, start..(start + UPLOAD_CHUNK).min(n));
+        }
+        gpu
+    }
+
     /// Uploads the vertices in `range` after sculpting changed them.
     pub fn write(&self, queue: &wgpu::Queue, mesh: &Mesh, range: std::ops::Range<usize>) {
         let data: Vec<Vertex> = range.clone().map(|i| mesh.vertex(i)).collect();
         let offset = (range.start * size_of::<Vertex>()) as u64;
         queue.write_buffer(&self.vertices, offset, bytemuck::cast_slice(&data));
+    }
+}
+
+/// Frees the GPU memory now. In the browser, dropping a buffer only lets
+/// the garbage collector free it some time later, and it doesn't hurry for
+/// GPU memory: each level change or remesh of a fine clay left tens of
+/// megabytes behind. Work already submitted still finishes with them.
+impl Drop for GpuMesh {
+    fn drop(&mut self) {
+        self.vertices.destroy();
+        self.indices.destroy();
+        if let Some((codes, _)) = self.wire.get() {
+            codes.destroy();
+        }
     }
 }
 

@@ -49,6 +49,23 @@ pub struct ViewTarget {
     pub depth_view: wgpu::TextureView,
     pub size: [u32; 2],
     pub egui_id: Option<egui::TextureId>,
+    /// The textures behind `msaa_view` and `depth_view`, kept to be
+    /// destroyed with the target (see its `Drop`).
+    pub msaa: wgpu::Texture,
+    pub depth: wgpu::Texture,
+}
+
+/// Frees the GPU memory now. In the browser, a dropped texture waits for
+/// the garbage collector, which doesn't hurry for GPU memory: dragging the
+/// split between the views made new targets every frame and left the old
+/// ones (tens of megabytes with multisampling) behind. Work already
+/// submitted still finishes with them.
+impl Drop for ViewTarget {
+    fn drop(&mut self) {
+        self.resolved.destroy();
+        self.msaa.destroy();
+        self.depth.destroy();
+    }
 }
 
 impl ViewTarget {
@@ -84,6 +101,8 @@ impl ViewTarget {
             depth_view: depth.create_view(&Default::default()),
             size,
             egui_id: None,
+            msaa,
+            depth,
         }
     }
 

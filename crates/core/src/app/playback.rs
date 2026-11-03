@@ -39,7 +39,7 @@ impl App {
         let mut replay = Replay::of(&self.sculpt);
         replay.sculpt.take_topology_changed();
         self.playback = Some(Playback {
-            gpu_mesh: GpuMesh::new(&self.device, &replay.sculpt.mesh),
+            gpu_mesh: GpuMesh::upload(&self.device, &self.queue, &replay.sculpt.mesh),
             replay,
             playing: true,
             speed: REPLAY_SPEEDS[1],
@@ -68,7 +68,7 @@ impl App {
         // Past a remesh, or back to the start: other triangles.
         let sculpt = &mut p.replay.sculpt;
         if sculpt.take_topology_changed() {
-            p.gpu_mesh = GpuMesh::new(&self.device, &sculpt.mesh);
+            p.gpu_mesh = GpuMesh::upload(&self.device, &self.queue, &sculpt.mesh);
             sculpt.take_dirty();
         }
         if p.playing || !caught_up {

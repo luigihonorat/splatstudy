@@ -446,7 +446,7 @@ impl Job {
         if sculpt.take_topology_changed() {
             // A checkpoint with other triangles: the index buffer can't be
             // updated in place.
-            self.gpu_mesh = GpuMesh::new(gpu.device, &sculpt.mesh);
+            self.gpu_mesh = GpuMesh::upload(gpu.device, gpu.queue, &sculpt.mesh);
             sculpt.take_dirty();
         } else {
             for range in sculpt.take_dirty() {

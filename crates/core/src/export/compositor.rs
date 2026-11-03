@@ -365,5 +365,7 @@ fn output_target(device: &wgpu::Device, size: [u32; 2]) -> ViewTarget {
         depth_view: depth.create_view(&Default::default()),
         size,
         egui_id: None,
+        msaa,
+        depth,
     }
 }
