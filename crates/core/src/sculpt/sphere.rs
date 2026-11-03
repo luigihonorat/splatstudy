@@ -73,7 +73,9 @@ fn on_sphere(p: Vec3) -> Vec3 {
 /// the cube up.
 pub fn cube_sphere(level: usize) -> (Mesh, Levels) {
     let (mut cube, triangles) = cube();
-    let base = Mesh::from_ordered(cube.iter().map(|&p| on_sphere(p)).collect(), triangles);
+    let mut base = Mesh::from_ordered(cube.iter().map(|&p| on_sphere(p)).collect(), triangles);
+    // Each face's two triangles, for export as quads; every level keeps them.
+    base.quads = (0..6).map(|f| [2 * f, 2 * f + 1]).collect();
     Levels::build(base, level, |_, split: &Split, _| {
         // The finer grid on the cube: plain midpoints, which are exact.
         cube = split.midpoints(&cube);
@@ -183,6 +185,33 @@ mod tests {
             assert!(n.dot(a + b + c) > 0.0, "a triangle facing in");
             assert!(n.length() > 1e-7, "a sliver");
         }
+    }
+
+    #[test]
+    fn every_level_exports_as_quads() {
+        let (mesh, levels) = cube_sphere(3);
+        let quads = |m: &Mesh| {
+            let obj = String::from_utf8(crate::meshio::obj::write(m)).unwrap();
+            let faces: Vec<usize> = obj
+                .lines()
+                .filter(|l| l.starts_with("f "))
+                .map(|l| l.split_whitespace().count() - 1)
+                .collect();
+            assert!(faces.iter().all(|&n| n == 4), "a triangle left over");
+            faces.len()
+        };
+        assert_eq!(quads(&mesh), 6 * 8 * 8);
+        let mut s = Sculpt::with_levels(mesh, Some(levels));
+        let top = s.mesh.quads.clone();
+        for level in (0..3).rev() {
+            assert!(s.change_level(false));
+            let n = 1 << level;
+            assert_eq!(quads(&s.mesh), 6 * n * n, "level {level}");
+        }
+        while s.change_level(true) {}
+        assert_eq!(s.mesh.quads, top);
+        s.subdivide();
+        assert_eq!(quads(&s.mesh), 6 * 16 * 16);
     }
 
     #[test]

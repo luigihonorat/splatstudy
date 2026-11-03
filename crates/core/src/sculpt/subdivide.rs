@@ -155,6 +155,58 @@ impl Split {
     }
 }
 
+/// The quads (pairs of triangles, see `Mesh::quads`) of the finer mesh
+/// split from `triangles` with `quads`: each quad becomes four, two across
+/// the edge its triangles share and one inside each of them, so a
+/// triangulated quad grid stays one, with its diagonals parallel. Pairs
+/// that aren't two triangles sharing an edge are left out.
+pub fn child_quads(triangles: &[[u32; 3]], quads: &[[u32; 2]]) -> Vec<[u32; 2]> {
+    let mut out = Vec::with_capacity(quads.len() * 4);
+    for &[p, q] in quads {
+        let (Some(tp), Some(tq)) = (triangles.get(p as usize), triangles.get(q as usize)) else {
+            continue;
+        };
+        // The corners of each that the other shares, and the one it doesn't.
+        let mut shared = [(0, 0); 2];
+        let mut count = 0;
+        for (i, v) in tp.iter().enumerate() {
+            if let Some(j) = tq.iter().position(|u| u == v) {
+                if count < 2 {
+                    shared[count] = (i, j);
+                }
+                count += 1;
+            }
+        }
+        if p == q || count != 2 {
+            continue;
+        }
+        let off = |at: [usize; 2]| (0..3).find(|i| !at.contains(i)).unwrap_or(0) as u32;
+        let op = off([shared[0].0, shared[1].0]);
+        let oq = off([shared[0].1, shared[1].1]);
+        // Child i of a triangle is at its corner i; child 3 is the middle.
+        let child = |t: u32, i: u32| 4 * t + i;
+        for &(i, j) in &shared {
+            out.push([child(p, i as u32), child(q, j as u32)]);
+        }
+        out.push([child(p, op), child(p, 3)]);
+        out.push([child(q, oq), child(q, 3)]);
+    }
+    out
+}
+
+/// The quads of the coarser mesh that the triangles with `quads` were
+/// split from: the pairs of coarse triangles that a quad straddles.
+pub fn parent_quads(quads: &[[u32; 2]]) -> Vec<[u32; 2]> {
+    let mut out: Vec<[u32; 2]> = quads
+        .iter()
+        .filter(|[s, t]| s / 4 != t / 4)
+        .map(|[s, t]| [(s / 4).min(t / 4), (s / 4).max(t / 4)])
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Vertices the clay would have after [`subdivide`]: one more per edge.
 pub fn subdivided_len(mesh: &Mesh) -> usize {
     mesh.positions.len()

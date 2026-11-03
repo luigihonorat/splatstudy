@@ -32,7 +32,7 @@ use std::sync::Arc;
 use glam::Vec3;
 
 use super::mesh::{Adjacency, Mesh, area_normals};
-use super::subdivide::{Split, parents};
+use super::subdivide::{Split, child_quads, parent_quads, parents};
 use super::{Event, MAX_VERTICES, Sculpt, Step};
 use crate::io::{ReadError, Reader, Writer};
 
@@ -135,11 +135,14 @@ fn decode(mesh: &Mesh, detail: &Detail) -> Vec<Vec3> {
 
 /// The level above `live` as Loop's scheme makes it, with its rings and
 /// the normals of the smooth surface.
+/// Its quads follow (see [`child_quads`]).
 fn smoothed(live: &Mesh, split: &Split) -> Mesh {
-    Mesh::from_ordered(
+    let mut mesh = Mesh::from_ordered(
         split.positions(live, &live.positions),
         split.triangles(live),
-    )
+    );
+    mesh.quads = child_quads(&live.triangles, &live.quads);
+    mesh
 }
 
 /// A change of the vertices of a level, brought down to the `coarse`
@@ -306,6 +309,7 @@ impl Levels {
         let level = self.current.checked_sub(1)?;
         let triangles = parents(&live.triangles, self.counts[level])?;
         let mut coarse = Mesh::from_ordered(self.below[level].positions.clone(), triangles);
+        coarse.quads = parent_quads(&live.quads);
         let split = Split::of(&coarse)?;
         if split.len() != live.positions.len() {
             return None;
