@@ -203,7 +203,7 @@ pub fn extract(g: &Graph, o: &[Vec3], p: &[Vec3], scale: f32) -> Option<Extracte
     remove_loose(&mut around);
 
     // Edges around each vertex, counter-clockwise seen from outside.
-    for v in 0..m {
+    for (v, list) in around.iter_mut().enumerate() {
         let (pv, nv) = (vertices.positions[v], vertices.normals[v]);
         let x = nv.any_orthonormal_vector();
         let y = nv.cross(x);
@@ -211,7 +211,7 @@ pub fn extract(g: &Graph, o: &[Vec3], p: &[Vec3], scale: f32) -> Option<Extracte
             let d = vertices.positions[u as usize] - pv;
             d.dot(y).atan2(d.dot(x))
         };
-        around[v].sort_by(|&a, &b| angle(a).total_cmp(&angle(b)).then(a.cmp(&b)));
+        list.sort_by(|&a, &b| angle(a).total_cmp(&angle(b)).then(a.cmp(&b)));
     }
     let mut passes = 0;
     let faces = loop {

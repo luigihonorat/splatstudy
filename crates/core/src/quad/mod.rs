@@ -326,7 +326,9 @@ fn wrong(ex: &Extracted) -> Vec<usize> {
             let f = face(t);
             let around: Vec3 = t.iter().map(|&i| normals[i as usize]).sum();
             // Slivers with next to no area are left: they show nothing.
-            !(f.dot(around) >= -1e-3 * f.length() * around.length())
+            // (Not finite counts as folded too.)
+            let facing = f.dot(around) + 1e-3 * f.length() * around.length();
+            facing.is_nan() || facing < 0.0
         })
         .collect()
 }

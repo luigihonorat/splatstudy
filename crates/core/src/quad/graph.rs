@@ -52,6 +52,10 @@ impl Graph {
         self.positions.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
     /// The samples joined to `i`.
     pub fn of(&self, i: usize) -> &[u32] {
         &self.links[self.links_of(i)]
@@ -109,8 +113,8 @@ impl Graph {
         let mut normals = vec![Vec3::ZERO; m];
         let mut areas = vec![0.0f32; m];
         let mut weights = vec![0.0f32; m];
-        for i in 0..n {
-            let c = parent[i] as usize;
+        for (i, &c) in parent.iter().enumerate() {
+            let c = c as usize;
             // Weighted by area, but never by nothing, so a sample of
             // zero area still has a place.
             let w = self.areas[i] + 1e-12;
