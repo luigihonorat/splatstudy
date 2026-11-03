@@ -57,6 +57,11 @@ pub struct Mesh {
     pub vertex_faces: Adjacency,
     /// Vertices sharing an edge with each vertex.
     pub neighbours: Adjacency,
+    /// Pairs of triangles that are halves of one quad, for a mesh made of
+    /// quads (a quad remesh), so that export can write the quads. Empty
+    /// otherwise. Sculpting never changes the triangles, so it holds until
+    /// the mesh is replaced.
+    pub quads: Vec<[u32; 2]>,
 }
 
 impl Mesh {
@@ -76,6 +81,7 @@ impl Mesh {
             neighbours: Adjacency::default(),
             positions,
             triangles,
+            quads: Vec::new(),
         };
         mesh.neighbours = neighbours(&mesh);
         mesh.recompute_normals();
@@ -586,6 +592,7 @@ mod tests {
                     neighbours: Adjacency::default(),
                     positions: p,
                     triangles: t,
+                    quads: Vec::new(),
                 };
                 let start = Instant::now();
                 m.neighbours = neighbours(&m);
