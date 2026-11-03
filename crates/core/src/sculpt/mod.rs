@@ -38,6 +38,12 @@ pub const MAX_TRIANGLES: usize = 8_000_000;
 /// Vertices per GPU upload page.
 pub const PAGE: usize = 4096;
 
+/// About the most memory the undo stack keeps, in bytes: past it, the
+/// oldest steps are forgotten. One stroke with a large brush on the finest
+/// clay holds over ten megabytes, and in the browser all of it lives in
+/// the 4 GB the page may use.
+pub const UNDO_BUDGET: usize = 256 << 20;
+
 /// Sculpting time between checkpoints of the positions, in seconds: a
 /// timelapse snaps back to them, so a replay that drifts (another machine
 /// rounding differently) recovers.
@@ -130,6 +136,20 @@ struct Edit {
     indices: Vec<u32>,
     before: Vec<Vec3>,
     after: Vec<Vec3>,
+}
+
+impl Step {
+    /// Roughly the memory it holds: what [`UNDO_BUDGET`] counts.
+    fn bytes(&self) -> usize {
+        match self {
+            Step::Move(edit) => {
+                edit.indices.len() * 4 + (edit.before.len() + edit.after.len()) * 12
+            }
+            Step::Topology(old) => old.0.positions.len() * 12 + old.0.triangles.len() * 12,
+            Step::Levels(Some(levels)) => levels.memory(),
+            _ => 0,
+        }
+    }
 }
 
 /// One step on the undo or redo stack.
@@ -564,6 +584,20 @@ impl Sculpt {
             after,
         }));
         self.redo.clear();
+        self.forget_oldest_steps(UNDO_BUDGET);
+    }
+
+    /// Drops the oldest undo steps while the stack holds more than
+    /// `budget` bytes ([`UNDO_BUDGET`]), always keeping the newest. A
+    /// replay drops the same ones, so it still undoes what the log says.
+    fn forget_oldest_steps(&mut self, budget: usize) {
+        let mut total: usize = self.undo.iter().map(Step::bytes).sum();
+        let mut old = 0;
+        while total > budget && old + 1 < self.undo.len() {
+            total -= self.undo[old].bytes();
+            old += 1;
+        }
+        self.undo.drain(..old);
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1275,6 +1309,36 @@ mod tests {
         }
         s.undo();
         assert_eq!(s.mesh.positions, before);
+    }
+
+    #[test]
+    fn undo_forgets_the_oldest_strokes_past_its_budget() {
+        let mut s = sculpt();
+        let start = s.mesh.positions.clone();
+        for k in 0..4 {
+            stroke(
+                &mut s,
+                Brush::Clay,
+                Vec3::new(0.2 * k as f32 - 0.3, 0.3, 0.9),
+                3,
+            );
+        }
+        let after_first: Vec<usize> = s.undo.iter().map(Step::bytes).collect();
+        assert_eq!(after_first.len(), 4);
+        // Room for the newest two only.
+        let budget = after_first[2] + after_first[3];
+        s.forget_oldest_steps(budget);
+        assert_eq!(s.undo.len(), 2);
+        // The two newest still undo; the clay keeps the first two strokes.
+        s.undo();
+        s.undo();
+        s.undo();
+        assert!(!s.can_undo());
+        assert_ne!(s.mesh.positions, start);
+        // Always the newest, however small the budget.
+        s.redo();
+        s.forget_oldest_steps(0);
+        assert_eq!(s.undo.len(), 1);
     }
 
     #[test]
