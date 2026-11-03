@@ -6,10 +6,13 @@
 mod files;
 mod ime;
 mod storage;
+mod timing;
 mod video;
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use splatstudy_core::{
     App, Button, CursorIcon, InputEvent, Key, Lang, Modifiers, PointerEvent, PointerKind,
@@ -102,6 +105,7 @@ async fn run() -> Result<(), JsValue> {
         })
         .await
         .map_err(|e| no_gpu(&format!("device: {e}")))?;
+    device.on_uncaptured_error(Arc::new(log_gpu_error));
 
     let caps = surface.get_capabilities(&adapter);
     let format = caps
@@ -131,6 +135,7 @@ async fn run() -> Result<(), JsValue> {
         .unwrap_or_default();
     let mut app = App::new(device.clone(), queue.clone(), format, lang);
     app.set_debug(query_value(&search, "debug").is_some());
+    timing::init(query_value(&search, "timing").is_some());
     app.set_mac(is_mac());
     app.set_video_encoder(Box::new(video::WebVideo::new()));
     // Saved preferences beat the browser's language; `?lang=` beats both.
@@ -173,18 +178,15 @@ async fn run() -> Result<(), JsValue> {
     shell.app.set_first_run(storage::first_run());
 
     let shell = Rc::new(RefCell::new(shell));
-    listen(&shell, &canvas)?;
-    // Files and text input deliver from their own callbacks. One can fire
+    // Input, files and text arrive from their own callbacks. One can fire
     // while the shell is borrowed (moving the focus commits an IME word
     // synchronously), so such events wait for the next frame instead.
-    let pending: Rc<RefCell<Vec<InputEvent>>> = Rc::default();
+    let pending: Pending = Rc::default();
+    listen(&shell, &pending, &canvas)?;
     let deliver: files::Deliver = {
         let s = shell.clone();
         let p = pending.clone();
-        Rc::new(move |e| match s.try_borrow_mut() {
-            Ok(mut shell) => shell.app.push_event(e),
-            Err(_) => p.borrow_mut().push(e),
-        })
+        Rc::new(move |e| with_shell(&s, &p, move |shell| shell.app.push_event(e)))
     };
     let files = files::Files::new(&document, deliver.clone())?;
     for request in early {
@@ -200,6 +202,30 @@ async fn run() -> Result<(), JsValue> {
     animate(shell, files, text, pending);
     let _ = canvas.focus();
     Ok(())
+}
+
+/// What waits for the shell to be free: input that came while it was busy.
+type Pending = Rc<RefCell<Vec<Box<dyn FnOnce(&mut Shell)>>>>;
+
+/// Runs `f` on the shell now, or at the start of the next frame if the
+/// shell is busy: a DOM event can fire inside a frame (a focus change),
+/// and borrowing the shell twice would panic.
+fn with_shell(shell: &Rc<RefCell<Shell>>, pending: &Pending, f: impl FnOnce(&mut Shell) + 'static) {
+    match shell.try_borrow_mut() {
+        Ok(mut shell) => f(&mut shell),
+        Err(_) => pending.borrow_mut().push(Box::new(f)),
+    }
+}
+
+/// Logs a WebGPU error that no error scope caught, instead of wgpu's
+/// default of panicking: the browser failing to make one buffer (out of
+/// memory) shouldn't stop the app and take the unsaved work with it. The
+/// first few only, since a broken resource fails again every frame.
+fn log_gpu_error(error: wgpu::Error) {
+    static LOGGED: AtomicU32 = AtomicU32::new(0);
+    if LOGGED.fetch_add(1, Ordering::Relaxed) < 8 {
+        log::error!("WebGPU: {error}");
+    }
 }
 
 /// Adds an event listener that lives as long as the page.
@@ -223,7 +249,11 @@ fn on<E: JsCast + 'static>(
     Ok(())
 }
 
-fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), JsValue> {
+fn listen(
+    shell: &Rc<RefCell<Shell>>,
+    pending: &Pending,
+    canvas: &HtmlCanvasElement,
+) -> Result<(), JsValue> {
     let window: web_sys::EventTarget = web_sys::window().ok_or("no window")?.into();
 
     for (name, phase) in [
@@ -233,17 +263,17 @@ fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), 
         ("pointercancel", PointerPhase::Cancel),
     ] {
         let s = shell.clone();
+        let p = pending.clone();
         let c = canvas.clone();
         on(canvas, name, false, move |e: DomPointer| {
             e.prevent_default();
             if phase == PointerPhase::Down {
                 let _ = c.set_pointer_capture(e.pointer_id());
-                // Before borrowing the shell: taking the focus from the IME
-                // commits its word, which is delivered first, as typed.
+                // Before the shell takes the event: taking the focus from
+                // the IME commits its word, which is delivered first, as
+                // typed.
                 let _ = c.focus();
             }
-            let mut shell = s.borrow_mut();
-            shell.update_modifiers(&e);
             if matches!(phase, PointerPhase::Up | PointerPhase::Cancel) {
                 let _ = c.release_pointer_capture(e.pointer_id());
             }
@@ -253,24 +283,30 @@ fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), 
             } else {
                 js_sys::Array::new()
             };
-            if coalesced.length() > 1 {
-                for sample in coalesced.iter() {
-                    let sample: DomPointer = sample.unchecked_into();
-                    shell
-                        .app
-                        .push_event(InputEvent::Pointer(pointer(&sample, phase)));
-                }
+            let samples: Vec<PointerEvent> = if coalesced.length() > 1 {
+                coalesced
+                    .iter()
+                    .map(|sample| pointer(sample.unchecked_ref(), phase))
+                    .collect()
             } else {
-                shell
-                    .app
-                    .push_event(InputEvent::Pointer(pointer(&e, phase)));
-            }
+                vec![pointer(&e, phase)]
+            };
+            let modifiers = mouse_modifiers(&e);
+            with_shell(&s, &p, move |shell| {
+                shell.set_modifiers(modifiers);
+                for sample in samples {
+                    shell.app.push_event(InputEvent::Pointer(sample));
+                }
+            });
         })?;
     }
     let s = shell.clone();
+    let p = pending.clone();
     on(canvas, "pointerleave", true, move |e: DomPointer| {
         if e.buttons() == 0 {
-            s.borrow_mut().app.push_event(InputEvent::PointerLeft);
+            with_shell(&s, &p, |shell| {
+                shell.app.push_event(InputEvent::PointerLeft)
+            });
         }
     })?;
     on(canvas, "contextmenu", false, |e: MouseEvent| {
@@ -278,60 +314,72 @@ fn listen(shell: &Rc<RefCell<Shell>>, canvas: &HtmlCanvasElement) -> Result<(), 
     })?;
 
     let s = shell.clone();
+    let p = pending.clone();
     on(canvas, "wheel", false, move |e: WheelEvent| {
         e.prevent_default();
-        let mut shell = s.borrow_mut();
-        shell.update_modifiers(&e);
         let scale = match e.delta_mode() {
             WheelEvent::DOM_DELTA_PAGE => 20.0,
             _ => 1.0,
         };
         let delta = [-(e.delta_x() as f32) * scale, -(e.delta_y() as f32) * scale];
         let lines = e.delta_mode() == WheelEvent::DOM_DELTA_LINE;
-        shell.app.push_event(InputEvent::Wheel { delta, lines });
+        let modifiers = mouse_modifiers(&e);
+        with_shell(&s, &p, move |shell| {
+            shell.set_modifiers(modifiers);
+            shell.app.push_event(InputEvent::Wheel { delta, lines });
+        });
     })?;
 
     for (name, pressed) in [("keydown", true), ("keyup", false)] {
         let s = shell.clone();
+        let p = pending.clone();
         on(&window, name, false, move |e: KeyboardEvent| {
-            let mut shell = s.borrow_mut();
-            shell.update_key_modifiers(&e);
+            let modifiers = [e.alt_key(), e.ctrl_key(), e.shift_key(), e.meta_key()];
+            let mut events = Vec::new();
             // The IME owns these; its committed text arrives from `ime`.
-            if ime::is_ime_key(&e) {
-                return;
-            }
             let name = e.key();
-            if let Some(key) = Key::from_name(&name) {
-                shell.app.push_event(InputEvent::Key {
-                    key,
-                    pressed,
-                    repeat: e.repeat(),
-                });
+            if !ime::is_ime_key(&e) {
+                if let Some(key) = Key::from_name(&name) {
+                    events.push(InputEvent::Key {
+                        key,
+                        pressed,
+                        repeat: e.repeat(),
+                    });
+                }
+                // Windows reports AltGr (for @ # € on French and German
+                // keyboards) as Ctrl+Alt: that is typing, not a shortcut.
+                let altgr = e.get_modifier_state("AltGraph") || (e.ctrl_key() && e.alt_key());
+                let shortcut = (e.ctrl_key() || e.meta_key()) && !altgr;
+                if pressed && !shortcut && name.chars().count() == 1 {
+                    events.push(InputEvent::Text(name.clone()));
+                }
+                // Keep the browser from acting on keys the app uses.
+                // Cmd/Ctrl+S, +Shift+S and +O are the app's save, save as
+                // and open, not the browser's.
+                let command = if is_mac() { e.meta_key() } else { e.ctrl_key() };
+                let file_key = command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o");
+                if matches!(name.as_str(), "Alt" | "Tab" | " " | "F2")
+                    || (!shortcut && name.starts_with("Arrow"))
+                    || file_key
+                {
+                    e.prevent_default();
+                }
             }
-            // Windows reports AltGr (for @ # € on French and German
-            // keyboards) as Ctrl+Alt: that is typing, not a shortcut.
-            let altgr = e.get_modifier_state("AltGraph") || (e.ctrl_key() && e.alt_key());
-            let shortcut = (e.ctrl_key() || e.meta_key()) && !altgr;
-            if pressed && !shortcut && name.chars().count() == 1 {
-                shell.app.push_event(InputEvent::Text(name.clone()));
-            }
-            // Keep the browser from acting on keys the app uses.
-            // Cmd/Ctrl+S, +Shift+S and +O are the app's save, save as and
-            // open, not the browser's.
-            let command = if is_mac() { e.meta_key() } else { e.ctrl_key() };
-            let file_key = command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o");
-            if matches!(name.as_str(), "Alt" | "Tab" | " " | "F2")
-                || (!shortcut && name.starts_with("Arrow"))
-                || file_key
-            {
-                e.prevent_default();
-            }
+            with_shell(&s, &p, move |shell| {
+                shell.set_modifiers(modifiers);
+                for event in events {
+                    shell.app.push_event(event);
+                }
+            });
         })?;
     }
     for (name, focused) in [("focus", true), ("blur", false)] {
         let s = shell.clone();
+        let p = pending.clone();
         on(&window, name, true, move |_: web_sys::FocusEvent| {
-            s.borrow_mut().app.push_event(InputEvent::Focus(focused));
+            with_shell(&s, &p, move |shell| {
+                shell.app.push_event(InputEvent::Focus(focused))
+            });
         })?;
     }
     Ok(())
@@ -375,16 +423,14 @@ fn pointer(e: &DomPointer, phase: PointerPhase) -> PointerEvent {
     }
 }
 
+/// Alt, Ctrl, Shift and Meta, as a mouse event saw them.
+fn mouse_modifiers(e: &MouseEvent) -> [bool; 4] {
+    [e.alt_key(), e.ctrl_key(), e.shift_key(), e.meta_key()]
+}
+
 impl Shell {
-    fn update_modifiers(&mut self, e: &MouseEvent) {
-        self.set_modifiers(e.alt_key(), e.ctrl_key(), e.shift_key(), e.meta_key());
-    }
-
-    fn update_key_modifiers(&mut self, e: &KeyboardEvent) {
-        self.set_modifiers(e.alt_key(), e.ctrl_key(), e.shift_key(), e.meta_key());
-    }
-
-    fn set_modifiers(&mut self, alt: bool, ctrl: bool, shift: bool, meta: bool) {
+    /// Alt, Ctrl, Shift and Meta, as the DOM reports them.
+    fn set_modifiers(&mut self, [alt, ctrl, shift, meta]: [bool; 4]) {
         let mac = is_mac();
         let m = Modifiers {
             alt,
@@ -440,6 +486,7 @@ impl Shell {
         let size = [self.config.width, self.config.height];
         let out = self.app.frame(now, &view, size, ppp);
         self.queue.present(texture);
+        timing::frame(now, self::now() - now);
         storage::frame_drawn();
         let preferences = self.app.preferences();
         if preferences != self.preferences {
@@ -477,19 +524,14 @@ type FrameCallback = Closure<dyn FnMut()>;
 
 /// Runs a frame on every animation frame, then the app's requests, outside
 /// the shell's borrow: files and text input hand events back to it.
-fn animate(
-    shell: Rc<RefCell<Shell>>,
-    files: files::Files,
-    text: ime::TextInput,
-    pending: Rc<RefCell<Vec<InputEvent>>>,
-) {
+fn animate(shell: Rc<RefCell<Shell>>, files: files::Files, text: ime::TextInput, pending: Pending) {
     let callback: Rc<RefCell<Option<FrameCallback>>> = Rc::new(RefCell::new(None));
     let next = callback.clone();
     *callback.borrow_mut() = Some(Closure::new(move || {
         let now = now();
         let queued = std::mem::take(&mut *pending.borrow_mut());
-        for event in queued {
-            shell.borrow_mut().app.push_event(event);
+        for f in queued {
+            f(&mut shell.borrow_mut());
         }
         let requests = shell.borrow_mut().frame(now);
         for request in requests {

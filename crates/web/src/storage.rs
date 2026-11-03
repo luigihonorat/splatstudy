@@ -559,7 +559,9 @@ impl Autosave {
             }
             return;
         }
+        let started = now();
         let bytes = app.autosave_bytes();
+        crate::timing::note("autosave scene", now() - started);
         st.writing = true;
         st.issued += 1;
         let (issued, heard) = (st.issued, st.heard);
