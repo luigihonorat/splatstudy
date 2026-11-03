@@ -647,7 +647,7 @@ impl App {
 
     /// One dab: pen pressure scales the tool's strength.
     fn dab_at(&mut self, rect: Rect, pressure: f32, hit: Hit, direction: Vec3) {
-        let (ctrl, shift) = self.ctx.input(|i| (i.modifiers.ctrl, i.modifiers.shift));
+        let (m, shift) = self.ctx.input(|i| (i.modifiers.into(), i.modifiers.shift));
         let tool = if shift { Brush::Smooth } else { self.tool.tool };
         let pressure = pressure.clamp(0.0, 1.0);
         let strength = self.tool.strength[tool_index(tool)] * pressure;
@@ -658,7 +658,7 @@ impl App {
             centre: hit.point,
             radius: self.tool.radius * scale,
             strength,
-            invert: ctrl,
+            invert: self.nav.inverts(m),
             symmetry: self.tool.symmetry,
             direction,
         });

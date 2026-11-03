@@ -62,6 +62,47 @@ impl NavStyle {
             _ => None,
         }
     }
+
+    /// What a drag that `button` started as `action` does now that the
+    /// modifiers are `m`. In ZBrush style, Alt + drag on the background
+    /// moves, and letting go of Alt while still dragging scales instead.
+    pub fn during(self, action: NavAction, button: Button, m: Modifiers) -> NavAction {
+        match (self, button, action) {
+            (NavStyle::ZBrush, Button::Primary, NavAction::Pan) if !m.alt => NavAction::Zoom,
+            _ => action,
+        }
+    }
+
+    /// Whether a turn in progress snaps to the nearest front, side, back,
+    /// top or bottom view: Shift in ZBrush style.
+    pub fn snaps(self, m: Modifiers) -> bool {
+        self == NavStyle::ZBrush && m.shift
+    }
+
+    /// The key held for a brush's opposite action: Alt in ZBrush style,
+    /// where Ctrl is masking, and Ctrl in the others, where Alt navigates.
+    pub fn invert_key(self) -> &'static str {
+        match self {
+            NavStyle::ZBrush => "Alt",
+            NavStyle::Blender | NavStyle::Maya => "Ctrl",
+        }
+    }
+
+    /// Whether the brush does its opposite action with the modifiers `m`.
+    pub fn inverts(self, m: Modifiers) -> bool {
+        match self {
+            NavStyle::ZBrush => m.alt,
+            NavStyle::Blender | NavStyle::Maya => m.ctrl,
+        }
+    }
+}
+
+/// The axis-aligned view nearest to `yaw` and `pitch` (radians): both
+/// rounded to quarter turns.
+pub fn snap_view(yaw: f32, pitch: f32) -> (f32, f32) {
+    use std::f32::consts::FRAC_PI_2;
+    let quarter = |a: f32| (a / FRAC_PI_2).round() * FRAC_PI_2;
+    (quarter(yaw), quarter(pitch))
 }
 
 #[cfg(test)]
@@ -117,5 +158,122 @@ mod tests {
             Some(NavAction::Zoom)
         );
         assert_eq!(NavStyle::Maya.action(Button::Middle, NONE, false), None);
+    }
+
+    #[test]
+    fn zbrush_style_matches_its_documented_navigation() {
+        let z = NavStyle::ZBrush;
+        let ctrl = Modifiers { ctrl: true, ..NONE };
+        let shift = Modifiers {
+            shift: true,
+            ..NONE
+        };
+        // On the background: drag turns, Alt + drag moves.
+        assert_eq!(
+            z.action(Button::Primary, NONE, false),
+            Some(NavAction::Orbit)
+        );
+        assert_eq!(z.action(Button::Primary, ALT, false), Some(NavAction::Pan));
+        // Shift doesn't change what a drag does; it snaps the turn.
+        assert_eq!(
+            z.action(Button::Primary, shift, false),
+            Some(NavAction::Orbit)
+        );
+        // On the clay, the left button sculpts with any modifier: Alt is
+        // the opposite action, not navigation.
+        for m in [NONE, ALT, ctrl, shift] {
+            assert_eq!(z.action(Button::Primary, m, true), None, "{m:?}");
+        }
+        // The right button anywhere.
+        for on_clay in [false, true] {
+            assert_eq!(
+                z.action(Button::Secondary, NONE, on_clay),
+                Some(NavAction::Orbit)
+            );
+            assert_eq!(
+                z.action(Button::Secondary, ALT, on_clay),
+                Some(NavAction::Pan)
+            );
+            assert_eq!(
+                z.action(Button::Secondary, ctrl, on_clay),
+                Some(NavAction::Zoom)
+            );
+        }
+    }
+
+    #[test]
+    fn letting_go_of_alt_mid_drag_scales_in_zbrush_style_only() {
+        let z = NavStyle::ZBrush;
+        let pan = z.action(Button::Primary, ALT, false).unwrap();
+        // Alt still held: it keeps moving.
+        assert_eq!(z.during(pan, Button::Primary, ALT), NavAction::Pan);
+        // Alt let go: it scales, and keeps scaling if Alt comes back.
+        let zoom = z.during(pan, Button::Primary, NONE);
+        assert_eq!(zoom, NavAction::Zoom);
+        assert_eq!(z.during(zoom, Button::Primary, ALT), NavAction::Zoom);
+        // A turn stays a turn, and the right button keeps its action.
+        assert_eq!(
+            z.during(NavAction::Orbit, Button::Primary, ALT),
+            NavAction::Orbit
+        );
+        assert_eq!(
+            z.during(NavAction::Pan, Button::Secondary, NONE),
+            NavAction::Pan
+        );
+        // Maya style turns with Alt + left, and letting go keeps turning.
+        let maya = NavStyle::Maya.action(Button::Primary, ALT, true).unwrap();
+        assert_eq!(
+            NavStyle::Maya.during(maya, Button::Primary, NONE),
+            NavAction::Orbit
+        );
+        for style in [NavStyle::Blender, NavStyle::Maya] {
+            for action in [NavAction::Orbit, NavAction::Pan, NavAction::Zoom] {
+                for button in [Button::Primary, Button::Middle, Button::Secondary] {
+                    assert_eq!(style.during(action, button, NONE), action, "{style:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_opposite_action_key_follows_the_style() {
+        let ctrl = Modifiers { ctrl: true, ..NONE };
+        assert_eq!(NavStyle::ZBrush.invert_key(), "Alt");
+        assert!(NavStyle::ZBrush.inverts(ALT));
+        assert!(!NavStyle::ZBrush.inverts(ctrl), "Ctrl is masking in ZBrush");
+        for style in [NavStyle::Blender, NavStyle::Maya] {
+            assert_eq!(style.invert_key(), "Ctrl");
+            assert!(style.inverts(ctrl), "{style:?}");
+            assert!(!style.inverts(ALT), "{style:?}");
+        }
+        // Maya style: Alt + left on the clay navigates, so never sculpts
+        // inverted.
+        assert_eq!(
+            NavStyle::Maya.action(Button::Primary, ALT, true),
+            Some(NavAction::Orbit)
+        );
+        assert!(!NavStyle::Maya.inverts(NONE));
+    }
+
+    #[test]
+    fn shift_snaps_a_turn_in_zbrush_style() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let shift = Modifiers {
+            shift: true,
+            ..NONE
+        };
+        assert!(NavStyle::ZBrush.snaps(shift));
+        assert!(!NavStyle::ZBrush.snaps(NONE));
+        assert!(!NavStyle::Blender.snaps(shift), "Shift + middle pans there");
+        assert!(!NavStyle::Maya.snaps(shift));
+
+        let close =
+            |(a, b): (f32, f32), (c, d): (f32, f32)| (a - c).abs() < 1e-5 && (b - d).abs() < 1e-5;
+        assert!(close(snap_view(0.3, 0.12), (0.0, 0.0)), "front");
+        assert!(close(snap_view(1.2, -0.2), (FRAC_PI_2, 0.0)), "right side");
+        assert!(close(snap_view(-1.0, 0.1), (-FRAC_PI_2, 0.0)), "left side");
+        assert!(close(snap_view(3.0, 0.0), (PI, 0.0)), "back");
+        assert!(close(snap_view(0.1, 1.4), (0.0, FRAC_PI_2)), "top");
+        assert!(close(snap_view(0.1, -1.0), (0.0, -FRAC_PI_2)), "bottom");
     }
 }

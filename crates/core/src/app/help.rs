@@ -201,7 +201,7 @@ impl App {
                 ui::section(ui, h.reference_heading);
                 ui.label(h.reference_text);
                 ui::section(ui, h.sculpt_heading);
-                ui.label(h.sculpt_text);
+                ui.label(h.sculpt_text.replace("{invert}", self.nav.invert_key()));
                 let keys: Vec<String> = BRUSHES
                     .iter()
                     .map(|&(brush, key, _)| format!("{} {}", key.name(), brush_name(tr, brush)))

@@ -92,7 +92,7 @@ impl App {
                     })
                     .collect();
                 rows.extend([
-                    (tr.invert, "Ctrl".to_owned()),
+                    (tr.invert, self.nav.invert_key().to_owned()),
                     (tr.size, "[  ]".to_owned()),
                     (tr.undo, self.keys("Z")),
                     (tr.redo, self.keys("Shift+Z")),

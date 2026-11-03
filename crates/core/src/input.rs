@@ -98,6 +98,17 @@ pub enum FilePurpose {
     Scene,
 }
 
+impl From<egui::Modifiers> for Modifiers {
+    fn from(m: egui::Modifiers) -> Self {
+        Modifiers {
+            alt: m.alt,
+            ctrl: m.ctrl,
+            shift: m.shift,
+            command: m.command,
+        }
+    }
+}
+
 impl From<Modifiers> for egui::Modifiers {
     fn from(m: Modifiers) -> Self {
         egui::Modifiers {

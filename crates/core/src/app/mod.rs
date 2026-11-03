@@ -120,9 +120,12 @@ enum Drag {
         scale: f32,
     },
     /// Turning, panning or zooming the view while `button` is held.
+    /// `free` is the yaw and pitch the turn has reached, which the camera
+    /// shows rounded while it snaps to the nearest side.
     Navigate {
         action: NavAction,
         button: PointerButton,
+        free: (f32, f32),
     },
 }
 

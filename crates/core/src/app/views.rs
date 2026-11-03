@@ -10,7 +10,7 @@ use super::study::Layout;
 use super::{App, Drag, REFERENCE, SCULPT};
 use crate::camera::OrbitCamera;
 use crate::input::{Button, Modifiers, PointerKind, PointerPhase};
-use crate::navigation::NavAction;
+use crate::navigation::{NavAction, snap_view};
 use crate::ui::{fonts, i18n::Tr, theme};
 
 /// Navigation speeds: dolly per point dragged, and per point scrolled.
@@ -66,6 +66,15 @@ fn mirror_x(rect: Rect, pos: Pos2, on: bool) -> Pos2 {
         egui::pos2(rect.left() + rect.right() - pos.x, pos.y)
     } else {
         pos
+    }
+}
+
+/// The button as the navigation presets name it.
+fn button_of(button: PointerButton) -> Button {
+    match button {
+        PointerButton::Secondary => Button::Secondary,
+        PointerButton::Middle => Button::Middle,
+        _ => Button::Primary,
     }
 }
 
@@ -227,14 +236,8 @@ impl App {
             Sense::click_and_drag(),
         );
         let (m, pointer, delta, scroll) = ui.input(|i| {
-            let m = Modifiers {
-                alt: i.modifiers.alt,
-                ctrl: i.modifiers.ctrl,
-                shift: i.modifiers.shift,
-                command: i.modifiers.command,
-            };
             (
-                m,
+                Modifiers::from(i.modifiers),
                 i.pointer.interact_pos(),
                 i.pointer.delta(),
                 i.smooth_scroll_delta.y,
@@ -275,15 +278,22 @@ impl App {
                     }
                     _ => None,
                 };
+                let camera = &self.cameras[index];
+                let free = (camera.yaw, camera.pitch);
                 match (self.nav.action(ours, m, hit.is_some()), hit) {
                     (Some(action), _) => {
-                        self.drags[index] = Some(Drag::Navigate { action, button })
+                        self.drags[index] = Some(Drag::Navigate {
+                            action,
+                            button,
+                            free,
+                        })
                     }
                     (None, Some((pos, hit))) => self.start_stroke(rect, pos, hit),
                     (None, None) if index == REFERENCE && ours == Button::Primary => {
                         self.drags[index] = Some(Drag::Navigate {
                             action: NavAction::Orbit,
                             button,
+                            free,
                         });
                     }
                     (None, None) => {}
@@ -293,15 +303,40 @@ impl App {
         }
 
         match self.drags[index] {
-            Some(Drag::Navigate { action, button })
-                if ui.input(|i| i.pointer.button_down(button)) =>
-            {
+            Some(Drag::Navigate {
+                action,
+                button,
+                mut free,
+            }) if ui.input(|i| i.pointer.button_down(button)) => {
+                // The preset may change the action mid-drag (ZBrush style:
+                // let go of Alt to scale).
+                let action = self.nav.during(action, button_of(button), m);
+                let snaps = self.nav.snaps(m);
                 let camera = &mut self.cameras[index];
                 match action {
-                    NavAction::Orbit => camera.orbit(delta.x, delta.y),
+                    // While snapping, the turn goes on out of sight and
+                    // the camera shows the nearest side; let go and it
+                    // turns on from there.
+                    NavAction::Orbit if snaps => {
+                        let mut turn = *camera;
+                        (turn.yaw, turn.pitch) = free;
+                        turn.orbit(delta.x, delta.y);
+                        free = (turn.yaw, turn.pitch);
+                        let (yaw, pitch) = snap_view(turn.yaw, turn.pitch);
+                        camera.look_from(yaw, pitch);
+                    }
+                    NavAction::Orbit => {
+                        camera.orbit(delta.x, delta.y);
+                        free = (camera.yaw, camera.pitch);
+                    }
                     NavAction::Pan => camera.pan(delta.x, delta.y, rect.height()),
                     NavAction::Zoom => camera.dolly((delta.y * DOLLY_DRAG).exp()),
                 }
+                self.drags[index] = Some(Drag::Navigate {
+                    action,
+                    button,
+                    free,
+                });
             }
             Some(Drag::Stroke { .. }) if ui.input(|i| i.pointer.primary_down()) => {
                 let samples: Vec<_> = self
