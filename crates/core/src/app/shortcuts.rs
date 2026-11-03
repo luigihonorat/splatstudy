@@ -118,6 +118,8 @@ impl App {
                     (tr.study.lighting, "B"),
                     (tr.mesh.remesh, "Shift+R"),
                     (tr.mesh.subdivide, "Shift+U"),
+                    (tr.mesh.level_down, "Shift+D / PgDn"),
+                    (tr.mesh.level_up, "PgUp"),
                 ] {
                     rows.push((label, key.to_owned()));
                 }
