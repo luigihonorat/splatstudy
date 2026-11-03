@@ -55,16 +55,19 @@ pub struct ViewTarget {
     pub depth: wgpu::Texture,
 }
 
-/// Frees the GPU memory now. In the browser, a dropped texture waits for
-/// the garbage collector, which doesn't hurry for GPU memory: dragging the
-/// split between the views made new targets every frame and left the old
-/// ones (tens of megabytes with multisampling) behind. Work already
-/// submitted still finishes with them.
+/// Frees the GPU memory now in the browser, where a dropped texture waits
+/// for the garbage collector, which doesn't hurry for GPU memory: dragging
+/// the split between the views made new targets every frame and left the
+/// old ones (tens of megabytes with multisampling) behind. Work already
+/// submitted still finishes with them. Desktop backends free a dropped
+/// texture once the GPU is done with it anyway.
 impl Drop for ViewTarget {
     fn drop(&mut self) {
-        self.resolved.destroy();
-        self.msaa.destroy();
-        self.depth.destroy();
+        if cfg!(target_arch = "wasm32") {
+            self.resolved.destroy();
+            self.msaa.destroy();
+            self.depth.destroy();
+        }
     }
 }
 

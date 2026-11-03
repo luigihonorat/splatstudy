@@ -326,16 +326,20 @@ impl GpuMesh {
     }
 }
 
-/// Frees the GPU memory now. In the browser, dropping a buffer only lets
-/// the garbage collector free it some time later, and it doesn't hurry for
-/// GPU memory: each level change or remesh of a fine clay left tens of
-/// megabytes behind. Work already submitted still finishes with them.
+/// Frees the GPU memory now in the browser, where dropping a buffer only
+/// lets the garbage collector free it some time later, and it doesn't
+/// hurry for GPU memory: each level change or remesh of a fine clay left
+/// tens of megabytes behind. Work already submitted still finishes with
+/// them. Desktop backends free a dropped buffer once the GPU is done with
+/// it anyway (and there, destroying it early slowed later readbacks).
 impl Drop for GpuMesh {
     fn drop(&mut self) {
-        self.vertices.destroy();
-        self.indices.destroy();
-        if let Some((codes, _)) = self.wire.get() {
-            codes.destroy();
+        if cfg!(target_arch = "wasm32") {
+            self.vertices.destroy();
+            self.indices.destroy();
+            if let Some((codes, _)) = self.wire.get() {
+                codes.destroy();
+            }
         }
     }
 }
