@@ -17,8 +17,9 @@ struct Uniforms {
     params: vec4<f32>,
     // Strengths: x key, y sky, z rim, w highlight.
     rig: vec4<f32>,
-    // xyz: the camera's position, world space.
-    eye: vec4<f32>,
+    // x: added to the wireframe's clip depth, which moves it towards the
+    // camera by a share of its distance (see `PULL` in clay.rs).
+    pull: vec4<f32>,
     // The wireframe's colour, linear RGB, and its opacity.
     wire: vec4<f32>,
 };
@@ -33,7 +34,9 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
+    // Invariant: the wireframe computes the same positions and must get
+    // the same bits, to lie exactly on the clay.
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) position: vec3<f32>,
     // Linear.
@@ -122,13 +125,8 @@ fn fs_blank() -> @location(0) vec4<f32> {
 // its quad hides (the diagonal), or 3 when every edge shows.
 @group(1) @binding(2) var<storage, read> diagonals: array<u32>;
 
-// How far each corner is pulled towards the camera, as a share of its
-// distance: enough to stay in front of the clay it lies on, far too
-// little to show through clay in front of it.
-const PULL: f32 = 1e-4;
-
 struct WireOut {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) bary: vec3<f32>,
     @location(1) @interpolate(flat) hidden: u32,
 };
@@ -137,11 +135,14 @@ struct WireOut {
 fn vs_wire(@builtin(vertex_index) i: u32) -> WireOut {
     let v = indices[i] * 7u;
     let p = vec3<f32>(vertices[v], vertices[v + 1u], vertices[v + 2u]);
-    let pulled = u.eye.xyz + (p - u.eye.xyz) * (1.0 - PULL);
     let corner = i % 3u;
     let triangle = i / 3u;
     var out: WireOut;
-    out.clip = u.view_proj * vec4<f32>(pulled, 1.0);
+    // Exactly where the clay is, then a little nearer: with a
+    // perspective, adding to z alone draws the same points as the
+    // triangle scaled towards the camera.
+    out.clip = u.view_proj * vec4<f32>(p, 1.0);
+    out.clip.z += u.pull.x;
     out.bary = vec3<f32>(f32(corner == 0u), f32(corner == 1u), f32(corner == 2u));
     out.hidden = (diagonals[triangle / 16u] >> (triangle % 16u * 2u)) & 3u;
     return out;

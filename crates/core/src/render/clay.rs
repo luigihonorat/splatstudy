@@ -45,8 +45,8 @@ struct Uniforms {
     /// The strengths of the key light, the sky fill, the rim and the
     /// highlight.
     rig: [f32; 4],
-    /// xyz: the camera's position, which the wireframe is pulled towards.
-    eye: [f32; 4],
+    /// x: added to the wireframe's clip depth (see [`PULL`]).
+    pull: [f32; 4],
     /// The wireframe's colour, linear RGB, and its opacity.
     wire: [f32; 4],
 }
@@ -275,6 +275,21 @@ impl GpuMesh {
         let offset = (range.start * size_of::<Vertex>()) as u64;
         queue.write_buffer(&self.vertices, offset, bytemuck::cast_slice(&data));
     }
+}
+
+/// How far the wireframe is pulled towards the camera, as a share of its
+/// distance: enough to stay in front of the clay it lies on whatever the
+/// rounding, far too little to show through clay in front of it.
+const PULL: f32 = 2e-4;
+
+/// What to add to a clip-space z so that a point lands where the point
+/// [`PULL`] of the way to the camera would. With a perspective, clip z is
+/// `a·z + c` and w is `-z` (view space z); scaling the point by `s`
+/// towards the eye gives `s·(a·z) + c` over `s·w`, the same as adding
+/// `c·(1 - s)/s` to the clip z and keeping x, y and w.
+fn pull(projection: &Mat4) -> f32 {
+    let s = 1.0 - PULL;
+    projection.w_axis.z * (1.0 - s) / s
 }
 
 fn wire_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -523,8 +538,9 @@ impl ClayPass {
         let view: Mat4 = camera.view();
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
         let rig = look.lighting.rig();
+        let projection = camera.projection(aspect);
         let uniforms = Uniforms {
-            view_proj: (camera.projection(aspect) * view).to_cols_array_2d(),
+            view_proj: (projection * view).to_cols_array_2d(),
             view: view.to_cols_array_2d(),
             base: super::linear(look.colour),
             light: rig.direction.normalize().extend(rig.wrap).to_array(),
@@ -535,7 +551,7 @@ impl ClayPass {
                 0.0,
             ],
             rig: [rig.key, rig.sky, rig.rim, rig.highlight],
-            eye: camera.eye().extend(1.0).to_array(),
+            pull: [pull(&projection), 0.0, 0.0, 0.0],
             wire: {
                 let [r, g, b, _] = super::linear(theme::WIRE);
                 [r, g, b, theme::WIRE_OPACITY]
@@ -707,6 +723,22 @@ mod tests {
                 "{} vertices: clay {plain:.2} ms a frame, with the wireframe {wired:.2} ms",
                 mesh.positions.len()
             );
+        }
+    }
+
+    #[test]
+    fn the_pull_draws_the_point_moved_towards_the_camera() {
+        let camera = OrbitCamera::default();
+        let projection = camera.projection(1.5);
+        let to_clip = projection * camera.view();
+        let eye = camera.eye();
+        for p in [Vec3::new(0.3, -0.2, 0.9), Vec3::new(-1.0, 0.5, -0.4)] {
+            let mut clip = to_clip * p.extend(1.0);
+            clip.z += pull(&projection);
+            let moved = to_clip * (eye + (p - eye) * (1.0 - PULL)).extend(1.0);
+            let (a, b) = (clip.truncate() / clip.w, moved.truncate() / moved.w);
+            assert!((a - b).abs().max_element() < 1e-6, "{a} {b}");
+            assert!(a.z < (to_clip * p.extend(1.0)).z / clip.w);
         }
     }
 
