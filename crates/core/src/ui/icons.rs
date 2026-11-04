@@ -9,6 +9,10 @@ use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 /// The side of an icon's square, in points.
 pub const SIZE: f32 = 16.0;
 
+/// Draws an icon centred in a rectangle, in a colour: one of the
+/// functions here, or a closure picking one's variant.
+pub type Icon<'a> = &'a dyn Fn(&Painter, Rect, Color32);
+
 /// Draws in an icon's square, in its own coordinates (0..16, y down).
 struct Pen<'a> {
     painter: &'a Painter,
@@ -225,6 +229,124 @@ pub fn panels(painter: &Painter, rect: Rect, colour: Color32) {
     pen.polyline(&[(1.5, 2.5), (14.5, 2.5), (14.5, 13.5), (1.5, 13.5)], true);
     pen.line((5.5, 2.5), (5.5, 13.5));
     pen.line((10.5, 2.5), (10.5, 13.5));
+}
+
+/// An arrowhead at `tip`, pointing along `(dx, dy)`, one of the four
+/// axis directions, its arms reaching `arm` back and `arm` aside.
+fn head(pen: &Pen, tip: (f32, f32), (dx, dy): (f32, f32), arm: f32) {
+    let (px, py) = (-dy, dx);
+    let arm_at = |side: f32| {
+        (
+            tip.0 + arm * (side * px - dx),
+            tip.1 + arm * (side * py - dy),
+        )
+    };
+    pen.polyline(&[arm_at(1.0), tip, arm_at(-1.0)], false);
+}
+
+/// Move: a cross with an arrowhead on each arm, every way the clay can go.
+pub fn move_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.line((8.5, 1.5), (8.5, 15.5));
+    pen.line((1.5, 8.5), (15.5, 8.5));
+    for (tip, d) in [
+        ((8.5, 1.5), (0.0, -1.0)),
+        ((8.5, 15.5), (0.0, 1.0)),
+        ((1.5, 8.5), (-1.0, 0.0)),
+        ((15.5, 8.5), (1.0, 0.0)),
+    ] {
+        head(&pen, tip, d, 2.5);
+    }
+}
+
+/// Clay: a mound built up on the surface, and a plus for the clay added.
+pub fn clay_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.line((0.5, 14.5), (15.5, 14.5));
+    // The mound: the top of a circle standing on the surface.
+    let (c, r): ((f32, f32), f32) = ((8.5, 18.0), 7.5);
+    let foot = ((c.1 - 14.5) / r).asin();
+    pen.arc(
+        c,
+        r,
+        std::f32::consts::PI + foot,
+        std::f32::consts::TAU - foot,
+    );
+    pen.line((8.5, 1.0), (8.5, 8.0));
+    pen.line((5.0, 4.5), (12.0, 4.5));
+}
+
+/// Flatten: a dome with its top cut flat, under the plane that cut it.
+pub fn flatten_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    use std::f32::consts::PI;
+    let pen = Pen::new(painter, rect, colour);
+    let (c, r): ((f32, f32), f32) = ((8.0, 16.0), 8.0);
+    let flat: f32 = 10.5;
+    // Where the dome meets the flat top, as an angle from the centre.
+    let meet = ((c.1 - flat) / r).asin();
+    let side = |from: f32, to: f32| -> Vec<(f32, f32)> {
+        (0..=8)
+            .map(|i| {
+                let a = from + (to - from) * i as f32 / 8.0;
+                (c.0 + r * a.cos(), c.1 + r * a.sin())
+            })
+            .collect()
+    };
+    // And where it stands on the surface.
+    let foot = ((c.1 - 14.5) / r).asin();
+    let mut profile = side(PI + foot, PI + meet);
+    profile.extend(side(2.0 * PI - meet, 2.0 * PI - foot));
+    pen.polyline(&profile, false);
+    pen.line((0.5, 14.5), (15.5, 14.5));
+    pen.line((0.5, 6.5), (15.5, 6.5));
+    pen.line((0.5, 7.5), (15.5, 7.5));
+}
+
+/// Smooth: a wave that dies down to a level line.
+pub fn smooth_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    use std::f32::consts::TAU;
+    let pen = Pen::new(painter, rect, colour);
+    let points: Vec<(f32, f32)> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0;
+            let amplitude = 4.5 * (1.0 - t).powf(1.5);
+            (0.5 + 15.0 * t, 8.5 - amplitude * (t * 2.25 * TAU).sin())
+        })
+        .collect();
+    pen.polyline(&points, false);
+}
+
+/// Inflate: a balloon, blown up, its knot below.
+pub fn inflate_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.circle((8.0, 6.5), 5.5);
+    pen.polyline(&[(8.0, 12.0), (6.5, 13.5), (9.5, 13.5)], true);
+    pen.polyline(&[(8.0, 13.5), (7.0, 15.0), (8.5, 15.5)], false);
+}
+
+/// Crease: a sharp V cut into a level surface.
+pub fn crease_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.polyline(
+        &[
+            (0.5, 5.5),
+            (4.5, 5.5),
+            (8.0, 13.5),
+            (11.5, 5.5),
+            (15.5, 5.5),
+        ],
+        false,
+    );
+}
+
+/// Pinch: two arrows meeting at a ridge, pulling the clay together.
+pub fn pinch_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.line((8.5, 2.5), (8.5, 14.5));
+    pen.line((0.5, 8.5), (6.0, 8.5));
+    head(&pen, (6.0, 8.5), (1.0, 0.0), 2.5);
+    pen.line((11.0, 8.5), (15.5, 8.5));
+    head(&pen, (11.0, 8.5), (-1.0, 0.0), 2.5);
 }
 
 #[cfg(test)]
