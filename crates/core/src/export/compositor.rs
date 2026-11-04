@@ -399,9 +399,11 @@ fn credit_line(painter: &egui::Painter, rect: Rect, credit: &str, align: Align2)
         rect.left() + CREDIT_MARGIN.x
     };
     let at = Pos2::new(x, rect.bottom() - CREDIT_MARGIN.y - size.y);
-    painter
-        .with_clip_rect(rect)
-        .galley(at, galley, theme::VIEW_TEXT);
+    let painter = painter.with_clip_rect(rect);
+    // On the view's own black, so a guide crossing it never strikes it out.
+    let backing = Rect::from_min_size(at, size).expand(CREDIT_SIZE * 0.25);
+    painter.rect_filled(backing, 0.0, theme::VIEW_BG);
+    painter.galley(at, galley, theme::VIEW_TEXT);
 }
 
 fn end_card(painter: &egui::Painter, screen: Rect, card: &EndCard) {
