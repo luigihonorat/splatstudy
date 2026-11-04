@@ -558,15 +558,16 @@ impl App {
         self.advance_playback(ui);
     }
 
-    /// The sculpt panel, in groups that fold away: the brush, the
+    /// The sculpt panel, in groups that fold away: the tools, the
     /// subdivision levels, and the remeshes.
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
         if self.playback.is_some() {
             self.playback_panel(ui);
             return;
         }
-        let m = self.lang.tr().mesh;
-        ui::group(ui, "brush", m.brush, |ui| self.brush_controls(ui));
+        let tr = self.lang.tr();
+        let m = tr.mesh;
+        ui::group(ui, "tools", tr.tools, |ui| self.brush_controls(ui));
         ui::group(ui, "subdivision", m.subdivision, |ui| {
             if ui::choice(ui, m.subdivide, false).clicked() {
                 self.ask_subdivide();
