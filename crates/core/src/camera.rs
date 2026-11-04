@@ -15,6 +15,11 @@ pub struct OrbitCamera {
     pub distance: f32,
     /// Vertical field of view, radians.
     pub fov_y: f32,
+    /// Orthographic: parallel lines stay parallel, and the form keeps its
+    /// size whatever its depth. The view is as tall as the perspective's
+    /// at the target, so switching keeps the target's scale, and dollying
+    /// still zooms.
+    pub ortho: bool,
 }
 
 impl Default for OrbitCamera {
@@ -25,6 +30,7 @@ impl Default for OrbitCamera {
             pitch: 0.12,
             distance: 5.4,
             fov_y: 35f32.to_radians(),
+            ortho: false,
         }
     }
 }
@@ -42,15 +48,26 @@ impl OrbitCamera {
         glam::camera::rh::view::look_at_mat4(self.eye(), self.target, Vec3::Y)
     }
 
-    /// Perspective with wgpu's 0..1 depth range.
+    /// Half the view's height at the target, in world units: what an
+    /// orthographic view shows above and below its centre.
+    pub fn half_height(&self) -> f32 {
+        self.distance * (self.fov_y / 2.0).tan()
+    }
+
+    /// Perspective or orthographic, with wgpu's 0..1 depth range. The
+    /// orthographic view reaches as far behind the eye as in front of it,
+    /// so zooming in never cuts the form off.
     pub fn projection(&self, aspect: f32) -> Mat4 {
-        let near = (self.distance * 0.01).max(1e-3);
-        glam::camera::rh::proj::directx::perspective(
-            self.fov_y,
-            aspect.max(1e-3),
-            near,
-            self.distance * 100.0,
-        )
+        let aspect = aspect.max(1e-3);
+        let far = self.distance * 100.0;
+        if self.ortho {
+            let h = self.half_height();
+            let w = h * aspect;
+            glam::camera::rh::proj::directx::orthographic(-w, w, -h, h, -far, far)
+        } else {
+            let near = (self.distance * 0.01).max(1e-3);
+            glam::camera::rh::proj::directx::perspective(self.fov_y, aspect, near, far)
+        }
     }
 
     /// Turns around the target; deltas in points, as dragged on screen.
@@ -76,7 +93,7 @@ impl OrbitCamera {
     /// Slides the target so the surface follows the pointer; `view_height`
     /// is the viewport height in points.
     pub fn pan(&mut self, dx: f32, dy: f32, view_height: f32) {
-        let per_point = 2.0 * self.distance * (self.fov_y / 2.0).tan() / view_height.max(1.0);
+        let per_point = 2.0 * self.half_height() / view_height.max(1.0);
         let view = self.view();
         let right = view.row(0).truncate();
         let up = view.row(1).truncate();
@@ -95,6 +112,9 @@ impl OrbitCamera {
     /// World units per screen point at `point`'s depth, in a view
     /// `view_height` points tall.
     pub fn world_per_point(&self, point: Vec3, view_height: f32) -> f32 {
+        if self.ortho {
+            return 2.0 * self.half_height() / view_height.max(1.0);
+        }
         let forward = (self.target - self.eye()).normalize();
         let depth = (point - self.eye()).dot(forward).max(1e-4);
         2.0 * depth * (self.fov_y / 2.0).tan() / view_height.max(1.0)
@@ -159,6 +179,60 @@ mod tests {
         // The sphere's silhouette fits inside the vertical field of view.
         let half_angle = (2.0 / cam.distance).asin();
         assert!(half_angle < cam.fov_y / 2.0);
+    }
+
+    #[test]
+    fn ortho_rays_are_parallel_and_hit_where_the_point_is_drawn() {
+        let mut cam = OrbitCamera::default();
+        cam.orbit(30.0, -20.0);
+        cam.ortho = true;
+        let aspect = 1.5;
+        let to_clip = cam.projection(aspect) * cam.view();
+        let forward = (cam.target - cam.eye()).normalize();
+        for point in [
+            Vec3::ZERO,
+            Vec3::new(0.4, -0.3, 0.2),
+            Vec3::new(-0.9, 0.5, -0.6),
+        ] {
+            let ndc = to_clip.project_point3(point);
+            let (origin, dir) = cam.ray(ndc.truncate(), aspect);
+            assert!(dir.dot(forward) > 0.9999, "parallel to the view");
+            // The ray passes through the point.
+            let along = (point - origin).dot(dir);
+            assert!((origin + dir * along).distance(point) < 1e-3, "{point}");
+            assert!(along > 0.0, "in front of the ray's origin");
+        }
+        // Even a point behind the eye is drawn and picked.
+        let behind = cam.eye() + (cam.eye() - cam.target) * 0.5;
+        let ndc = to_clip.project_point3(behind);
+        assert!((0.0..=1.0).contains(&ndc.z), "{ndc}");
+    }
+
+    #[test]
+    fn ortho_keeps_the_scale_at_the_target_whatever_the_depth() {
+        let persp = OrbitCamera::default();
+        let ortho = OrbitCamera {
+            ortho: true,
+            ..persp
+        };
+        let height = 600.0;
+        let at_target = persp.world_per_point(persp.target, height);
+        assert!((ortho.world_per_point(persp.target, height) - at_target).abs() < 1e-6);
+        let near = persp.target + Vec3::Z;
+        assert!(persp.world_per_point(near, height) < at_target);
+        assert_eq!(
+            ortho.world_per_point(near, height),
+            ortho.world_per_point(persp.target, height)
+        );
+        // A point at the target's depth lands at the same place in both.
+        let (right, up) = persp.right_up();
+        let p = persp.target + right * 0.5 + up * 0.3;
+        let seen = |cam: &OrbitCamera| (cam.projection(1.2) * cam.view()).project_point3(p);
+        assert!((seen(&persp).truncate() - seen(&ortho).truncate()).length() < 1e-4);
+        // Dollying out shows more.
+        let mut far = ortho;
+        far.dolly(2.0);
+        assert!((far.world_per_point(p, height) / at_target - 2.0).abs() < 1e-4);
     }
 
     #[test]

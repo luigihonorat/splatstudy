@@ -717,6 +717,7 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
             pitch: pitch.clamp(-1.55, 1.55),
             distance,
             fov_y,
+            ortho: false,
         };
     }
     let split = r.f32()?;

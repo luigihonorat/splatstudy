@@ -482,7 +482,7 @@ impl SplatPass {
                 splat_opacity,
                 if look.flat { 1.0 } else { 0.0 },
                 layer_opacity,
-                0.0,
+                if camera.ortho { 1.0 } else { 0.0 },
             ],
         };
 

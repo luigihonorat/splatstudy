@@ -3,7 +3,8 @@
 // Gaussian splats. Each splat is a 3D Gaussian; seen through the camera it
 // becomes, to first order, a 2D Gaussian on the screen (EWA splatting):
 // Σ' = J W Σ Wᵀ Jᵀ, with W the turn into view space and J the Jacobian of
-// the perspective divide at the splat's centre. The vertex shader draws a
+// the perspective divide at the splat's centre (in an orthographic view,
+// a plain scale to pixels). The vertex shader draws a
 // quad over ±3σ along the 2D Gaussian's axes; the fragment shader fades
 // it out with exp(-r²/2). Splats come back to front (sorted by
 // `splat_sort.wgsl`, or on the CPU), premultiplied, over whatever the pass
@@ -21,7 +22,8 @@ struct Uniforms {
     crop_max: vec4<f32>,
     // Silhouette colour, display values.
     flat_colour: vec4<f32>,
-    // x: each splat's opacity, y: flat, z: the ghost layer's opacity.
+    // x: each splat's opacity, y: flat, z: the ghost layer's opacity,
+    // w: orthographic.
     params: vec4<f32>,
 };
 
@@ -60,7 +62,10 @@ fn vs(@builtin(vertex_index) corner_index: u32, @builtin(instance_index) n: u32)
     }
     let view = u.view * u.model * vec4<f32>(p, 1.0);
     let depth = -view.z;
-    if depth <= 1e-4 {
+    // An orthographic view also shows what is behind the eye; its depth
+    // range clips the rest.
+    let ortho = u.params.w > 0.5;
+    if depth <= 1e-4 && !ortho {
         return out;
     }
     let clip = u.proj * view;
@@ -81,16 +86,24 @@ fn vs(@builtin(vertex_index) corner_index: u32, @builtin(instance_index) n: u32)
 
     // Screen x = fx · x / depth (and y likewise, up), in pixels. Off-screen
     // splats are taken as if a little inside the frustum, so the Jacobian
-    // doesn't stretch them without bound.
+    // doesn't stretch them without bound. Orthographic: screen x = fx · x,
+    // with fx in pixels per unit.
     let size = u.viewport.xy;
     let focal = u.viewport.zw;
-    let limit = 1.3 * 0.5 * size / focal;
-    let xy = clamp(view.xy / depth, -limit, limit) * depth;
-    let j = mat3x3<f32>(
-        vec3<f32>(focal.x / depth, 0.0, 0.0),
-        vec3<f32>(0.0, focal.y / depth, 0.0),
-        vec3<f32>(focal.x * xy.x / (depth * depth), focal.y * xy.y / (depth * depth), 0.0),
+    var j = mat3x3<f32>(
+        vec3<f32>(focal.x, 0.0, 0.0),
+        vec3<f32>(0.0, focal.y, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
     );
+    if !ortho {
+        let limit = 1.3 * 0.5 * size / focal;
+        let xy = clamp(view.xy / depth, -limit, limit) * depth;
+        j = mat3x3<f32>(
+            vec3<f32>(focal.x / depth, 0.0, 0.0),
+            vec3<f32>(0.0, focal.y / depth, 0.0),
+            vec3<f32>(focal.x * xy.x / (depth * depth), focal.y * xy.y / (depth * depth), 0.0),
+        );
+    }
     let cov = j * cov_view * transpose(j);
     // At least about a pixel wide, so tiny splats still cover a sample
     // instead of flickering.

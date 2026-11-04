@@ -13,7 +13,8 @@ struct Uniforms {
     base: vec4<f32>,
     // xyz: direction towards the key light, view space; w: its wrap.
     light: vec4<f32>,
-    // x: flat (silhouette), y: opacity, z: use vertex colours.
+    // x: flat (silhouette), y: opacity, z: use vertex colours,
+    // w: orthographic (the eye looks along -z from everywhere).
     params: vec4<f32>,
     // Strengths: x key, y sky, z rim, w highlight.
     rig: vec4<f32>,
@@ -76,7 +77,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if !front {
         n = -n;
     }
-    let v = normalize(-in.position);
+    let v = select(normalize(-in.position), vec3<f32>(0.0, 0.0, 1.0), u.params.w > 0.5);
     let l = normalize(u.light.xyz);
     let n_dot_l = dot(n, l);
     let wrap = max((n_dot_l + u.light.w) / (1.0 + u.light.w), 0.0);

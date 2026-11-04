@@ -228,3 +228,96 @@ fn subdivided_clay_renders_without_cracks() {
         }
     }
 }
+
+/// One round red splat at `centre`, seen from the front by `camera`
+/// (perspective or orthographic): the pixels.
+fn render_splat(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    camera: &OrbitCamera,
+    centre: glam::Vec3,
+    sigma: f32,
+) -> Vec<u8> {
+    use splatstudy_core::reference::Splats;
+    use splatstudy_core::render::splat::{SortOn, SplatLook, SplatPass};
+    let splats = Splats {
+        positions: vec![centre],
+        scales: vec![glam::Vec3::splat(sigma)],
+        rotations: vec![glam::Quat::IDENTITY],
+        colors: vec![RED],
+    };
+    let target = ViewTarget::new(device, [SPLAT_SIZE, SPLAT_SIZE]);
+    let pass = SplatPass::sorting_on(device, &splats, SortOn::Cpu).expect("splats");
+    pass.set_placement(glam::Mat4::IDENTITY, None);
+    let look = SplatLook {
+        opacity: 1.0,
+        flat: false,
+        over: false,
+    };
+    pass.prepare(queue, Slot::ReferenceView, camera, target.size, &look);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut rpass = target.begin_pass(&mut encoder, VIEW_BG);
+        pass.draw(&mut rpass, Slot::ReferenceView);
+    }
+    let readback = Readback::copy(device, &mut encoder, &target);
+    queue.submit([encoder.finish()]);
+    readback.map();
+    readback.wait(device).expect("read back")
+}
+
+const SPLAT_SIZE: u32 = 96;
+const RED: [u8; 4] = [230, 40, 20, 255];
+
+/// An orthographic view draws a splat where its centre projects, as wide
+/// as its size in pixels per unit says, nearer or further alike; the
+/// perspective draws the nearer one larger.
+#[test]
+fn an_orthographic_splat_keeps_its_size_at_any_depth() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping render test");
+        return;
+    };
+    let persp = OrbitCamera {
+        pitch: 0.0,
+        ..OrbitCamera::default()
+    };
+    let ortho = OrbitCamera {
+        ortho: true,
+        ..persp
+    };
+    let sigma = 0.2;
+    // Pixels per unit, and the splat's spread in pixels with the shader's
+    // floor of about a pixel.
+    let per_unit = SPLAT_SIZE as f32 / 2.0 / ortho.half_height();
+    let spread = ((sigma * per_unit).powi(2) + 0.3).sqrt();
+    let red = |data: &[u8], x: u32| pixel(data, SPLAT_SIZE, x, SPLAT_SIZE / 2)[0];
+    // The centre lands on the line between pixels 47 and 48: a pixel's
+    // middle is half a pixel further.
+    let expected = |x: u32| {
+        let d = x as f32 + 0.5 - SPLAT_SIZE as f32 / 2.0;
+        f32::from(RED[0]) * (-0.5 * (d / spread).powi(2)).exp()
+    };
+    let near = glam::Vec3::new(0.0, 0.0, 2.0);
+    for centre in [glam::Vec3::ZERO, near] {
+        let data = render_splat(&device, &queue, &ortho, centre, sigma);
+        for x in [48, 51, 54, 57, 60] {
+            let (got, want) = (f32::from(red(&data, x)), expected(x));
+            assert!(
+                (got - want).abs() < 8.0,
+                "at {x}, {centre}: {got} vs {want}"
+            );
+        }
+        assert_eq!(pixel(&data, SPLAT_SIZE, 2, 2), VIEW_BG.to_array());
+    }
+    // Off centre, where the point projects.
+    let right = glam::Vec3::new(0.5, 0.0, 1.0);
+    let data = render_splat(&device, &queue, &ortho, right, sigma);
+    let x = (SPLAT_SIZE as f32 / 2.0 + 0.5 * per_unit).floor() as u32;
+    assert!(red(&data, x) > 200, "{}", red(&data, x));
+
+    // In perspective the nearer splat spreads wider.
+    let far = render_splat(&device, &queue, &persp, glam::Vec3::ZERO, sigma);
+    let close = render_splat(&device, &queue, &persp, near, sigma);
+    assert!(red(&close, 57) > red(&far, 57) + 30);
+}

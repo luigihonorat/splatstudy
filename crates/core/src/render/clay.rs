@@ -353,10 +353,20 @@ const PULL: f32 = 2e-4;
 /// [`PULL`] of the way to the camera would. With a perspective, clip z is
 /// `a·z + c` and w is `-z` (view space z); scaling the point by `s`
 /// towards the eye gives `s·(a·z) + c` over `s·w`, the same as adding
-/// `c·(1 - s)/s` to the clip z and keeping x, y and w.
-fn pull(projection: &Mat4) -> f32 {
+/// `c·(1 - s)/s` to the clip z and keeping x, y and w. An orthographic
+/// view has no eye to scale towards and an even depth: the point moves
+/// [`PULL`] of the `distance` to the target nearer, `a` per unit.
+fn pull(projection: &Mat4, distance: f32) -> f32 {
+    if is_ortho(projection) {
+        return projection.z_axis.z * PULL * distance;
+    }
     let s = 1.0 - PULL;
     projection.w_axis.z * (1.0 - s) / s
+}
+
+/// An orthographic projection keeps w at 1.
+pub fn is_ortho(projection: &Mat4) -> bool {
+    projection.z_axis.w == 0.0
 }
 
 fn wire_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -615,10 +625,10 @@ impl ClayPass {
                 flag(look.flat),
                 look.opacity.clamp(0.0, 1.0),
                 flag(look.vertex_colours),
-                0.0,
+                flag(camera.ortho),
             ],
             rig: [rig.key, rig.sky, rig.rim, rig.highlight],
-            pull: [pull(&projection), 0.0, 0.0, 0.0],
+            pull: [pull(&projection, camera.distance), 0.0, 0.0, 0.0],
             wire: {
                 let [r, g, b, _] = super::linear(theme::WIRE);
                 [r, g, b, theme::WIRE_OPACITY]
@@ -801,11 +811,30 @@ mod tests {
         let eye = camera.eye();
         for p in [Vec3::new(0.3, -0.2, 0.9), Vec3::new(-1.0, 0.5, -0.4)] {
             let mut clip = to_clip * p.extend(1.0);
-            clip.z += pull(&projection);
+            clip.z += pull(&projection, camera.distance);
             let moved = to_clip * (eye + (p - eye) * (1.0 - PULL)).extend(1.0);
             let (a, b) = (clip.truncate() / clip.w, moved.truncate() / moved.w);
             assert!((a - b).abs().max_element() < 1e-6, "{a} {b}");
             assert!(a.z < (to_clip * p.extend(1.0)).z / clip.w);
+        }
+
+        // Orthographic: the point moves nearer by the share of the
+        // distance to the target, along the view.
+        let camera = OrbitCamera {
+            ortho: true,
+            ..camera
+        };
+        let projection = camera.projection(1.5);
+        assert!(is_ortho(&projection));
+        assert!(!is_ortho(&OrbitCamera::default().projection(1.5)));
+        let to_clip = projection * camera.view();
+        let towards = (camera.eye() - camera.target).normalize() * PULL * camera.distance;
+        for p in [Vec3::new(0.3, -0.2, 0.9), Vec3::new(-1.0, 0.5, -0.4)] {
+            let mut clip = to_clip * p.extend(1.0);
+            clip.z += pull(&projection, camera.distance);
+            let moved = to_clip * (p + towards).extend(1.0);
+            assert!((clip - moved).abs().max_element() < 1e-7, "{clip} {moved}");
+            assert!(clip.z < (to_clip * p.extend(1.0)).z);
         }
     }
 
