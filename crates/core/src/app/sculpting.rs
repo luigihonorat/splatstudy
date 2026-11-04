@@ -156,6 +156,8 @@ pub(super) enum Pending {
     /// Saving the scene (see `files.rs`): a fine clay takes a second to
     /// pack.
     SaveScene,
+    /// Saving a copy of it without its timelapse.
+    SaveCopy,
 }
 
 impl Default for ToolSettings {
@@ -410,7 +412,7 @@ impl App {
     /// Runs a slow operation at the next frame, after a notice saying so.
     /// Edits of the clay wait while the timelapse shows.
     pub(super) fn ask(&mut self, pending: Pending, what: &str) {
-        if self.playback.is_none() || pending == Pending::SaveScene {
+        if self.playback.is_none() || matches!(pending, Pending::SaveScene | Pending::SaveCopy) {
             self.tool.pending = Some((pending, self.now));
             self.notify(format!("{what}…"));
         }
@@ -434,6 +436,7 @@ impl App {
             Pending::FromReference => self.clay_from_reference(),
             Pending::Level(up) => self.change_level(up),
             Pending::SaveScene => self.save_scene(),
+            Pending::SaveCopy => self.save_copy(),
         }
     }
 

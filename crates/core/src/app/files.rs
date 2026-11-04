@@ -244,16 +244,21 @@ impl App {
     /// The scene as a file: the clay, its checkpoints (the first is where
     /// the session started), the session, the reference and the views.
     fn scene_bytes(&mut self) -> Vec<u8> {
-        self.write_scene(SceneWriter::new(), None)
+        self.write_scene(SceneWriter::new(), None, true)
     }
 
     /// The scene, with the reference file inside, or named by `key` and
-    /// left out.
-    fn write_scene(&mut self, mut w: SceneWriter, key: Option<BlobKey>) -> Vec<u8> {
-        w.mesh(&self.sculpt.mesh)
-            .history(&self.sculpt, &mut self.files.history)
-            .levels(&self.sculpt)
-            .quads(&self.sculpt);
+    /// left out. Without its `history`, it is the clay as it is, with its
+    /// levels and quads, and no timelapse.
+    fn write_scene(&mut self, mut w: SceneWriter, key: Option<BlobKey>, history: bool) -> Vec<u8> {
+        w.mesh(&self.sculpt.mesh);
+        if history {
+            w.history(&self.sculpt, &mut self.files.history)
+                .levels(&self.sculpt)
+                .quads(&self.sculpt);
+        } else {
+            w.levels_now(&self.sculpt).quads_now(&self.sculpt);
+        }
         match (self.scene_reference(), key) {
             (Some(reference), Some(key)) => w.reference_by_key(reference, key),
             (Some(reference), None) => w.reference(reference),
@@ -291,6 +296,29 @@ impl App {
             mime: SCENE_MIME,
             bytes,
         });
+    }
+
+    /// Saves the scene as it is, without its timelapse, as another file:
+    /// smaller, to share or to start a new session from. The open scene
+    /// keeps its name, its history and what revert goes back to.
+    pub(super) fn save_copy(&mut self) {
+        let bytes = self.write_scene(SceneWriter::new(), None, false);
+        let name = format!("{}-no-timelapse.{SCENE_EXTENSION}", self.scene_stem());
+        self.request(Request::SaveFile {
+            name,
+            mime: SCENE_MIME,
+            bytes,
+        });
+    }
+
+    /// [`save_copy`](Self::save_copy), at the next frame and after a
+    /// notice for a fine clay, as saving does.
+    fn ask_save_copy(&mut self) {
+        if self.sculpt.mesh.positions.len() > SAVE_NOTICE_VERTICES {
+            self.ask(Pending::SaveCopy, self.lang.tr().files.save_copy);
+        } else {
+            self.save_copy();
+        }
     }
 
     /// The scene's file name without its extension, for naming exports.
@@ -413,6 +441,9 @@ impl App {
         if !WEB && menu::action(ui, true, tr.save_scene_as, &self.keys("Shift+S")) {
             self.files.name = None;
             self.ask_save();
+        }
+        if menu::action(ui, true, tr.files.save_copy, "") {
+            self.ask_save_copy();
         }
         if menu::action(ui, self.files.saved.is_some(), tr.revert, "") {
             self.revert_scene();
@@ -542,6 +573,7 @@ impl App {
             scene: self.write_scene(
                 SceneWriter::stored(),
                 reference.as_ref().map(|(key, _)| *key),
+                true,
             ),
             reference,
             sculpted,
@@ -803,6 +835,121 @@ mod tests {
         assert!(!App::can_open(FilePurpose::Scene, "cast.ply"));
         assert!(App::can_open(FilePurpose::Sculpt, "head.obj"));
         assert!(!App::can_open(FilePurpose::Sculpt, "photo.png"));
+    }
+
+    #[test]
+    fn a_copy_without_timelapse_reopens_the_scene_and_leaves_it_as_it_was() {
+        use super::super::study::tests::Harness;
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let app = &mut h.app;
+        app.sculpt.subdivide();
+        for k in 0..3 {
+            app.sculpt.set_clock(1.0 + k as f64);
+            app.sculpt.begin_stroke();
+            app.sculpt.dab(Dab {
+                brush: Brush::Clay,
+                centre: Vec3::new(0.2 * k as f32, 0.1, 1.0).normalize(),
+                radius: 0.4,
+                strength: 0.5,
+                invert: false,
+                symmetry: true,
+                direction: Vec3::ZERO,
+            });
+            app.sculpt.end_stroke();
+            app.sculpt.refresh();
+        }
+        let png = crate::export::png(&[120, 90, 60, 255].repeat(16), [4, 4]).unwrap();
+        app.load_reference("cast.png", Arc::from(png));
+        let cast = app.reference.current.as_mut().expect("the picture opens");
+        cast.credit.author = "A. Sculptor".into();
+        cast.credit.licence = "CC BY 4.0".into();
+        app.study.views[SCULPT].grid = true;
+        app.study.swapped = true;
+        app.cameras[REFERENCE].orbit(30.0, 5.0);
+        app.files.name = Some("bust.splatstudy".into());
+        app.save_scene();
+        h.frame_requests();
+
+        // Saving the copy leaves the open scene as it was.
+        let app = &mut h.app;
+        let saved = app.files.saved.clone().unwrap();
+        let revision = app.scene_revision();
+        app.save_copy();
+        assert_eq!(app.files.name.as_deref(), Some("bust.splatstudy"));
+        assert!(Arc::ptr_eq(app.files.saved.as_ref().unwrap(), &saved));
+        assert_eq!(app.scene_revision(), revision);
+        let (name, bytes) = h
+            .frame_requests()
+            .into_iter()
+            .find_map(|r| match r {
+                Request::SaveFile { name, bytes, .. } => Some((name, bytes)),
+                _ => None,
+            })
+            .expect("the copy is saved");
+        assert_eq!(name, "bust-no-timelapse.splatstudy");
+        assert!(
+            bytes.len() < saved.len(),
+            "{} < {}",
+            bytes.len(),
+            saved.len()
+        );
+
+        // Opened, it is the same scene without its timelapse.
+        let Some(mut other) = Harness::new() else {
+            return;
+        };
+        other.app.open_scene(&name, Arc::from(bytes));
+        other.frames(2);
+        let (a, b) = (&h.app, &other.app);
+        assert_eq!(b.sculpt.mesh.positions, a.sculpt.mesh.positions);
+        assert_eq!(b.sculpt.mesh.triangles, a.sculpt.mesh.triangles);
+        assert_eq!(b.sculpt.level_data(), a.sculpt.level_data());
+        assert_eq!(b.sculpt.levels(), a.sculpt.levels());
+        assert_eq!(b.cameras, a.cameras);
+        assert_eq!(b.study_view(), a.study_view());
+        let (ra, rb) = (a.scene_reference().unwrap(), b.scene_reference().unwrap());
+        assert_eq!(rb.credit, ra.credit);
+        assert_eq!(*rb.source.bytes, *ra.source.bytes);
+        assert!(b.sculpt.log().is_empty());
+        let lost = b.lang.tr().files.timelapse_lost;
+        assert!(
+            b.notice.as_ref().is_none_or(|(text, _)| text != lost),
+            "no timelapse lost: there was none"
+        );
+
+        // The timelapse menu leaves watching it off; played anyway, it
+        // shows the clay as it is and ends there.
+        let b = &mut other.app;
+        b.start_playback();
+        other.frames(3);
+        let playback = other.app.playback.as_ref().expect("plays");
+        assert_eq!(playback.replay.duration(), 0.0);
+        assert_eq!(
+            playback.replay.sculpt.mesh.positions,
+            h.app.sculpt.mesh.positions
+        );
+        other.app.playback = None;
+        // Sculpting on starts its timelapse from the clay as it opened.
+        let b = &mut other.app;
+        b.sculpt.set_clock(10.0);
+        b.sculpt.begin_stroke();
+        b.sculpt.dab(Dab {
+            brush: Brush::Clay,
+            centre: Vec3::Z,
+            radius: 0.4,
+            strength: 0.5,
+            invert: false,
+            symmetry: false,
+            direction: Vec3::ZERO,
+        });
+        b.sculpt.end_stroke();
+        b.sculpt.refresh();
+        b.start_playback();
+        other.frames(3);
+        assert!(other.app.playback.is_some());
     }
 
     #[test]

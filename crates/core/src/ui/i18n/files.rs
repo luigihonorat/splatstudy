@@ -30,6 +30,9 @@ pub struct FilesTr {
     pub restore_last: &'static str,
     /// After choosing that item, when the session is no longer stored.
     pub autosave_gone: &'static str,
+    /// File menu item: the scene as it is, without its recorded session,
+    /// as another file; the open scene stays as it was.
+    pub save_copy: &'static str,
 }
 
 pub const JA: FilesTr = FilesTr {
@@ -45,6 +48,7 @@ pub const JA: FilesTr = FilesTr {
     restore_skipped: "前回の作業は復元していません（前回は復元の途中で止まりました）。ファイルメニューから復元できます",
     restore_last: "前回の作業を復元",
     autosave_gone: "前回の作業はもう保存されていません",
+    save_copy: "タイムラプスなしでコピーを保存…",
 };
 
 pub const EN: FilesTr = FilesTr {
@@ -60,6 +64,7 @@ pub const EN: FilesTr = FilesTr {
     restore_skipped: "your last session wasn't restored: restoring it stopped halfway last time. restore it from the file menu",
     restore_last: "restore last session",
     autosave_gone: "your last session is no longer stored",
+    save_copy: "save a copy without timelapse…",
 };
 
 pub const FR: FilesTr = FilesTr {
@@ -75,4 +80,5 @@ pub const FR: FilesTr = FilesTr {
     restore_skipped: "dernière session non restaurée : la restauration s'est arrêtée en cours la dernière fois. restaurez-la depuis le menu fichier",
     restore_last: "restaurer la dernière session",
     autosave_gone: "la dernière session n'est plus enregistrée",
+    save_copy: "enregistrer une copie sans l'accéléré…",
 };

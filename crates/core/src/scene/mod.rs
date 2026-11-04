@@ -34,6 +34,10 @@
 //!   it open the clay as triangles. Codes that don't fit their clay are
 //!   dropped, and the clay opens as triangles.
 //!
+//! A copy saved without its timelapse has no `CKPT` or `LOG_`, and its
+//! `LEVL` and `QUAD` hold only the clay's: it opens as the clay is, and a
+//! new session starts from there.
+//!
 //! The log and checkpoints use the encodings next to their types, in
 //! `sculpt::record`, so whoever adds an event also adds how it is saved.
 //!
@@ -287,10 +291,21 @@ impl SceneWriter {
     /// The clay's subdivision levels and those its checkpoints kept; no
     /// chunk at all when there are none.
     pub fn levels(&mut self, sculpt: &Sculpt) -> &mut Self {
+        self.levels_of(sculpt, true)
+    }
+
+    /// The clay's own subdivision levels, for a scene saved without its
+    /// checkpoints.
+    pub fn levels_now(&mut self, sculpt: &Sculpt) -> &mut Self {
+        self.levels_of(sculpt, false)
+    }
+
+    fn levels_of(&mut self, sculpt: &Sculpt, history: bool) -> &mut Self {
         let kept: Vec<(usize, &Checkpoint, &Levels)> = sculpt
             .checkpoints()
             .iter()
             .enumerate()
+            .filter(|_| history)
             .filter_map(|(i, c)| Some((i, c, c.levels.as_deref()?)))
             .collect();
         if sculpt.level_data().is_none() && kept.is_empty() {
@@ -319,10 +334,21 @@ impl SceneWriter {
     /// The quads of the clay and of its checkpoints; no chunk at all when
     /// there are none.
     pub fn quads(&mut self, sculpt: &Sculpt) -> &mut Self {
+        self.quads_of(sculpt, true)
+    }
+
+    /// The quads of the clay alone, for a scene saved without its
+    /// checkpoints.
+    pub fn quads_now(&mut self, sculpt: &Sculpt) -> &mut Self {
+        self.quads_of(sculpt, false)
+    }
+
+    fn quads_of(&mut self, sculpt: &Sculpt, history: bool) -> &mut Self {
         let kept: Vec<(usize, &[u8])> = sculpt
             .checkpoints()
             .iter()
             .enumerate()
+            .filter(|_| history)
             .filter_map(|(i, c)| Some((i, c.diagonals.as_deref()?)))
             .collect();
         let live = sculpt.mesh.diagonals();
@@ -1546,6 +1572,59 @@ mod tests {
         let mut q: Vec<[u32; 2]> = quads.iter().map(|&[a, b]| [a.min(b), a.max(b)]).collect();
         q.sort_unstable();
         q
+    }
+
+    /// The scene as "save a copy without timelapse" writes it.
+    fn save_lean(s: &Sculpt, view: &View) -> Vec<u8> {
+        let mut w = SceneWriter::new();
+        w.mesh(&s.mesh).levels_now(s).quads_now(s).view(view);
+        w.finish()
+    }
+
+    #[test]
+    fn a_copy_without_its_timelapse_opens_as_the_clay_is() {
+        for live in [leveled_session(), quad_session(), session()] {
+            let lean = save_lean(&live, &view());
+            let full = save(&live, &view());
+            assert!(lean.len() < full.len(), "{} < {}", lean.len(), full.len());
+            let tags: Vec<u32> = chunks(&lean).unwrap().iter().map(|c| c.tag).collect();
+            assert!(!tags.contains(&CHECKPOINTS) && !tags.contains(&LOG));
+
+            let scene = Scene::read(&lean).expect("reads back");
+            assert!(!scene.history_damaged);
+            assert!(scene.checkpoints.is_empty() && scene.log.is_empty());
+            assert_eq!(
+                position_bits(&scene.mesh.positions),
+                position_bits(&live.mesh.positions)
+            );
+            assert_eq!(scene.mesh.triangles, live.mesh.triangles);
+            assert_eq!(scene.mesh.quads, sorted(&live.mesh.quads));
+            assert_eq!(scene.levels.as_ref(), live.level_data());
+            assert_eq!(scene.view, Some(view()));
+
+            // It opens as a new session from the clay as it is, which
+            // sculpts on and saves its own timelapse.
+            let mut resumed = Sculpt::with_levels(scene.mesh, scene.levels);
+            assert_eq!(resumed.mesh.positions, live.mesh.positions);
+            assert_eq!(resumed.levels(), live.levels());
+            resumed.set_clock(1.0);
+            resumed.begin_stroke();
+            resumed.dab(Dab {
+                brush: Brush::Clay,
+                centre: Vec3::Z,
+                radius: 0.4,
+                strength: 0.5,
+                invert: false,
+                symmetry: false,
+                direction: Vec3::ZERO,
+            });
+            resumed.end_stroke();
+            resumed.refresh();
+            let again = Scene::read(&save(&resumed, &view())).unwrap();
+            let mut replay = Replay::new(again.checkpoints, again.log);
+            assert!(replay.seek(f64::INFINITY, usize::MAX));
+            assert_eq!(replay.sculpt.mesh.positions, resumed.mesh.positions);
+        }
     }
 
     #[test]
