@@ -66,6 +66,8 @@ pub struct MeshTr {
     /// The shortcuts window: hold the key and the tools open in a ring
     /// round the pointer.
     pub tool_pie: &'static str,
+    /// The toolbar's tool button's tooltip, under the tool's name.
+    pub tool_pie_hint: &'static str,
     /// Headings of the sculpt panel's groups, which fold away (the first,
     /// the tools and their settings, is `Tr::tools`): the subdivision
     /// levels, and the remeshes.
@@ -107,6 +109,7 @@ pub const JA: MeshTr = MeshTr {
     quad_remeshed: "クアッドでリメッシュしました。元に戻すと前のメッシュに戻ります",
     quad_failed: "この形はクアッドリメッシュできませんでした。塑像はそのままです",
     tool_pie: "ツールのパイメニュー（押したまま）",
+    tool_pie_hint: "Space を押したままでツールのパイメニュー",
     subdivision: "サブディビジョン",
     remeshing: "リメッシュ",
 };
@@ -145,6 +148,7 @@ pub const EN: MeshTr = MeshTr {
     quad_remeshed: "quad remeshed; undo brings the previous mesh back",
     quad_failed: "this shape could not be quad remeshed; the sculpt is unchanged",
     tool_pie: "tool pie menu (hold)",
+    tool_pie_hint: "hold Space for the tool pie",
     subdivision: "subdivision",
     remeshing: "remeshing",
 };
@@ -183,6 +187,7 @@ pub const FR: MeshTr = MeshTr {
     quad_remeshed: "remaillé en quads ; annuler rétablit le maillage précédent",
     quad_failed: "cette forme n'a pas pu être remaillée en quads ; la sculpture est inchangée",
     tool_pie: "menu circulaire des outils (maintenir)",
+    tool_pie_hint: "maintenir Espace pour le menu circulaire des outils",
     subdivision: "subdivision",
     remeshing: "remaillage",
 };

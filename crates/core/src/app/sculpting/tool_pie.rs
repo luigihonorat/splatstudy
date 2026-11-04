@@ -5,7 +5,7 @@
 
 use egui::Key;
 
-use super::{BRUSHES, brush_name};
+use super::{BRUSHES, brush_icon, brush_name};
 use crate::app::{App, SCULPT};
 use crate::ui::pie::{Outcome, Pie};
 
@@ -22,6 +22,10 @@ impl App {
             // Not in the middle of a stroke or a turn of the view.
             None if self.drags[SCULPT].is_none() && self.playback.is_none() => {
                 self.tool.pie = Pie::open(ui, TOOL_PIE_KEY, self.view_rects[SCULPT]);
+                // The pie takes the place of an open flyout.
+                if self.tool.pie.is_some() {
+                    self.flyout = None;
+                }
             }
             None => {}
         }
@@ -34,11 +38,13 @@ impl App {
         }
         let tr = self.lang.tr();
         let labels = BRUSHES.map(|(brush, _, _)| brush_name(tr, brush));
+        let icons = BRUSHES.map(|(brush, _, _)| brush_icon(brush));
+        let icons = icons.each_ref().map(|icon| icon as crate::ui::icons::Icon);
         let chosen = BRUSHES.iter().position(|&(b, _, _)| b == self.tool.tool);
         let Some(pie) = &mut self.tool.pie else {
             return;
         };
-        let outcome = pie.show(ui, &labels, chosen);
+        let outcome = pie.show(ui, &labels, &icons, chosen);
         self.tool_pie_outcome(outcome);
     }
 

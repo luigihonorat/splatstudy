@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! The interface: theme, fonts, strings and the few widgets the design needs.
 
+pub mod flyout;
 pub mod fonts;
 pub mod i18n;
 pub mod icons;

@@ -1238,7 +1238,7 @@ pub(super) mod tests {
         }
 
         /// A left drag from `from` to `to`, in a few steps.
-        fn drag(&mut self, from: Pos2, to: Pos2) {
+        pub(in crate::app) fn drag(&mut self, from: Pos2, to: Pos2) {
             use crate::PointerPhase::{Down, Move, Up};
             self.pointer(Move, from);
             self.pointer(Down, from);
@@ -1640,8 +1640,11 @@ pub(super) mod tests {
         let rect = rects[SCULPT];
         assert!(h.app.pick(rect, areas[SCULPT].center()).is_some());
         let bar = h.app.toolbar_layouts(rects)[SCULPT].clone().unwrap();
-        assert_eq!(bar.options[0], ViewOption::Perspective);
-        let button = bar.buttons[0].center();
+        let k = bar
+            .options
+            .iter()
+            .position(|&o| o == ViewOption::Perspective);
+        let button = bar.buttons[k.expect("a perspective button")].center();
         h.drag(button, button);
         assert!(h.app.cameras[SCULPT].ortho, "clicked");
         // A drag from the toolbar across the clay is neither a stroke nor

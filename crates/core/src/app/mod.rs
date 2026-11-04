@@ -159,6 +159,8 @@ pub struct App {
     view_rects: [Rect; 2],
     cameras: [OrbitCamera; 2],
     drags: [Option<Drag>; 2],
+    /// A toolbar button's column of choices, while it is open.
+    flyout: Option<toolbar::OpenFlyout>,
     clay: ClayPass,
     sculpt: Sculpt,
     gpu_mesh: GpuMesh,
@@ -232,6 +234,7 @@ impl App {
             view_rects: [Rect::NOTHING; 2],
             cameras: [OrbitCamera::default(); 2],
             drags: [None; 2],
+            flyout: None,
             clay,
             sculpt,
             gpu_mesh,

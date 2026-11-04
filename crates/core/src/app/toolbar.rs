@@ -3,25 +3,32 @@
 //! The toolbars over the views: a thin strip of icons inside each view's
 //! outer edge, the sculpt view's and the reference view's, each switching
 //! its own view's options. The view menu and the keys switch the same
-//! options, through [`App::apply`].
+//! options, through [`App::apply`]. The sculpt's starts with the tool in
+//! hand; it and the lighting open a column of choices beside the toolbar
+//! (see [`crate::ui::flyout`]).
 
 use egui::{Color32, CursorIcon, Rect, RectAlign, RichText, Sense, pos2, vec2};
 
+use super::sculpting::{BRUSHES, brush_icon, brush_keys, brush_name};
 use super::views::shown;
 use super::{App, REFERENCE, SCULPT};
 use crate::reference::Content;
 use crate::render::clay::Lighting as Light;
+use crate::sculpt::Brush;
+use crate::ui::flyout::{self, Flyout, Row};
 use crate::ui::i18n::{Tr, study::StudyTr};
 use crate::ui::{fonts, icons, theme};
 
 /// What a toolbar button, a key or a view menu item does to a view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ViewOption {
+    /// The tool in hand, in the sculpt view: its button opens the tools.
+    Tool,
     /// Perspective on, or orthographic.
     Perspective,
     /// The clay's edges, in the sculpt view.
     Wireframe,
-    /// The next lighting.
+    /// The next lighting; its button opens the lightings.
     Lighting,
     Grid,
     Plumb,
@@ -55,6 +62,8 @@ impl ViewOption {
     pub(super) fn keys(self) -> &'static str {
         use ViewOption::*;
         match self {
+            // Each tool has its own key: see `brush_keys`.
+            Tool => "",
             Perspective => "5",
             Wireframe => "Shift+W",
             Lighting => "B",
@@ -76,6 +85,7 @@ impl ViewOption {
         use ViewOption::*;
         let st = tr.study;
         match self {
+            Tool => tr.tools,
             Perspective => st.perspective,
             Wireframe => st.wireframe,
             Lighting => st.lighting,
@@ -95,9 +105,11 @@ impl ViewOption {
         .to_owned()
     }
 
-    fn icon(self, painter: &egui::Painter, rect: Rect, colour: Color32, lighting: Light) {
+    fn icon(self, painter: &egui::Painter, rect: Rect, colour: Color32, shows: (Brush, Light)) {
         use ViewOption::*;
+        let (tool, lighting) = shows;
         match self {
+            Tool => brush_icon(tool)(painter, rect, colour),
             Perspective => icons::perspective(painter, rect, colour),
             Wireframe => icons::wireframe(painter, rect, colour),
             Lighting => {
@@ -116,6 +128,12 @@ impl ViewOption {
             Panels => icons::panels(painter, rect, colour),
         }
     }
+
+    /// Whether this option's button opens a column of choices rather than
+    /// switching it.
+    pub(super) fn has_flyout(self) -> bool {
+        matches!(self, ViewOption::Tool | ViewOption::Lighting)
+    }
 }
 
 pub(super) fn lighting_name(st: &StudyTr, lighting: Light) -> &'static str {
@@ -126,14 +144,15 @@ pub(super) fn lighting_name(st: &StudyTr, lighting: Light) -> &'static str {
     }
 }
 
-/// The buttons of view `index`'s toolbar, in groups from the top:
-/// display, guides, comparison and camera, then the sculpt's hides the
-/// panels. A picture has no camera, light or outline of its own, and only
-/// the clay has edges, a ghost and a difference.
+/// The buttons of view `index`'s toolbar, in groups from the top: the
+/// sculpt's tool, display, guides, comparison and camera, then the
+/// sculpt's hides the panels. A picture has no camera, light or outline of
+/// its own, and only the clay has edges, a ghost and a difference.
 pub(super) fn groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
     use ViewOption::*;
     if index == SCULPT {
         return vec![
+            vec![Tool],
             vec![Perspective, Wireframe, Lighting],
             vec![Grid, Plumb],
             vec![Silhouette, Difference, Ghost, Mirror],
@@ -214,6 +233,16 @@ pub(super) fn layout(rect: Rect, left: bool, sizes: &[usize]) -> (Vec<Rect>, Vec
     (panels, buttons)
 }
 
+/// An open flyout: the view and the button it opened from, and where it
+/// was last drawn (nothing before its first frame).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct OpenFlyout {
+    pub(super) index: usize,
+    pub(super) option: ViewOption,
+    pub(super) panel: Rect,
+    pub(super) rows: Vec<Rect>,
+}
+
 /// A toolbar as laid out in its view.
 #[derive(Clone)]
 pub(super) struct Toolbar {
@@ -249,7 +278,11 @@ impl App {
             Mirror => aids.mirror,
             Link => self.study.link,
             Panels => self.panels.hidden(),
-            Lighting | Frame | Reset => false,
+            // The tool in hand shows bright; the lighting while its
+            // choices are open.
+            Tool => true,
+            Lighting => self.flyout_open(option, index),
+            Frame | Reset => false,
         }
     }
 
@@ -258,6 +291,7 @@ impl App {
         use ViewOption::*;
         let aids = &mut self.study.views[index];
         match option {
+            Tool => self.toggle_flyout(option, index),
             Perspective => {
                 let camera = &mut self.cameras[index];
                 camera.ortho = !camera.ortho;
@@ -314,13 +348,122 @@ impl App {
         })
     }
 
+    /// Whether `option`'s flyout is open over view `index`.
+    pub(super) fn flyout_open(&self, option: ViewOption, index: usize) -> bool {
+        self.flyout
+            .as_ref()
+            .is_some_and(|f| f.option == option && f.index == index)
+    }
+
+    /// Opens `option`'s flyout over view `index`, or closes it if open;
+    /// another flyout closes.
+    pub(super) fn toggle_flyout(&mut self, option: ViewOption, index: usize) {
+        self.flyout = (!self.flyout_open(option, index)).then_some(OpenFlyout {
+            index,
+            option,
+            panel: Rect::NOTHING,
+            rows: Vec::new(),
+        });
+    }
+
+    /// Where the open flyout was drawn last: there the view takes no
+    /// scroll and shows no brush. Empty when none is open.
+    pub(super) fn flyout_area(&self) -> Rect {
+        self.flyout.as_ref().map_or(Rect::NOTHING, |f| f.panel)
+    }
+
+    /// Escape closes an open flyout, and does nothing else. Before the
+    /// other shortcuts.
+    pub(super) fn flyout_keys(&mut self, ui: &egui::Ui) {
+        if self.flyout.is_some()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.flyout = None;
+        }
+    }
+
+    /// Draws the open flyout beside its button and takes its clicks:
+    /// picking a row picks that tool or lighting.
+    fn flyout_ui(&mut self, ui: &egui::Ui, rects: [Rect; 2], layouts: &[Option<Toolbar>; 2]) {
+        let Some(open) = &self.flyout else {
+            return;
+        };
+        let (index, option) = (open.index, open.option);
+        // Gone with its view, or with its button: a picture has no
+        // lighting.
+        let button = layouts[index].as_ref().and_then(|bar| {
+            let k = bar.options.iter().position(|&o| o == option)?;
+            Some(bar.buttons[k])
+        });
+        let Some(button) = button else {
+            self.flyout = None;
+            return;
+        };
+        let tr = self.lang.tr();
+        let tool_icons = BRUSHES.map(|(brush, _, _)| brush_icon(brush));
+        let light_icons: [_; Light::ALL.len()] = std::array::from_fn(|k| {
+            move |p: &egui::Painter, r: Rect, c: Color32| icons::lighting(p, r, c, k)
+        });
+        let (rows, chosen): (Vec<Row>, _) = match option {
+            ViewOption::Tool => (
+                BRUSHES
+                    .iter()
+                    .zip(&tool_icons)
+                    .map(|(&(brush, _, _), icon)| Row {
+                        icon,
+                        label: brush_name(tr, brush),
+                    })
+                    .collect(),
+                BRUSHES.iter().position(|&(b, _, _)| b == self.tool.tool),
+            ),
+            _ => (
+                Light::ALL
+                    .iter()
+                    .zip(&light_icons)
+                    .map(|(&light, icon)| Row {
+                        icon,
+                        label: lighting_name(tr.study, light),
+                    })
+                    .collect(),
+                Light::ALL
+                    .iter()
+                    .position(|&l| l == self.study.views[index].lighting),
+            ),
+        };
+        let flyout = Flyout {
+            id: ui.scope_id().with(("flyout", index)),
+            button,
+            right: on_left(index, self.study.swapped),
+            within: rects[index],
+            rows: &rows,
+            chosen,
+        };
+        let (panel, row_rects) = flyout.layout(ui.ctx());
+        match flyout.show(ui) {
+            flyout::Outcome::Open => {
+                if let Some(open) = &mut self.flyout {
+                    (open.panel, open.rows) = (panel, row_rects);
+                }
+            }
+            flyout::Outcome::Closed => self.flyout = None,
+            flyout::Outcome::Picked(k) => {
+                match option {
+                    ViewOption::Tool => self.tool.tool = BRUSHES[k].0,
+                    _ => self.study.views[index].lighting = Light::ALL[k],
+                }
+                self.flyout = None;
+                self.dirty = true;
+            }
+        }
+    }
+
     /// Draws both toolbars and takes their clicks. Called after everything
     /// else that takes the pointer in the views, so it is on top.
     pub(super) fn toolbars(&mut self, ui: &egui::Ui, rects: [Rect; 2]) {
         let tr = self.lang.tr();
         let kind = self.reference_kind();
         let layouts = self.toolbar_layouts(rects);
-        for (index, layout) in layouts.into_iter().enumerate() {
+        for (index, layout) in layouts.clone().into_iter().enumerate() {
             let Some(Toolbar {
                 options,
                 panels,
@@ -337,14 +480,14 @@ impl App {
                 ui.interact(*panel, id.with(("panel", k)), Sense::click_and_drag());
                 painter.rect_filled(*panel, 0.0, theme::TOOLBAR_BG);
             }
-            let lighting = self.study.views[index].lighting;
+            let shows = (self.tool.tool, self.study.views[index].lighting);
             for (k, (option, button)) in options.into_iter().zip(buttons).enumerate() {
                 let response = ui
                     .interact(button, id.with(k), Sense::click())
                     .on_hover_cursor(CursorIcon::PointingHand);
                 let on = self.option_on(option, index);
                 let hovered = response.hovered();
-                if hovered {
+                if hovered || self.flyout_open(option, index) {
                     painter.rect_filled(button, 0.0, theme::TOOL_HOVER);
                 }
                 let colour = if on || hovered {
@@ -352,11 +495,31 @@ impl App {
                 } else {
                     theme::TOOL_OFF
                 };
-                option.icon(&painter, button, colour, lighting);
-                let mut label = option.label(tr, index, kind);
-                if option == ViewOption::Lighting {
-                    label = format!("{label} · {}", lighting_name(tr.study, lighting));
+                option.icon(&painter, button, colour, shows);
+                if response.clicked() {
+                    if option.has_flyout() {
+                        self.toggle_flyout(option, index);
+                    } else {
+                        self.apply(option, index);
+                    }
                 }
+                // Its flyout, open, takes the tooltip's place.
+                if self.flyout_open(option, index) {
+                    continue;
+                }
+                let (tool, lighting) = shows;
+                let (label, keys) = match option {
+                    ViewOption::Tool => (brush_name(tr, tool).to_owned(), brush_keys(tool)),
+                    ViewOption::Lighting => (
+                        format!(
+                            "{} · {}",
+                            option.label(tr, index, kind),
+                            lighting_name(tr.study, lighting)
+                        ),
+                        option.keys().to_owned(),
+                    ),
+                    _ => (option.label(tr, index, kind), option.keys().to_owned()),
+                };
                 // Beside the button, towards the view's middle.
                 let mut tip = egui::Tooltip::for_enabled(&response);
                 tip.popup = tip.popup.align(if on_left(index, self.study.swapped) {
@@ -365,27 +528,29 @@ impl App {
                     RectAlign::LEFT
                 });
                 tip.show(|ui| {
+                    let muted = ui.visuals().widgets.inactive.fg_stroke.color;
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 18.0;
                         ui.label(RichText::new(label).font(fonts::regular(13.0)));
-                        let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+                        ui.label(RichText::new(keys).font(fonts::regular(13.0)).color(muted));
+                    });
+                    if option == ViewOption::Tool {
                         ui.label(
-                            RichText::new(option.keys())
+                            RichText::new(tr.mesh.tool_pie_hint)
                                 .font(fonts::regular(13.0))
                                 .color(muted),
                         );
-                    });
+                    }
                 });
-                if response.clicked() {
-                    self.apply(option, index);
-                }
             }
         }
+        self.flyout_ui(ui, rects, &layouts);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::study::tests::Harness;
     use super::*;
 
     fn view() -> Rect {
@@ -426,6 +591,125 @@ mod tests {
         assert!(buttons[0].width() < BUTTON && buttons[0].width() >= MIN_BUTTON);
         assert!(panels[3].bottom() <= short.bottom() - INSET);
         assert!(panels[0].top() >= short.top() + INSET);
+    }
+
+    /// The app's toolbar button for `option` in view `index`.
+    fn button_of(h: &Harness, option: ViewOption, index: usize) -> Rect {
+        let bar = h.app.toolbar_layouts(h.app.view_rects)[index].clone();
+        let bar = bar.expect("a toolbar");
+        let k = bar.options.iter().position(|&o| o == option);
+        bar.buttons[k.expect("the button")]
+    }
+
+    fn click(h: &mut Harness, at: egui::Pos2) {
+        use crate::PointerPhase::{Down, Move, Up};
+        h.pointer(Move, at);
+        h.pointer(Down, at);
+        h.pointer(Up, at);
+    }
+
+    fn strokes(h: &Harness) -> usize {
+        h.app.sculpt.log().len()
+    }
+
+    #[test]
+    fn the_tool_button_opens_the_tools_and_a_row_picks_one_without_sculpting() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        // Close up, the clay fills the view under the flyout too.
+        h.app.cameras[SCULPT].distance = 1.3;
+        h.frames(1);
+        assert_eq!(groups(SCULPT, RefKind::Nothing)[0], [ViewOption::Tool]);
+        let button = button_of(&h, ViewOption::Tool, SCULPT);
+        assert!(button.bottom() < button_of(&h, ViewOption::Perspective, SCULPT).top());
+        click(&mut h, button.center());
+        assert!(h.app.flyout_open(ViewOption::Tool, SCULPT));
+        h.frames(1);
+        let open = h.app.flyout.clone().expect("open");
+        assert_eq!(open.rows.len(), 7);
+        // Beside the toolbar, towards the view's middle, and over the clay.
+        assert!(open.panel.left() > button.right());
+        let pinch = open.rows[6].center();
+        let rect = h.app.view_rects[SCULPT];
+        assert!(h.app.pick(rect, pinch).is_some(), "over the clay");
+        click(&mut h, pinch);
+        assert_eq!(h.app.tool.tool, Brush::Pinch);
+        assert!(h.app.flyout.is_none(), "closed by the pick");
+        assert_eq!(strokes(&h), 0, "the click is no stroke");
+
+        // The button opens it and closes it again.
+        click(&mut h, button.center());
+        assert!(h.app.flyout.is_some());
+        click(&mut h, button.center());
+        assert!(h.app.flyout.is_none());
+
+        // A press on the clay elsewhere closes it, and sculpts nothing.
+        click(&mut h, button.center());
+        h.drag(rect.center(), rect.center() + egui::vec2(40.0, 0.0));
+        assert!(h.app.flyout.is_none());
+        assert_eq!(strokes(&h), 0);
+        assert_eq!(h.app.tool.tool, Brush::Pinch);
+        // Closed, the same drag sculpts.
+        h.drag(rect.center(), rect.center() + egui::vec2(40.0, 0.0));
+        assert!(strokes(&h) > 0);
+
+        // Escape closes it.
+        click(&mut h, button.center());
+        h.key(egui::Key::Escape, false);
+        assert!(h.app.flyout.is_none());
+        // The pie takes its place.
+        click(&mut h, button.center());
+        h.pointer(crate::PointerPhase::Move, rect.center());
+        h.app.push_event(crate::InputEvent::Key {
+            key: egui::Key::Space,
+            pressed: true,
+            repeat: false,
+        });
+        h.frames(1);
+        assert!(h.app.pie_open() && h.app.flyout.is_none());
+    }
+
+    #[test]
+    fn the_lighting_button_opens_the_lightings_and_b_still_cycles() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let before = h.app.study.views[SCULPT].lighting;
+        let button = button_of(&h, ViewOption::Lighting, SCULPT);
+        click(&mut h, button.center());
+        assert!(h.app.flyout_open(ViewOption::Lighting, SCULPT));
+        assert_eq!(h.app.study.views[SCULPT].lighting, before, "no cycling");
+        h.frames(1);
+        let rows = h.app.flyout.clone().unwrap().rows;
+        assert_eq!(rows.len(), Light::ALL.len());
+        click(&mut h, rows[1].center());
+        assert_eq!(h.app.study.views[SCULPT].lighting, Light::ALL[1]);
+        assert!(h.app.flyout.is_none());
+        // Opening the tools closes the lightings.
+        click(&mut h, button.center());
+        let tool = button_of(&h, ViewOption::Tool, SCULPT);
+        click(&mut h, tool.center());
+        assert!(h.app.flyout_open(ViewOption::Tool, SCULPT));
+        h.key(egui::Key::Escape, false);
+        // B goes on cycling.
+        let centre = h.app.view_rects[SCULPT].center();
+        h.pointer(crate::PointerPhase::Move, centre);
+        h.key(egui::Key::B, false);
+        assert_eq!(h.app.study.views[SCULPT].lighting, Light::ALL[2]);
+
+        // Swapped, the sculpt's flyout opens to the left of its toolbar,
+        // still towards the view's middle.
+        h.app.study.swapped = true;
+        h.frames(1);
+        let button = button_of(&h, ViewOption::Tool, SCULPT);
+        click(&mut h, button.center());
+        h.frames(1);
+        let panel = h.app.flyout.clone().unwrap().panel;
+        assert!(panel.right() < button.left());
+        assert!(h.app.view_rects[SCULPT].contains_rect(panel));
     }
 
     #[test]

@@ -5,12 +5,11 @@
 
 use egui::{Align2, Key, RichText};
 
-use super::sculpting::{BRUSHES, TOOL_PIE_KEY, brush_name};
+use super::sculpting::{BRUSHES, TOOL_PIE_KEY, brush_keys, brush_name};
 use super::toolbar::ViewOption;
 use super::views::viewpoints;
 use super::{App, REPO_URL, SITE_URL, WEB};
 use crate::navigation::NavStyle;
-use crate::sculpt::Brush;
 use crate::ui;
 
 impl App {
@@ -20,6 +19,7 @@ impl App {
         // Typing in a text field (a credit, a title): its letters, Ctrl+Z
         // and Home belong to the field, not to the tools and views.
         if !ui.ctx().text_edit_focused() {
+            self.flyout_keys(ui);
             self.sculpt_shortcuts(ui);
             for (_, key, yaw, pitch) in viewpoints(self.lang.tr()) {
                 if key.is_some_and(|key| pressed(M::NONE, key)) {
@@ -85,14 +85,7 @@ impl App {
                 let muted = ui.visuals().widgets.inactive.fg_stroke.color;
                 let mut rows: Vec<(&str, String)> = BRUSHES
                     .iter()
-                    .map(|&(brush, key, _)| {
-                        let keys = if brush == Brush::Smooth {
-                            format!("{} / Shift", key.name())
-                        } else {
-                            key.name().to_owned()
-                        };
-                        (brush_name(tr, brush), keys)
-                    })
+                    .map(|&(brush, _, _)| (brush_name(tr, brush), brush_keys(brush)))
                     .collect();
                 rows.extend([
                     (tr.mesh.tool_pie, TOOL_PIE_KEY.name().to_owned()),

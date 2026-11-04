@@ -6,14 +6,16 @@
 //! other hand). Letting go in the dead centre, a click there, or Escape
 //! closes it without a choice.
 //!
-//! The menu knows only labels and which one is chosen; what they mean is
-//! the caller's. While it is open it lies over the whole window and takes
-//! every press, so nothing under it (a stroke on the clay, a button) starts.
+//! The menu knows only labels, their icons and which one is chosen; what
+//! they mean is the caller's. While it is open it lies over the whole
+//! window and takes every press, so nothing under it (a stroke on the clay,
+//! a button) starts.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use egui::{Align2, Color32, Event, Key, Order, Pos2, Rect, Sense, Stroke};
 
+use super::icons::{self, Icon};
 use super::{fonts, theme};
 
 /// Around the centre, a disc where nothing is chosen, in points.
@@ -24,6 +26,8 @@ const LABEL_RADIUS: f32 = 72.0;
 const LABEL_SLACK: f32 = 4.0;
 /// Room around the labels inside the ring's edge, in points.
 const MARGIN: f32 = 14.0;
+/// Between a label's icon and its text, in points.
+const ICON_GAP: f32 = 6.0;
 
 /// The slice of a menu of `count` choices that a pointer at `pos` points
 /// to, for a menu centred on `centre`; `None` in the dead centre. The first
@@ -147,12 +151,25 @@ impl Pie {
         })
     }
 
-    /// Draws the menu over everything, with `labels` round it and the one
-    /// at `chosen` underlined, and takes presses: one on a slice picks it,
-    /// one in the dead centre closes the menu.
-    pub fn show(&mut self, ui: &egui::Ui, labels: &[&str], chosen: Option<usize>) -> Outcome {
+    /// Draws the menu over everything, with `labels` round it, each after
+    /// its icon if `icons` has one per label, and the one at `chosen`
+    /// underlined, and takes presses: one on a slice picks it, one in the
+    /// dead centre closes the menu.
+    pub fn show(
+        &mut self,
+        ui: &egui::Ui,
+        labels: &[&str],
+        icons: &[Icon],
+        chosen: Option<usize>,
+    ) -> Outcome {
         let ctx = ui.ctx();
         let count = labels.len();
+        let icons = (icons.len() == count).then_some(icons);
+        let lead = if icons.is_some() {
+            icons::SIZE + ICON_GAP
+        } else {
+            0.0
+        };
         let font = fonts::light(16.0);
         let galleys: Vec<_> = labels
             .iter()
@@ -165,7 +182,7 @@ impl Pie {
         // The ring reaches just past the farthest label's corner.
         let label_rect = |index, size| label_rect(self.centre, index, count, size);
         let rects: Vec<Rect> = (galleys.iter().enumerate())
-            .map(|(index, g)| label_rect(index, g.size()))
+            .map(|(index, g)| label_rect(index, g.size() + egui::vec2(lead, 0.0)))
             .collect();
         let pointer = ctx.input(|i| i.pointer.latest_pos());
         let hovered = pointer.and_then(|p| choice_at(self.centre, p, &rects));
@@ -225,9 +242,17 @@ impl Pie {
                     } else {
                         theme::VIEW_TEXT
                     };
-                    painter.galley(rect.min, galley, color);
+                    if let Some(icons) = icons {
+                        let square = Rect::from_center_size(
+                            egui::pos2(rect.left() + icons::SIZE / 2.0, rect.center().y),
+                            egui::Vec2::splat(icons::SIZE),
+                        );
+                        icons[index](painter, square, color);
+                    }
+                    let text = rect.left() + lead..=rect.right();
+                    painter.galley(egui::pos2(*text.start(), rect.top()), galley, color);
                     if chosen == Some(index) {
-                        painter.hline(rect.x_range(), rect.bottom() + 1.5, Stroke::new(1.0, color));
+                        painter.hline(text, rect.bottom() + 1.5, Stroke::new(1.0, color));
                     }
                 }
                 response

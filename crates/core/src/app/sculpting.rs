@@ -23,7 +23,7 @@ use crate::sculpt::{
     Brush, Dab, Falloff, Hit, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, START_LEVEL, Sculpt,
     cube_sphere,
 };
-use crate::ui::{self, i18n::Tr, menu, theme};
+use crate::ui::{self, i18n::Tr, icons, menu, theme};
 use crate::voxel;
 
 /// Dabs are placed every this fraction of the tool radius along a stroke.
@@ -59,6 +59,31 @@ pub(super) fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
         Brush::Inflate => tr.inflate,
         Brush::Crease => tr.crease,
         Brush::Pinch => tr.pinch,
+    }
+}
+
+/// The icon that stands for `brush`, on the toolbar, in its flyout and
+/// in the tool pie.
+pub(super) fn brush_icon(brush: Brush) -> fn(&egui::Painter, Rect, egui::Color32) {
+    match brush {
+        Brush::Move => icons::move_tool,
+        Brush::Clay => icons::clay_tool,
+        Brush::Flatten => icons::flatten_tool,
+        Brush::Smooth => icons::smooth_tool,
+        Brush::Inflate => icons::inflate_tool,
+        Brush::Crease => icons::crease_tool,
+        Brush::Pinch => icons::pinch_tool,
+    }
+}
+
+/// The keys that pick `brush`, as the shortcuts window and the toolbar's
+/// tooltip show them: Shift smooths with any tool while it is held.
+pub(super) fn brush_keys(brush: Brush) -> String {
+    let key = BRUSHES[tool_index(brush)].1.name();
+    if brush == Brush::Smooth {
+        format!("{key} / Shift")
+    } else {
+        key.to_owned()
     }
 }
 
@@ -793,6 +818,7 @@ impl App {
         };
         if self.playback.is_some()
             || self.pie_open()
+            || self.flyout.is_some()
             || matches!(self.drags[SCULPT], Some(Drag::Navigate { .. }))
         {
             return;

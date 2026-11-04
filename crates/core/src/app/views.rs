@@ -163,8 +163,11 @@ impl App {
         {
             self.study.focus = index;
         }
+        // An open flyout lies beside its toolbar and counts as part of it.
         let toolbars = self.toolbar_areas(rects);
-        let on_toolbar = |index: usize| hover.is_some_and(|p| toolbars[index].contains(p));
+        let flyout = self.flyout_area();
+        let on_toolbar =
+            |index: usize| hover.is_some_and(|p| toolbars[index].contains(p) || flyout.contains(p));
         for index in [SCULPT, REFERENCE] {
             if shown(rects[index]) {
                 self.view_input(ui, rects[index], index, on_toolbar(index));
@@ -288,7 +291,13 @@ impl App {
         let camera_before = self.cameras[index];
 
         // An open pie menu takes every press; the toolbar takes its own.
-        if self.drags[index].is_none() && response.hovered() && !self.pie_open() && !on_toolbar {
+        // While a flyout is open, a press anywhere only closes it.
+        if self.drags[index].is_none()
+            && response.hovered()
+            && !self.pie_open()
+            && self.flyout.is_none()
+            && !on_toolbar
+        {
             for (button, ours) in [
                 (PointerButton::Primary, Button::Primary),
                 (PointerButton::Middle, Button::Middle),
