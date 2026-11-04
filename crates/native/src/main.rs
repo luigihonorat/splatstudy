@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use sdl3::event::{Event, WindowEvent};
-use sdl3::keyboard::{Keycode, Mod};
+use sdl3::keyboard::{Keycode, Mod, Scancode};
 use sdl3::mouse::{Cursor, MouseButton, MouseWheelDirection, SystemCursor};
 use sdl3::pen::PenAxis;
 use sdl3::video::Window;
@@ -303,19 +303,31 @@ impl Translator {
             },
             Event::KeyDown {
                 keycode,
+                scancode,
                 keymod,
                 repeat,
                 ..
             }
             | Event::KeyUp {
                 keycode,
+                scancode,
                 keymod,
                 repeat,
                 ..
             } => {
                 let pressed = matches!(event, Event::KeyDown { .. });
                 self.update_modifiers(keymod, &mut out);
-                if let Some(key) = keycode.and_then(key) {
+                // The numpad is its own input: it turns the views while
+                // the digit row picks tools. The scancode names its key
+                // whatever NumLock makes of it; its digit, with NumLock on,
+                // still types through `TextInput`.
+                if let Some(digit) = scancode.and_then(numpad) {
+                    out.push(InputEvent::Numpad {
+                        digit,
+                        pressed,
+                        repeat,
+                    });
+                } else if let Some(key) = keycode.and_then(key) {
                     out.push(InputEvent::Key {
                         key,
                         pressed,
@@ -388,6 +400,13 @@ fn button(b: MouseButton) -> Option<Button> {
         MouseButton::Middle => Some(Button::Middle),
         _ => None,
     }
+}
+
+/// The digit of a numpad key.
+fn numpad(code: Scancode) -> Option<u8> {
+    use Scancode::*;
+    let digits = [Kp0, Kp1, Kp2, Kp3, Kp4, Kp5, Kp6, Kp7, Kp8, Kp9];
+    digits.iter().position(|&k| k == code).map(|d| d as u8)
 }
 
 /// SDL key names → egui key names where they differ.

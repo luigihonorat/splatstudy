@@ -339,7 +339,29 @@ fn listen(
             let mut events = Vec::new();
             // The IME owns these; its committed text arrives from `ime`.
             let name = e.key();
-            if !ime::is_ime_key(&e) {
+            // The numpad is its own input: it turns the views while the
+            // digit row picks tools. The code names its key whatever
+            // NumLock makes of it ("8" or "ArrowUp"), and neither the digit
+            // nor the arrow is also sent as a key.
+            let numpad = e
+                .code()
+                .strip_prefix("Numpad")
+                .and_then(|d| d.parse::<u8>().ok());
+            if let Some(digit) = numpad.filter(|_| !ime::is_ime_key(&e)) {
+                events.push(InputEvent::Numpad {
+                    digit,
+                    pressed,
+                    repeat: e.repeat(),
+                });
+                // With NumLock on it still types its digit in a text field.
+                let shortcut = e.ctrl_key() || e.meta_key() || e.alt_key();
+                if pressed && !shortcut && name.chars().count() == 1 {
+                    events.push(InputEvent::Text(name.clone()));
+                }
+                if canvas_has_keys(&c) {
+                    e.prevent_default();
+                }
+            } else if !ime::is_ime_key(&e) {
                 // On a Mac, Option with a letter types another character
                 // (Option+M is µ): the key is the letter under it.
                 let key = Key::from_name(&name)
