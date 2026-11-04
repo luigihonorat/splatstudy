@@ -583,8 +583,9 @@ impl App {
         self.advance_playback(ui);
     }
 
-    /// The sculpt panel, in groups that fold away: the tools, the
-    /// subdivision levels, and the remeshes.
+    /// The sculpt panel, in groups that fold away: the current tool's
+    /// settings (the tool is picked on the toolbar), the subdivision levels,
+    /// and the remeshes.
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
         if self.playback.is_some() {
             self.playback_panel(ui);
@@ -592,7 +593,9 @@ impl App {
         }
         let tr = self.lang.tr();
         let m = tr.mesh;
-        ui::group(ui, "tools", tr.tools, |ui| self.brush_controls(ui));
+        ui::group(ui, "tool settings", m.tool_settings, |ui| {
+            self.tool_settings(ui)
+        });
         ui::group(ui, "subdivision", m.subdivision, |ui| {
             if ui::choice(ui, m.subdivide, false).clicked() {
                 self.ask_subdivide();
@@ -604,14 +607,8 @@ impl App {
 
     /// The tools, and the chosen one's size, strength, stabiliser,
     /// falloff and symmetry.
-    fn brush_controls(&mut self, ui: &mut egui::Ui) {
+    fn tool_settings(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
-        for (brush, _, _) in BRUSHES {
-            if ui::choice(ui, brush_name(tr, brush), self.tool.tool == brush).clicked() {
-                self.tool.tool = brush;
-            }
-        }
-        ui.add_space(10.0);
         ui::slider(ui, tr.size, &mut self.tool.radius, 4.0..=400.0, |v| {
             format!("{v:.0}")
         });

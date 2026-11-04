@@ -309,7 +309,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_fonts(super::fonts::definitions());
         let heading = egui::pos2(40.0, 10.0);
-        let mut frame = |events: Vec<egui::Event>| {
+        let frame = |events: Vec<egui::Event>| {
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
