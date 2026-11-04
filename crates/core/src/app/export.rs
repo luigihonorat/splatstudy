@@ -154,7 +154,7 @@ impl Shown {
 }
 
 /// The credit as one line: title, author and licence.
-fn credit_line(credit: &Credit) -> Option<String> {
+pub(super) fn credit_line(credit: &Credit) -> Option<String> {
     let parts: Vec<&str> = [&credit.title, &credit.author, &credit.licence]
         .into_iter()
         .map(String::as_str)

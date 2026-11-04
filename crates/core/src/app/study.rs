@@ -369,10 +369,10 @@ impl App {
         look.with_lighting(aids.lighting)
     }
 
-    /// Draws the clay's edges over the clay just drawn in the sculpt view,
-    /// when the wireframe is on: the live clay, or the timelapse's. Not
-    /// over a silhouette, which is all outline.
-    pub(super) fn draw_wireframe(&self, pass: &mut wgpu::RenderPass<'_>) {
+    /// Draws the clay's edges over the clay just drawn into `slot` as the
+    /// sculpt view shows it, when the wireframe is on: the live clay, or
+    /// the timelapse's. Not over a silhouette, which is all outline.
+    pub(super) fn draw_wireframe(&self, pass: &mut wgpu::RenderPass<'_>, slot: Slot) {
         if !self.study.wireframe || self.study.views[SCULPT].silhouette {
             return;
         }
@@ -380,8 +380,7 @@ impl App {
             Some(p) => (&p.gpu_mesh, &p.replay.sculpt.mesh),
             None => (&self.gpu_mesh, &self.sculpt.mesh),
         };
-        self.clay
-            .draw_wire(&self.device, pass, Slot::SculptView, gpu, mesh);
+        self.clay.draw_wire(&self.device, pass, slot, gpu, mesh);
     }
 
     /// The reference's look in its own view.
@@ -408,19 +407,20 @@ impl App {
         })
     }
 
-    /// Lays the reference over the sculpt view, seen with the sculpt's
-    /// camera, when the ghost is on. Called last in the sculpt view's pass.
-    pub(super) fn draw_ghost(&self, pass: &mut wgpu::RenderPass<'_>) {
+    /// Lays the reference over the sculpt drawn into `slot`, a target of
+    /// `size` pixels, seen with `camera`, when the ghost is on. Called last
+    /// in the pass.
+    pub(super) fn draw_ghost(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        slot: Slot,
+        camera: &OrbitCamera,
+        size: [u32; 2],
+    ) {
         let Some(look) = self.ghost_look() else {
             return;
         };
-        self.draw_reference_as(
-            pass,
-            Slot::SculptView,
-            &self.cameras[SCULPT],
-            self.views[SCULPT].aspect(),
-            &look,
-        );
+        self.draw_reference_sized(pass, slot, camera, size, &look);
     }
 
     /// The camera link, at the top of the view menu.
@@ -1187,6 +1187,12 @@ pub(super) mod tests {
                 self.time += 1.0 / 60.0;
                 self.app.frame(self.time, &self.view, SIZE, 1.0);
             }
+        }
+
+        /// One frame, and what it asked the shell for.
+        pub(in crate::app) fn frame_requests(&mut self) -> Vec<crate::app::Request> {
+            self.time += 1.0 / 60.0;
+            self.app.frame(self.time, &self.view, SIZE, 1.0).requests
         }
 
         pub(in crate::app) fn pointer(&mut self, phase: crate::PointerPhase, pos: Pos2) {

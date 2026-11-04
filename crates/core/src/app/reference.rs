@@ -18,6 +18,7 @@ use wgpu::util::DeviceExt;
 use super::study::ReferenceLook;
 use super::{App, REFERENCE, Request, SCULPT};
 use crate::camera::OrbitCamera;
+use crate::export::compositor::{IMAGE_FIT, ImageFraming};
 use crate::input::FilePurpose;
 use crate::reference::fit::{self, percentile_box};
 use crate::reference::load;
@@ -572,7 +573,7 @@ impl App {
             if response.double_clicked() {
                 *view = ImageView::default();
             }
-            let fit = (rect.width() / size.x).min(rect.height() / size.y) * 0.95;
+            let fit = (rect.width() / size.x).min(rect.height() / size.y) * IMAGE_FIT;
             let shown = Rect::from_center_size(rect.center() + view.offset, size * fit * view.zoom);
             // The mirror view shows the picture flipped left to right.
             let uv = if self.study.views[REFERENCE].mirror {
@@ -624,6 +625,22 @@ impl App {
                 }
             });
         }
+    }
+
+    /// How a picture reference is panned and zoomed in its view, laid out
+    /// in `rect`, for a screenshot; `None` for other references.
+    pub(super) fn image_framing(&self, rect: Rect) -> Option<ImageFraming> {
+        let Some(Drawn::Image(texture)) = &self.reference.drawn else {
+            return None;
+        };
+        let size = texture.size_vec2();
+        let view = self.reference.image_view;
+        let fit = (rect.width() / size.x).min(rect.height() / size.y) * IMAGE_FIT;
+        let fitted = size * fit;
+        (fitted.x > 0.0 && fitted.y > 0.0).then(|| ImageFraming {
+            offset: view.offset / fitted,
+            zoom: view.zoom,
+        })
     }
 
     /// Draws the reference into a pass already cleared to the view's

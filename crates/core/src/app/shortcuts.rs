@@ -36,6 +36,7 @@ impl App {
             self.study_shortcuts(ui);
         }
         self.file_shortcuts(ui);
+        self.screenshot_shortcut(ui);
         if !WEB && pressed(M::COMMAND, Key::Q) {
             self.quit = true;
         }
@@ -124,6 +125,7 @@ impl App {
                 ] {
                     rows.push((label, key.to_owned()));
                 }
+                rows.push((tr.video.screenshot, self.keys("P")));
                 rows.push((tr.open_scene, self.keys("O")));
                 rows.push((tr.save_scene, self.keys("S")));
                 if !WEB {
@@ -175,5 +177,6 @@ impl App {
 
         self.help_windows(ui);
         self.export_window(ui);
+        self.screenshot_step(ui);
     }
 }

@@ -43,6 +43,8 @@ impl App {
         menu::submenu(ui, tr.export, |ui| {
             ui.set_min_width(120.0);
             self.mesh_export_items(ui);
+            ui.separator();
+            self.screenshot_items(ui);
         });
         if !WEB {
             ui.separator();

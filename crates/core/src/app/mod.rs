@@ -15,6 +15,7 @@
 //! - `panels`: hiding the side panels (Tab, Shift+Tab)
 //! - `files`: scenes, opening and importing
 //! - `export`: exporting the timelapse
+//! - `screenshot`: a picture of the views
 //! - `help`: getting started and preferences
 //! - `menus` and `shortcuts`: shared; they call a hook in each part's file,
 //!   so a part grows without touching them.
@@ -26,6 +27,7 @@ mod menus;
 mod panels;
 mod playback;
 mod reference;
+mod screenshot;
 mod sculpting;
 mod shortcuts;
 mod study;
@@ -175,6 +177,7 @@ pub struct App {
     files: files::FileState,
     #[allow(dead_code)] // until the export part fills it
     export: export::ExportState,
+    shot: screenshot::ShotState,
     help: help::HelpState,
     /// Asked for since the last frame; handed to the shell with it.
     requests: Vec<Request>,
@@ -244,6 +247,7 @@ impl App {
             study: Default::default(),
             files: Default::default(),
             export: Default::default(),
+            shot: Default::default(),
             help: Default::default(),
             requests: Vec::new(),
             notice: None,
@@ -435,28 +439,46 @@ impl App {
         // drawn (nor sorted) into it.
         let [sculpt_shown, reference_shown] = self.view_rects.map(views::shown);
         let sculpt = &self.views[SCULPT];
-        self.clay.prepare(
-            &self.queue,
-            Slot::SculptView,
-            &self.cameras[SCULPT],
-            sculpt.aspect(),
-            &self.sculpt_look(),
-        );
         {
             let mut pass = sculpt.begin_pass(encoder, theme::VIEW_BG);
-            let mesh = self
-                .playback
-                .as_ref()
-                .map_or(&self.gpu_mesh, |p| &p.gpu_mesh);
-            self.clay.draw(&mut pass, Slot::SculptView, mesh);
-            if sculpt_shown {
-                self.draw_wireframe(&mut pass);
-                self.draw_ghost(&mut pass);
-            }
+            let camera = &self.cameras[SCULPT];
+            self.draw_sculpt(
+                &mut pass,
+                Slot::SculptView,
+                camera,
+                sculpt.size,
+                sculpt_shown,
+            );
         }
         let mut pass = self.views[REFERENCE].begin_pass(encoder, theme::VIEW_BG);
         if reference_shown {
             self.draw_reference(&mut pass);
+        }
+    }
+
+    /// Draws the sculpt view's clay (the timelapse's while it plays) into
+    /// `slot`, a target of `size` pixels, seen with `camera`; with `aids`,
+    /// also what the view draws over it: the wireframe and the ghost. The
+    /// screenshot draws it again, larger.
+    fn draw_sculpt(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        slot: Slot,
+        camera: &OrbitCamera,
+        size: [u32; 2],
+        aids: bool,
+    ) {
+        let aspect = size[0] as f32 / size[1].max(1) as f32;
+        self.clay
+            .prepare(&self.queue, slot, camera, aspect, &self.sculpt_look());
+        let mesh = self
+            .playback
+            .as_ref()
+            .map_or(&self.gpu_mesh, |p| &p.gpu_mesh);
+        self.clay.draw(pass, slot, mesh);
+        if aids {
+            self.draw_wireframe(pass, slot);
+            self.draw_ghost(pass, slot, camera, size);
         }
     }
 

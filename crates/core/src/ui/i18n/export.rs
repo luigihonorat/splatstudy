@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Strings for exporting the timelapse.
+//! Strings for exporting the timelapse, and screenshots.
 
 pub struct ExportTr {
     /// The export window's title.
@@ -69,6 +69,11 @@ pub struct ExportTr {
     pub made_with: &'static str,
     /// Before the file and the system's reason, when a save or write failed.
     pub write_failed: &'static str,
+    /// In the file → export menu: a picture of the views, as a PNG.
+    pub screenshot: &'static str,
+    /// Its first size: the views' proportions in the window.
+    pub as_on_screen: &'static str,
+    pub screenshot_saved: &'static str,
 }
 
 pub const JA: ExportTr = ExportTr {
@@ -114,6 +119,9 @@ pub const JA: ExportTr = ExportTr {
     zip_too_long: "画像の ZIP には長すぎます。速さを上げるか、短い長さを選んでください",
     made_with: "SplatStudy で制作",
     write_failed: "書き出せませんでした",
+    screenshot: "スクリーンショット",
+    as_on_screen: "画面のまま",
+    screenshot_saved: "スクリーンショットを保存しました",
 };
 
 pub const EN: ExportTr = ExportTr {
@@ -159,6 +167,9 @@ pub const EN: ExportTr = ExportTr {
     zip_too_long: "too long for a zip of images: choose a faster speed or a shorter length",
     made_with: "made with SplatStudy",
     write_failed: "couldn't write",
+    screenshot: "screenshot",
+    as_on_screen: "as on screen",
+    screenshot_saved: "screenshot saved",
 };
 
 pub const FR: ExportTr = ExportTr {
@@ -204,4 +215,7 @@ pub const FR: ExportTr = ExportTr {
     zip_too_long: "trop long pour un zip d'images : choisissez une vitesse plus rapide ou une durée plus courte",
     made_with: "fait avec SplatStudy",
     write_failed: "écriture impossible",
+    screenshot: "capture d'écran",
+    as_on_screen: "comme à l'écran",
+    screenshot_saved: "capture enregistrée",
 };

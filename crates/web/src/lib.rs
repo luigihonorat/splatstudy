@@ -355,10 +355,11 @@ fn listen(
                     events.push(InputEvent::Text(name.clone()));
                 }
                 // Keep the browser from acting on keys the app uses.
-                // Cmd/Ctrl+S, +Shift+S and +O are the app's save, save as
-                // and open, not the browser's.
+                // Cmd/Ctrl+S, +Shift+S, +O and +P are the app's save, save
+                // as, open and screenshot, not the browser's.
                 let command = if is_mac() { e.meta_key() } else { e.ctrl_key() };
-                let file_key = command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o");
+                let file_key =
+                    command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o" | "p");
                 // Space holds the tool pie: the page mustn't scroll or
                 // press a focused button with it, but a text field in the
                 // page keeps it for typing.
