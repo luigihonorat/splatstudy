@@ -46,6 +46,10 @@ pub(super) struct ReferenceState {
     mesh_pass: Option<ClayPass>,
     crop: CropSliders,
     image_view: ImageView,
+    /// Splats show only their base colour, the same from every side, even
+    /// when the file has view-dependent colour. Off by default; kept from
+    /// one reference to the next, not in the scene.
+    base_colour_only: bool,
 }
 
 enum Drawn {
@@ -405,6 +409,15 @@ impl App {
                 state.image_view = ImageView::default();
             }
         }
+        if let Content::Splats(splats) = &r.content
+            && splats.harmonics.degree > 0
+        {
+            ui.add_space(6.0);
+            let on = !state.base_colour_only;
+            if ui::choice(ui, tr.refs.view_dependent_colour, on).clicked() {
+                state.base_colour_only = on;
+            }
+        }
     }
 
     /// Which way is up, the turn about it, and fitting it to the clay.
@@ -724,7 +737,7 @@ impl App {
                     opacity,
                     flat,
                     over,
-                    ..Default::default()
+                    view_dependent: !self.reference.base_colour_only,
                 };
                 splats.prepare(&self.queue, slot, camera, size, &look);
                 splats.draw(pass, slot);

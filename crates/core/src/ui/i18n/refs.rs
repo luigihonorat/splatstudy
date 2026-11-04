@@ -35,6 +35,10 @@ pub struct RefTr {
     pub alignment: &'static str,
     /// The switch for the crop box, under the "crop" heading.
     pub crop_box: &'static str,
+    /// The switch for splat colours that change with the side they are
+    /// seen from (3DGS spherical harmonics); off shows each splat's base
+    /// colour from every side.
+    pub view_dependent_colour: &'static str,
 }
 
 pub const JA: RefTr = RefTr {
@@ -58,6 +62,7 @@ pub const JA: RefTr = RefTr {
     mesh_too_large: "メッシュが大きすぎて、この GPU では表示できません",
     alignment: "位置合わせ",
     crop_box: "切り抜き枠",
+    view_dependent_colour: "見る向きで変わる色",
 };
 
 pub const EN: RefTr = RefTr {
@@ -81,6 +86,7 @@ pub const EN: RefTr = RefTr {
     mesh_too_large: "this mesh is too large for this GPU",
     alignment: "alignment",
     crop_box: "crop box",
+    view_dependent_colour: "view-dependent colour",
 };
 
 pub const FR: RefTr = RefTr {
@@ -104,4 +110,5 @@ pub const FR: RefTr = RefTr {
     mesh_too_large: "ce maillage est trop grand pour ce GPU",
     alignment: "alignement",
     crop_box: "boîte de recadrage",
+    view_dependent_colour: "couleur selon l'angle de vue",
 };
