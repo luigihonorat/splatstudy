@@ -10,12 +10,12 @@ pub mod mp4;
 pub mod video;
 pub mod zip;
 
-pub use compositor::{Compositor, EndCard, Overlay};
+pub use compositor::{Compositor, EndCard, ImageFraming, Overlay, ViewOverlay};
 pub use job::{
     CameraMotion, Captions, DrawReference, Gpu, Job, Moment, Progress, Settings, Sink, Timeline,
     clock,
 };
-pub use layout::{Layout, Placement, PxRect, Shape, place};
+pub use layout::{Layout, Placement, PxRect, Shape, place, place_split};
 pub use video::{EncodedFrame, Support, VideoConfig, VideoEncoder};
 
 /// An RGBA8 frame as a PNG, without the alpha (frames are opaque).

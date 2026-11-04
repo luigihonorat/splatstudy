@@ -4,6 +4,7 @@
 
 pub mod flyout;
 pub mod fonts;
+pub mod guides;
 pub mod i18n;
 pub mod icons;
 pub mod menu;

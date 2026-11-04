@@ -7,7 +7,9 @@
 //! for looking at them.
 
 use splatstudy_core::camera::OrbitCamera;
-use splatstudy_core::export::{self, Compositor, EndCard, Layout, Overlay, Shape};
+use splatstudy_core::export::{
+    self, Compositor, EndCard, ImageFraming, Layout, Overlay, Shape, ViewOverlay, place_split,
+};
 use splatstudy_core::render::clay::{ClayPass, GpuMesh, Look};
 use splatstudy_core::render::{Slot, readback::Readback};
 use splatstudy_core::sculpt::Mesh;
@@ -58,15 +60,14 @@ fn compose(
     let mesh = GpuMesh::new(device, &Mesh::icosphere(3));
     let camera = OrbitCamera::default();
     let mut encoder = device.create_command_encoder(&Default::default());
-    let sculpt = compositor.sculpt_view();
-    clay.prepare(
-        queue,
-        Slot::ExportSculpt,
-        &camera,
-        sculpt.aspect(),
-        &Look::lit(CLAY),
-    );
-    {
+    if let Some(sculpt) = compositor.sculpt_view() {
+        clay.prepare(
+            queue,
+            Slot::ExportSculpt,
+            &camera,
+            sculpt.aspect(),
+            &Look::lit(CLAY),
+        );
         let mut pass = sculpt.begin_pass(&mut encoder, VIEW_BG);
         clay.draw(&mut pass, Slot::ExportSculpt, &mesh);
     }
@@ -161,13 +162,15 @@ fn every_shape_and_layout_composes() {
             );
             assert_eq!(frame.pixels.len(), (size[0] * size[1] * 4) as usize);
             let p = compositor.placement();
-            // The sculpt's centre shows clay.
-            let s = p.sculpt;
-            assert_ne!(
-                frame.at(s.x + s.w / 2, s.y + s.h / 2),
-                VIEW_BG.to_array(),
-                "{shape:?} {layout:?}"
-            );
+            // The sculpt's centre shows clay, and so does the reference's
+            // (drawn flat here).
+            for s in [p.sculpt, p.reference].into_iter().flatten() {
+                assert_ne!(
+                    frame.at(s.x + s.w / 2, s.y + s.h / 2),
+                    VIEW_BG.to_array(),
+                    "{shape:?} {layout:?}"
+                );
+            }
             frame.save(&format!("{shape:?}-{layout:?}.png"));
         }
     }
@@ -277,6 +280,119 @@ fn the_clock_and_the_title_go_in_their_corners() {
         brightest(&faded, title_x, title_y),
     );
     assert!(dim > 0 && dim < full / 2, "{dim} vs {full}");
+}
+
+#[test]
+fn a_screenshot_keeps_the_apps_split_order_mirror_and_guides() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping export test");
+        return;
+    };
+    let size = [1000, 500];
+    // The sculpt has 40% of the width, on the right: swapped.
+    let placement = place_split(size, Layout::SideBySide, 0.4, true);
+    let mut compositor = Compositor::placed(&device, size, placement);
+    let views = |credit| Overlay::Views {
+        credit,
+        clock: None,
+        title: None,
+    };
+    let plain = compose(&device, &queue, &mut compositor, &views(None));
+    compositor.set_overlays(
+        ViewOverlay {
+            mirror: true,
+            grid: Some(4),
+            plumb: None,
+        },
+        ViewOverlay {
+            mirror: false,
+            grid: None,
+            plumb: Some(0.25),
+        },
+    );
+    let marked = compose(&device, &queue, &mut compositor, &views(Some("credit")));
+    marked.save("screenshot.png");
+    let [w, h] = size;
+    // The rule after the reference's 60%, the clay right of it.
+    assert_eq!(frame_rule(&plain, h), Some(600));
+    assert_ne!(plain.at(800, h / 2), VIEW_BG.to_array());
+    // The grid's middle row across the sculpt, beside the clay; none on
+    // the reference.
+    let row = h / 2;
+    assert_eq!(plain.inked(605..640, row - 1..row + 2), 0);
+    assert!(marked.inked(605..640, row - 1..row + 2) >= 35);
+    assert!(marked.inked(w - 40..w, row - 1..row + 2) >= 40);
+    assert_eq!(marked.inked(10..140, row - 1..row + 2), 0);
+    // The plumb line a quarter across the reference, top to bottom.
+    assert!(marked.inked(148..152, 5..100) >= 95);
+    assert_eq!(plain.inked(148..152, 5..100), 0);
+    // The credit under the reference, which is on the left now.
+    assert!(marked.inked(10..200, h - 40..h - 15) > 20);
+    // A sphere looks the same mirrored: the clay itself is unchanged.
+    assert_eq!(plain.at(800, h / 3), marked.at(800, h / 3));
+}
+
+/// Where the 1px rule is along a row, if there is one.
+fn frame_rule(frame: &Frame, h: u32) -> Option<u32> {
+    let rule = theme::DARK.border.to_array();
+    (0..frame.size[0]).find(|&x| frame.at(x, h / 3) == rule && frame.at(x, 2 * h / 3) == rule)
+}
+
+#[test]
+fn a_reference_shown_only_as_the_ghost_is_credited_over_the_sculpt() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping export test");
+        return;
+    };
+    let size = [960, 540];
+    let mut compositor = Compositor::new(&device, size, Layout::SculptOnly);
+    let overlay = |credit| Overlay::Views {
+        credit,
+        clock: Some("1:00"),
+        title: None,
+    };
+    let plain = compose(&device, &queue, &mut compositor, &overlay(None));
+    let credited = compose(&device, &queue, &mut compositor, &overlay(Some("a credit")));
+    let [w, h] = size;
+    // In the bottom right corner, across from the clock.
+    assert_eq!(plain.inked(w - 200..w - 5, h - 40..h - 10), 0);
+    assert!(credited.inked(w - 200..w - 5, h - 40..h - 10) > 20);
+
+    // The reference alone has no sculpt to draw into.
+    let compositor = Compositor::new(&device, size, Layout::ReferenceOnly);
+    assert!(compositor.sculpt_view().is_none());
+    assert_eq!(compositor.reference_view().unwrap().size, size);
+}
+
+#[test]
+fn a_framed_picture_pans_and_zooms_as_in_its_view() {
+    let Some((device, queue)) = device() else {
+        eprintln!("no GPU adapter; skipping export test");
+        return;
+    };
+    let size = [1000, 500];
+    let mut compositor = Compositor::new(&device, size, Layout::ReferenceOnly);
+    // A white square on black, zoomed twice and moved right by half its
+    // fitted width: it fits 475 high, shows 950, centred at 500 + 237.5.
+    compositor.set_image(&splatstudy_core::reference::RefImage {
+        size: [1, 1],
+        rgba: vec![255, 255, 255, 255],
+    });
+    compositor.frame_image(ImageFraming {
+        offset: egui::vec2(0.5, 0.0),
+        zoom: 2.0,
+    });
+    let overlay = Overlay::Views {
+        credit: None,
+        clock: None,
+        title: None,
+    };
+    let frame = compose(&device, &queue, &mut compositor, &overlay);
+    frame.save("framed-picture.png");
+    let white = [255, 255, 255, 255];
+    assert_eq!(frame.at(300, 250), white);
+    assert_eq!(frame.at(990, 10), white);
+    assert_eq!(frame.at(250, 250), VIEW_BG.to_array());
 }
 
 mod job {

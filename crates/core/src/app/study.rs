@@ -15,7 +15,7 @@ use crate::reference::{Aabb, Alignment, Content};
 use crate::render::clay::{self, Lighting, Look, Overlap};
 use crate::render::readback::Readback;
 use crate::render::{Slot, ViewTarget};
-use crate::ui::{fonts, menu, theme};
+use crate::ui::{fonts, guides, menu, theme};
 
 /// Which views show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,18 +70,9 @@ pub(super) struct StudyState {
     pub(super) wireframe: bool,
 }
 
-/// The plumb line's bob: how high it hangs over the view's bottom edge,
-/// and how near it a press must land to take the line, in points.
-const BOB_LIFT: f32 = 32.0;
+/// How near the plumb line's bob a press must land to take the line, in
+/// points.
 const BOB_REACH: f32 = 9.0;
-
-/// Where the bob of a plumb line hanging at `share` of `rect`'s width is.
-fn bob(rect: Rect, share: f32) -> Pos2 {
-    pos2(
-        (rect.left() + share * rect.width()).round() + 0.5,
-        rect.bottom() - BOB_LIFT,
-    )
-}
 
 /// The proportion measure, as a pencil held at arm's length: a line
 /// dragged over each view, and the clay's length as a share of the
@@ -678,7 +669,7 @@ impl App {
     /// free to take it: the clay is not under it.
     fn on_bob(&self, rect: Rect, index: usize, screen: Pos2) -> bool {
         let plumb = self.study.views[index].plumb;
-        if !plumb || screen.distance(bob(rect, self.study.plumb_x[index])) > BOB_REACH {
+        if !plumb || screen.distance(guides::bob(rect, self.study.plumb_x[index])) > BOB_REACH {
             return false;
         }
         let sculpting = index == SCULPT && self.playback.is_none();
@@ -703,7 +694,7 @@ impl App {
             let painter = ui.painter().with_clip_rect(rect);
             let aids = self.study.views[index];
             if aids.grid {
-                paint_grid(&painter, rect, self.study.grid_divisions);
+                guides::grid(&painter, rect, self.study.grid_divisions);
             }
             if !aids.plumb {
                 continue;
@@ -719,12 +710,9 @@ impl App {
             if hovered || dragged {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
-            let bob = bob(rect, self.study.plumb_x[index]);
-            let line = Stroke::new(1.0, theme::GUIDE);
-            painter.vline(bob.x, rect.y_range(), line);
-            painter.circle_filled(bob, 3.5, theme::GUIDE);
+            let bob = guides::plumb_line(&painter, rect, self.study.plumb_x[index]);
             if hovered || dragged {
-                painter.circle_stroke(bob, 7.0, line);
+                painter.circle_stroke(bob, 7.0, Stroke::new(1.0, theme::GUIDE));
             }
         }
         self.measure_ui(ui, rects, pointer, held);
@@ -1086,26 +1074,6 @@ impl App {
     }
 }
 
-/// `divisions` rows of square cells, with the columns laid out from the
-/// view's centre so a line or a cell's middle falls on it, as on the rows.
-fn paint_grid(painter: &egui::Painter, rect: Rect, divisions: u32) {
-    let stroke = Stroke::new(1.0, theme::GUIDE.gamma_multiply(0.45));
-    let n = divisions.max(1);
-    let cell = rect.height() / n as f32;
-    for k in 1..n {
-        let y = (rect.top() + k as f32 * cell).round() + 0.5;
-        painter.hline(rect.x_range(), y, stroke);
-    }
-    let offset = if n.is_multiple_of(2) { 0.0 } else { 0.5 };
-    let reach = (rect.width() / 2.0 / cell).ceil() as i32 + 1;
-    for k in -reach..=reach {
-        let x = rect.center().x + (k as f32 + offset) * cell;
-        if x > rect.left() + 0.5 && x < rect.right() - 0.5 {
-            painter.vline(x.round() + 0.5, rect.y_range(), stroke);
-        }
-    }
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -1268,7 +1236,7 @@ pub(super) mod tests {
         };
 
         // Off the clay, the bob takes the line along.
-        let start = bob(rect, 0.5);
+        let start = guides::bob(rect, 0.5);
         h.drag(start, start + egui::vec2(80.0, -40.0));
         let moved = h.app.study.plumb_x[SCULPT];
         let expected = (start.x + 80.0 - rect.left()) / rect.width();
@@ -1276,7 +1244,7 @@ pub(super) mod tests {
         assert_eq!(strokes(&h), 0);
 
         // Pressing the line itself, away from the bob, does not move it.
-        let x = bob(rect, moved).x;
+        let x = guides::bob(rect, moved).x;
         h.drag(
             pos2(x, rect.top() + 60.0),
             pos2(x + 50.0, rect.top() + 60.0),

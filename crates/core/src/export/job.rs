@@ -465,16 +465,15 @@ impl Job {
             if settings.turn_reference {
                 cameras[1].yaw += turn;
             }
-            let view = self.compositor.sculpt_view();
-            let camera = fit_camera(&cameras[0], view.aspect());
-            gpu.clay.prepare(
-                gpu.queue,
-                Slot::ExportSculpt,
-                &camera,
-                view.aspect(),
-                &settings.look,
-            );
-            {
+            if let Some(view) = self.compositor.sculpt_view() {
+                let camera = fit_camera(&cameras[0], view.aspect());
+                gpu.clay.prepare(
+                    gpu.queue,
+                    Slot::ExportSculpt,
+                    &camera,
+                    view.aspect(),
+                    &settings.look,
+                );
                 let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
                 gpu.clay.draw(&mut pass, Slot::ExportSculpt, &self.gpu_mesh);
                 if settings.ghost {
@@ -496,8 +495,11 @@ impl Job {
                 let left = 1.0 - (seconds - TITLE_SECONDS) / TITLE_FADE_SECONDS;
                 (left > 0.0).then_some((title, left.min(1.0) as f32))
             });
+            // Credited wherever the reference shows: in its half, or as
+            // the ghost over the sculpt.
+            let credited = settings.layout.shows_reference() || settings.ghost;
             Overlay::Views {
-                credit: self.captions.credit.as_deref(),
+                credit: self.captions.credit.as_deref().filter(|_| credited),
                 clock: elapsed.as_deref(),
                 title,
             }

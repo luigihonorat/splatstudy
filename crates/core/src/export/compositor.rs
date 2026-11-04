@@ -8,13 +8,17 @@
 //! Each frame: draw into [`Compositor::sculpt_view`] and
 //! [`Compositor::reference_view`], call [`Compositor::compose`], then read
 //! [`Compositor::output`] back with [`Readback`](crate::render::readback::Readback).
+//!
+//! A screenshot is one such frame, with what the app draws over each view
+//! ([`ViewOverlay`]: the mirror, the grid, the plumb line) and a picture
+//! reference panned and zoomed as in its view ([`Compositor::frame_image`]).
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, TextureId, vec2};
 
 use super::layout::{Layout, Placement, PxRect, place};
 use crate::reference::RefImage;
 use crate::render::{self, VIEW_FORMAT, ViewTarget};
-use crate::ui::{fonts, theme};
+use crate::ui::{fonts, guides, theme};
 
 /// The interface is laid out as if the frame were this many points on its
 /// short side, so text has the same size in every frame shape.
@@ -44,6 +48,30 @@ pub enum Overlay<'a> {
     EndCard(&'a EndCard),
 }
 
+/// What the app draws over one view, for a screenshot. Videos leave it
+/// all off.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewOverlay {
+    /// The view flipped left to right; the guides are not.
+    pub mirror: bool,
+    /// The grid's rows, when it shows.
+    pub grid: Option<u32>,
+    /// Where the plumb line hangs, as a share of the view's width.
+    pub plumb: Option<f32>,
+}
+
+/// How the reference view pans and zooms a picture: its centre moved off
+/// the view's centre by `offset` times the size at which it fits the view,
+/// and shown `zoom` times that size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageFraming {
+    pub offset: egui::Vec2,
+    pub zoom: f32,
+}
+
+/// The share of a view a picture fills when it fits, as in the app.
+pub const IMAGE_FIT: f32 = 0.95;
+
 /// The closing card: what was studied and who made it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EndCard {
@@ -60,19 +88,30 @@ pub struct Compositor {
     size: [u32; 2],
     ppp: f32,
     placement: Placement,
-    sculpt: ViewTarget,
+    sculpt: Option<ViewTarget>,
     reference: Option<ViewTarget>,
-    sculpt_texture: TextureId,
+    sculpt_texture: Option<TextureId>,
     reference_texture: Option<TextureId>,
     output: ViewTarget,
     /// A picture shown in the reference half instead of its view.
     image: Option<egui::TextureHandle>,
+    /// The picture as the reference view frames it; without, it fits
+    /// inside the half.
+    framing: Option<ImageFraming>,
+    /// Over the sculpt, then over the reference.
+    overlays: [ViewOverlay; 2],
     frames: u64,
 }
 
 impl Compositor {
     /// A compositor for `size` frames split by `layout`.
     pub fn new(device: &wgpu::Device, size: [u32; 2], layout: Layout) -> Self {
+        Self::placed(device, size, place(size, layout))
+    }
+
+    /// A compositor for `size` frames with the views where `placement`
+    /// puts them.
+    pub fn placed(device: &wgpu::Device, size: [u32; 2], placement: Placement) -> Self {
         let ctx = egui::Context::default();
         ctx.set_fonts(fonts::definitions());
         theme::apply(&ctx, theme::ThemeMode::Dark);
@@ -85,18 +124,19 @@ impl Compositor {
                 ..Default::default()
             },
         );
-        let placement = place(size, layout);
-        let sculpt = ViewTarget::new(device, placement.sculpt.size());
+        let sculpt = placement
+            .sculpt
+            .map(|rect| ViewTarget::new(device, rect.size()));
         let reference = placement
             .reference
             .map(|rect| ViewTarget::new(device, rect.size()));
         // Views are drawn pixel for pixel, so nearest is exact.
         let filter = wgpu::FilterMode::Nearest;
-        let sculpt_texture =
-            renderer.register_native_texture(device, &sculpt.resolved_view, filter);
-        let reference_texture = reference
-            .as_ref()
-            .map(|r| renderer.register_native_texture(device, &r.resolved_view, filter));
+        let mut register = |target: &ViewTarget| {
+            renderer.register_native_texture(device, &target.resolved_view, filter)
+        };
+        let sculpt_texture = sculpt.as_ref().map(&mut register);
+        let reference_texture = reference.as_ref().map(&mut register);
         Self {
             ctx,
             renderer,
@@ -109,6 +149,8 @@ impl Compositor {
             reference_texture,
             output: output_target(device, size),
             image: None,
+            framing: None,
+            overlays: [ViewOverlay::default(); 2],
             frames: 0,
         }
     }
@@ -135,9 +177,20 @@ impl Compositor {
         );
     }
 
-    /// Where the sculpt is drawn, before [`compose`](Self::compose).
-    pub fn sculpt_view(&self) -> &ViewTarget {
-        &self.sculpt
+    /// Pans and zooms the picture as the reference view shows it.
+    pub fn frame_image(&mut self, framing: ImageFraming) {
+        self.framing = Some(framing);
+    }
+
+    /// What is drawn over the sculpt and over the reference.
+    pub fn set_overlays(&mut self, sculpt: ViewOverlay, reference: ViewOverlay) {
+        self.overlays = [sculpt, reference];
+    }
+
+    /// Where the sculpt is drawn, before [`compose`](Self::compose);
+    /// `None` when the layout leaves it out.
+    pub fn sculpt_view(&self) -> Option<&ViewTarget> {
+        self.sculpt.as_ref()
     }
 
     /// Where the reference is drawn; `None` when the layout leaves it out.
@@ -185,6 +238,7 @@ impl Compositor {
         let placement = self.placement;
         let textures = (self.sculpt_texture, self.reference_texture);
         let image = self.image.as_ref().map(|i| (i.id(), i.size_vec2()));
+        let (framing, [sculpt_overlay, reference_overlay]) = (self.framing, self.overlays);
         let ctx = self.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| {
             let painter = ui.painter();
@@ -195,28 +249,45 @@ impl Compositor {
                     clock,
                     title,
                 } => {
-                    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                    painter.image(textures.0, to_points(placement.sculpt), uv, Color32::WHITE);
+                    let sculpt = placement.sculpt.map(to_points);
+                    if let (Some(rect), Some(texture)) = (sculpt, textures.0) {
+                        let uv = uv(sculpt_overlay.mirror);
+                        painter.image(texture, rect, uv, Color32::WHITE);
+                        view_guides(painter, rect, &sculpt_overlay);
+                    }
+                    let credit = credit.filter(|c| !c.is_empty());
                     if let (Some(rect), Some(texture)) = (placement.reference, textures.1) {
                         let rect = to_points(rect);
-                        match image {
-                            Some((id, size)) => {
+                        let uv = uv(reference_overlay.mirror);
+                        match (image, framing) {
+                            (Some((id, size)), Some(framing)) => {
+                                let shown = framed(size, rect, framing);
+                                painter
+                                    .with_clip_rect(rect)
+                                    .image(id, shown, uv, Color32::WHITE);
+                            }
+                            (Some((id, size)), None) => {
                                 let fitted = fit(size, rect.shrink(CREDIT_MARGIN.x));
                                 painter.image(id, fitted, uv, Color32::WHITE);
                             }
-                            None => {
+                            (None, _) => {
                                 painter.image(texture, rect, uv, Color32::WHITE);
                             }
                         }
-                        if let Some(credit) = credit.filter(|c| !c.is_empty()) {
-                            credit_line(painter, rect, credit);
+                        view_guides(painter, rect, &reference_overlay);
+                        if let Some(credit) = credit {
+                            credit_line(painter, rect, credit, Align2::LEFT_BOTTOM);
                         }
+                    } else if let (Some(rect), Some(credit)) = (sculpt, credit) {
+                        // The reference is in the picture only over the
+                        // sculpt, as its ghost: credited there, across from
+                        // the clock.
+                        credit_line(painter, rect, credit, Align2::RIGHT_BOTTOM);
                     }
                     if let Some(divider) = placement.divider {
                         painter.rect_filled(to_points(divider), 0.0, theme::DARK.border);
                     }
-                    if let Some(clock) = clock {
-                        let rect = to_points(placement.sculpt);
+                    if let (Some(clock), Some(rect)) = (clock, sculpt) {
                         painter.with_clip_rect(rect).text(
                             rect.left_bottom() + vec2(CREDIT_MARGIN.x, -CREDIT_MARGIN.y),
                             Align2::LEFT_BOTTOM,
@@ -284,12 +355,50 @@ fn fit(size: egui::Vec2, rect: Rect) -> Rect {
     Rect::from_center_size(rect.center(), size * scale)
 }
 
-/// The credit along the bottom of the reference view, clipped to it.
-fn credit_line(painter: &egui::Painter, rect: Rect, credit: &str) {
+/// The texture coordinates of a view, flipped left to right in the
+/// mirror view.
+fn uv(mirror: bool) -> Rect {
+    if mirror {
+        Rect::from_min_max(Pos2::new(1.0, 0.0), Pos2::new(0.0, 1.0))
+    } else {
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+    }
+}
+
+/// Where a picture of `size` shows in `rect`, framed as in its view.
+fn framed(size: egui::Vec2, rect: Rect, framing: ImageFraming) -> Rect {
+    let fit = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0)) * IMAGE_FIT;
+    let fitted = size * fit;
+    Rect::from_center_size(
+        rect.center() + framing.offset * fitted,
+        fitted * framing.zoom,
+    )
+}
+
+/// The grid and the plumb line over a view, clipped to it.
+fn view_guides(painter: &egui::Painter, rect: Rect, overlay: &ViewOverlay) {
+    let painter = painter.with_clip_rect(rect);
+    if let Some(rows) = overlay.grid {
+        guides::grid(&painter, rect, rows);
+    }
+    if let Some(share) = overlay.plumb {
+        guides::plumb_line(&painter, rect, share);
+    }
+}
+
+/// The credit along the bottom of a view, in the corner `align` names
+/// (left or right bottom), clipped to it.
+fn credit_line(painter: &egui::Painter, rect: Rect, credit: &str, align: Align2) {
     let font = fonts::regular(CREDIT_SIZE);
     let wrap = rect.width() - 2.0 * CREDIT_MARGIN.x;
     let galley = painter.layout(credit.to_owned(), font, theme::VIEW_TEXT, wrap.max(10.0));
-    let at = rect.left_bottom() + vec2(CREDIT_MARGIN.x, -CREDIT_MARGIN.y - galley.size().y);
+    let size = galley.size();
+    let x = if align == Align2::RIGHT_BOTTOM {
+        rect.right() - CREDIT_MARGIN.x - size.x
+    } else {
+        rect.left() + CREDIT_MARGIN.x
+    };
+    let at = Pos2::new(x, rect.bottom() - CREDIT_MARGIN.y - size.y);
     painter
         .with_clip_rect(rect)
         .galley(at, galley, theme::VIEW_TEXT);
