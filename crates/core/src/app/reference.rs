@@ -724,6 +724,7 @@ impl App {
                     opacity,
                     flat,
                     over,
+                    ..Default::default()
                 };
                 splats.prepare(&self.queue, slot, camera, size, &look);
                 splats.draw(pass, slot);

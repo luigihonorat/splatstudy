@@ -74,6 +74,7 @@ fn render(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> Vec<u8> 
             opacity: scene.opacity,
             flat: scene.flat,
             over: scene.over,
+            view_dependent: true,
         },
     );
     let clay = ClayPass::new(device);

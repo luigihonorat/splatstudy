@@ -3,9 +3,10 @@
 //! Draws Gaussian splats into a view, in the same multisampled pass as the
 //! clay so the clay hides what is behind it.
 //!
-//! The splats live in storage buffers (centre, 3D covariance, colour); each
-//! is drawn as an instanced 4-vertex quad that the vertex shader shapes by
-//! EWA projection (see `splat.wgsl`). Blending needs them back to front,
+//! The splats live in storage buffers (centre, 3D covariance, colour, and
+//! the view-dependent colour as [`Harmonics`] packs it); each is drawn as
+//! an instanced 4-vertex quad that the vertex shader shapes by EWA
+//! projection and colours for the side it is seen from (see `splat.wgsl`). Blending needs them back to front,
 //! so they are sorted by view depth with a 16-bit counting sort: in
 //! compute shaders (`splat_sort.wgsl`), or on the CPU where those don't
 //! run; and only again once the view has turned past a small angle.
@@ -31,7 +32,7 @@ use wgpu::util::DeviceExt;
 use super::{DEPTH_FORMAT, SAMPLES, Slot, VIEW_FORMAT};
 use crate::camera::OrbitCamera;
 use crate::reference::fit::percentile_box;
-use crate::reference::{Aabb, Splats};
+use crate::reference::{Aabb, Harmonics, Splats};
 use crate::ui::theme::SILHOUETTE_INK;
 
 #[repr(C)]
@@ -45,6 +46,10 @@ struct Uniforms {
     crop_max: [f32; 4],
     flat_colour: [f32; 4],
     params: [f32; 4],
+    /// Where the view comes from in file coordinates (the eye, or the
+    /// direction an orthographic view looks along), and the degree of
+    /// view-dependent colour to add.
+    sh: [f32; 4],
 }
 
 /// What the GPU sort needs, as `Params` in `splat_sort.wgsl`.
@@ -152,6 +157,10 @@ pub struct SplatLook {
     /// pass gets that target at `opacity`, so where splats overlap the
     /// ghost is no stronger than where one splat covers.
     pub over: bool,
+    /// Colours change with the side they are seen from, when the file has
+    /// view-dependent colour; otherwise every splat shows its base colour.
+    /// Ignored when `flat`.
+    pub view_dependent: bool,
 }
 
 impl Default for SplatLook {
@@ -160,6 +169,7 @@ impl Default for SplatLook {
             opacity: 1.0,
             flat: false,
             over: false,
+            view_dependent: true,
         }
     }
 }
@@ -193,6 +203,11 @@ pub struct SplatPass {
     positions: wgpu::Buffer,
     covariances: wgpu::Buffer,
     colours: wgpu::Buffer,
+    /// The view-dependent colour, packed; one word when there is none.
+    harmonics: wgpu::Buffer,
+    /// The view-dependent colour's degree on the GPU: the file's, or lower
+    /// when its buffer would be larger than the GPU allows.
+    sh_degree: u8,
     /// Centres in file coordinates, for sorting.
     centres: Vec<Vec3>,
     /// Where nearly all centres lie, in file coordinates. The sort's
@@ -241,17 +256,41 @@ impl SplatPass {
         let fits = (largest / 24).max(1) as usize;
         let step = n.div_ceil(fits);
         let kept = n.div_ceil(step);
+        // The view-dependent colour's higher degrees go first when its
+        // buffer would be too large: degree 1 always fits.
+        let mut sh_degree = if splats.harmonics.len() == n {
+            splats.harmonics.degree
+        } else {
+            0
+        };
+        while sh_degree > 1 && (kept * Harmonics::words_per_splat(sh_degree) * 4) as u64 > largest {
+            sh_degree -= 1;
+        }
+        if sh_degree < splats.harmonics.degree {
+            log::warn!(
+                "view-dependent colour of degree {} kept to degree {sh_degree}",
+                splats.harmonics.degree
+            );
+        }
 
         let mut positions = Vec::with_capacity(kept * 3);
         let mut covariances = Vec::with_capacity(kept * 6);
         let mut colours = Vec::with_capacity(kept);
         let mut centres = Vec::with_capacity(kept);
+        let mut harmonics = Vec::with_capacity(kept * Harmonics::words_per_splat(sh_degree));
         for i in (0..n).step_by(step) {
             let p = splats.positions[i];
             centres.push(p);
             positions.extend_from_slice(&p.to_array());
             covariances.extend_from_slice(&covariance(splats.scales[i], splats.rotations[i]));
             colours.push(u32::from_le_bytes(splats.colors[i]));
+            if sh_degree > 0 {
+                splats.harmonics.push_splat_at(i, sh_degree, &mut harmonics);
+            }
+        }
+        if harmonics.is_empty() {
+            // Bound but never read.
+            harmonics.push(0);
         }
         let storage = |label, contents: &[u8]| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -263,6 +302,7 @@ impl SplatPass {
         let positions = storage("splat positions", bytemuck::cast_slice(&positions));
         let covariances = storage("splat covariances", bytemuck::cast_slice(&covariances));
         let colours = storage("splat colours", bytemuck::cast_slice(&colours));
+        let harmonics = storage("splat harmonics", bytemuck::cast_slice(&harmonics));
         let depth_box = percentile_box(&centres, 0.01, 0.99)
             .map(|b| b.grown(0.5))
             .unwrap_or(Aabb {
@@ -292,6 +332,7 @@ impl SplatPass {
                 buffer_entry(2, vertex, read_only),
                 buffer_entry(3, vertex, read_only),
                 buffer_entry(4, vertex, read_only),
+                buffer_entry(6, vertex, read_only),
             ],
         });
         let layer_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -389,6 +430,8 @@ impl SplatPass {
             positions,
             covariances,
             colours,
+            harmonics,
+            sh_degree,
             centres,
             depth_box,
             placement: Cell::new((Mat4::IDENTITY, None)),
@@ -406,6 +449,24 @@ impl SplatPass {
 
     pub fn is_empty(&self) -> bool {
         self.centres.is_empty()
+    }
+
+    /// The degree of view-dependent colour drawn: 0 when there is none.
+    pub fn view_dependent_degree(&self) -> u8 {
+        self.sh_degree
+    }
+
+    /// The bytes the splats take on the GPU, besides each slot's order.
+    pub fn gpu_bytes(&self) -> u64 {
+        [
+            &self.positions,
+            &self.covariances,
+            &self.colours,
+            &self.harmonics,
+        ]
+        .iter()
+        .map(|b| b.size())
+        .sum()
     }
 
     /// The slot was prepared at least once.
@@ -470,6 +531,21 @@ impl SplatPass {
         } else {
             (opacity, 1.0)
         };
+        // The view direction in the file's own coordinates, where the
+        // harmonics were fitted: the alignment (up axis, turn) undone.
+        let to_file = model.inverse();
+        let from = if camera.ortho {
+            to_file
+                .transform_vector3(camera.target - camera.eye())
+                .normalize_or_zero()
+        } else {
+            to_file.transform_point3(camera.eye())
+        };
+        let sh_degree = if look.view_dependent && !look.flat && from.is_finite() {
+            self.sh_degree
+        } else {
+            0
+        };
         let uniforms = Uniforms {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
@@ -484,6 +560,7 @@ impl SplatPass {
                 layer_opacity,
                 if camera.ortho { 1.0 } else { 0.0 },
             ],
+            sh: from.extend(f32::from(sh_degree)).to_array(),
         };
 
         let mut cell = self.slots[slot.index()].borrow_mut();
@@ -654,6 +731,10 @@ impl SplatPass {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: order.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.harmonics.as_entire_binding(),
                 },
             ],
         });
@@ -918,8 +999,8 @@ mod tests {
         };
         let ghost = SplatLook {
             opacity: 0.5,
-            flat: false,
             over: true,
+            ..Default::default()
         };
         for sort in [SortOn::Gpu, SortOn::Cpu] {
             let pass = SplatPass::sorting_on(&device, &splats, sort).expect("splats");

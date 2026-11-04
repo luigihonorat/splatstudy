@@ -9,6 +9,11 @@
 // it out with exp(-r²/2). Splats come back to front (sorted by
 // `splat_sort.wgsl`, or on the CPU), premultiplied, over whatever the pass
 // already holds; depth is tested against the clay but not written.
+//
+// A splat's colour can change with the side it is seen from: spherical
+// harmonics of degree 1 to 3 over its base colour, evaluated per splat in
+// the vertex shader as 3DGS does (`Harmonics` in `reference/harmonics.rs`
+// packs them).
 
 struct Uniforms {
     view: mat4x4<f32>,
@@ -25,6 +30,10 @@ struct Uniforms {
     // x: each splat's opacity, y: flat, z: the ghost layer's opacity,
     // w: orthographic.
     params: vec4<f32>,
+    // The view-dependent colour. xyz: where the view comes from, in file
+    // coordinates: the eye, or in an orthographic view the direction it
+    // looks along. w: the degree to add, 0 for none.
+    sh: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -36,6 +45,11 @@ struct Uniforms {
 @group(0) @binding(3) var<storage, read> colours: array<u32>;
 // Splat indices, back to front.
 @group(0) @binding(4) var<storage, read> order: array<u32>;
+// The view-dependent colour, packed: 4, 8 or 13 words per splat for
+// degree 1, 2 or 3 (one word when there is none). Signed bytes scaled by
+// a half float in the top of each splat's last word: the base colour's
+// residual, then each coefficient's red, green and blue.
+@group(0) @binding(6) var<storage, read> harmonics: array<u32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -46,6 +60,63 @@ struct VsOut {
 
 /// Splats are never larger than this many pixels across their main axis.
 const MAX_RADIUS: f32 = 2048.0;
+
+const SH_C1: f32 = 0.4886025;
+const SH_C2 = array<f32, 5>(1.0925484, -1.0925484, 0.31539157, -1.0925484, 0.5462742);
+const SH_C3 = array<f32, 7>(
+    -0.5900436, 2.8906114, -0.4570458, 0.37317634, -0.4570458, 1.4453057, -0.5900436,
+);
+
+// Four byte triplets from three packed words starting at `at`.
+fn triplets(at: u32) -> array<vec3<f32>, 4> {
+    let a = unpack4x8snorm(harmonics[at]);
+    let b = unpack4x8snorm(harmonics[at + 1u]);
+    let c = unpack4x8snorm(harmonics[at + 2u]);
+    return array<vec3<f32>, 4>(a.xyz, vec3<f32>(a.w, b.xy), vec3<f32>(b.zw, c.x), c.yzw);
+}
+
+// What splat i's colour gains seen along unit `dir` (from the eye to the
+// splat, in file coordinates), with harmonics up to `degree`: the
+// residual the base colour lost to its byte, and the higher terms.
+fn view_dependent(i: u32, degree: u32, dir: vec3<f32>) -> vec3<f32> {
+    var words = 4u;
+    if degree == 2u {
+        words = 8u;
+    } else if degree == 3u {
+        words = 13u;
+    }
+    let at = i * words;
+    let scale = unpack2x16float(harmonics[at + words - 1u]).y;
+    let x = dir.x;
+    let y = dir.y;
+    let z = dir.z;
+    let t0 = triplets(at);
+    var sum = t0[0] + SH_C1 * (-y * t0[1] + z * t0[2] - x * t0[3]);
+    if degree >= 2u {
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let t1 = triplets(at + 3u);
+        let t8 = unpack4x8snorm(harmonics[at + 6u]).xyz;
+        sum += SH_C2[0] * x * y * t1[0]
+            + SH_C2[1] * y * z * t1[1]
+            + SH_C2[2] * (2.0 * zz - xx - yy) * t1[2]
+            + SH_C2[3] * x * z * t1[3]
+            + SH_C2[4] * (xx - yy) * t8;
+        if degree >= 3u {
+            let t2 = triplets(at + 6u);
+            let t3 = triplets(at + 9u);
+            sum += SH_C3[0] * y * (3.0 * xx - yy) * t2[1]
+                + SH_C3[1] * x * y * z * t2[2]
+                + SH_C3[2] * y * (4.0 * zz - xx - yy) * t2[3]
+                + SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * t3[0]
+                + SH_C3[4] * x * (4.0 * zz - xx - yy) * t3[1]
+                + SH_C3[5] * z * (xx - yy) * t3[2]
+                + SH_C3[6] * x * (xx - 3.0 * yy) * t3[3];
+        }
+    }
+    return sum * scale;
+}
 
 @vertex
 fn vs(@builtin(vertex_index) corner_index: u32, @builtin(instance_index) n: u32) -> VsOut {
@@ -130,6 +201,18 @@ fn vs(@builtin(vertex_index) corner_index: u32, @builtin(instance_index) n: u32)
     out.clip = vec4<f32>(ndc.xy + offset * 2.0 / size, ndc.z, 1.0);
     out.local = corner * vec2<f32>(r1 / sqrt(l1), r2 / sqrt(l2));
     out.colour = unpack4x8unorm(colours[i]);
+    let degree = u32(u.sh.w + 0.5);
+    if degree > 0u {
+        var dir = u.sh.xyz;
+        if !ortho {
+            dir = p - u.sh.xyz;
+        }
+        if dot(dir, dir) > 0.0 {
+            // Like 3DGS: 0.5 + the sum, never below black.
+            let rgb = out.colour.rgb + view_dependent(i, degree, normalize(dir));
+            out.colour = vec4<f32>(max(rgb, vec3<f32>(0.0)), out.colour.a);
+        }
+    }
     return out;
 }
 

@@ -250,11 +250,7 @@ fn render_splat(
     let target = ViewTarget::new(device, [SPLAT_SIZE, SPLAT_SIZE]);
     let pass = SplatPass::sorting_on(device, &splats, SortOn::Cpu).expect("splats");
     pass.set_placement(glam::Mat4::IDENTITY, None);
-    let look = SplatLook {
-        opacity: 1.0,
-        flat: false,
-        over: false,
-    };
+    let look = SplatLook::default();
     pass.prepare(queue, Slot::ReferenceView, camera, target.size, &look);
     let mut encoder = device.create_command_encoder(&Default::default());
     {
