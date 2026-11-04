@@ -10,6 +10,7 @@
 use egui::{Color32, CursorIcon, Rect, RectAlign, RichText, Sense, pos2, vec2};
 
 use super::sculpting::{BRUSHES, brush_icon, brush_keys, brush_name};
+use super::study::Layout;
 use super::views::shown;
 use super::{App, REFERENCE, SCULPT};
 use crate::reference::Content;
@@ -78,6 +79,16 @@ impl ViewOption {
             Reset => "Home",
             Panels => "Tab",
         }
+    }
+
+    /// Whether each view has this of its own, so that Shift + click can
+    /// give both views the same.
+    pub(super) fn per_view(self) -> bool {
+        use ViewOption::*;
+        matches!(
+            self,
+            Perspective | Lighting | Grid | Plumb | Silhouette | Mirror | Frame | Reset
+        )
     }
 
     /// The name, as menus and tooltips show it, for view `index`.
@@ -314,6 +325,32 @@ impl App {
         self.dirty = true;
     }
 
+    /// Switches `option` in view `index`, or does it, and does the same in
+    /// the other view if it has the option too: Shift + click on a toolbar
+    /// button.
+    pub(super) fn apply_to_both(&mut self, option: ViewOption, index: usize) {
+        use ViewOption::*;
+        self.apply(option, index);
+        let other = if index == SCULPT { REFERENCE } else { SCULPT };
+        if !groups(other, self.reference_kind())
+            .concat()
+            .contains(&option)
+        {
+            return;
+        }
+        let (from, to) = (self.study.views[index], &mut self.study.views[other]);
+        match option {
+            Perspective => self.cameras[other].ortho = self.cameras[index].ortho,
+            Lighting => to.lighting = from.lighting,
+            Grid => to.grid = from.grid,
+            Plumb => to.plumb = from.plumb,
+            Silhouette => to.silhouette = from.silhouette,
+            Mirror => to.mirror = from.mirror,
+            Frame | Reset => self.apply(option, other),
+            _ => {}
+        }
+    }
+
     /// Each shown view's toolbar, as this frame lays them out in `rects`.
     pub(super) fn toolbar_layouts(&self, rects: [Rect; 2]) -> [Option<Toolbar>; 2] {
         let kind = self.reference_kind();
@@ -447,8 +484,15 @@ impl App {
             }
             flyout::Outcome::Closed => self.flyout = None,
             flyout::Outcome::Picked(k) => {
+                // Shift + click lights both views alike.
+                let both = ui.input(|i| i.modifiers.shift);
                 match option {
                     ViewOption::Tool => self.tool.tool = BRUSHES[k].0,
+                    _ if both => {
+                        for aids in &mut self.study.views {
+                            aids.lighting = Light::ALL[k];
+                        }
+                    }
                     _ => self.study.views[index].lighting = Light::ALL[k],
                 }
                 self.flyout = None;
@@ -497,8 +541,11 @@ impl App {
                 };
                 option.icon(&painter, button, colour, shows);
                 if response.clicked() {
+                    let both = option.per_view() && ui.input(|i| i.modifiers.shift);
                     if option.has_flyout() {
                         self.toggle_flyout(option, index);
+                    } else if both {
+                        self.apply_to_both(option, index);
                     } else {
                         self.apply(option, index);
                     }
@@ -534,12 +581,14 @@ impl App {
                         ui.label(RichText::new(label).font(fonts::regular(13.0)));
                         ui.label(RichText::new(keys).font(fonts::regular(13.0)).color(muted));
                     });
-                    if option == ViewOption::Tool {
-                        ui.label(
-                            RichText::new(tr.mesh.tool_pie_hint)
-                                .font(fonts::regular(13.0))
-                                .color(muted),
-                        );
+                    let hint = if option == ViewOption::Tool {
+                        Some(tr.mesh.tool_pie_hint)
+                    } else {
+                        (option.per_view() && self.study.layout == Layout::Both)
+                            .then_some(tr.study.both_views_hint)
+                    };
+                    if let Some(hint) = hint {
+                        ui.label(RichText::new(hint).font(fonts::regular(13.0)).color(muted));
                     }
                 });
             }
@@ -710,6 +759,59 @@ mod tests {
         let panel = h.app.flyout.clone().unwrap().panel;
         assert!(panel.right() < button.left());
         assert!(h.app.view_rects[SCULPT].contains_rect(panel));
+    }
+
+    #[test]
+    fn shift_click_switches_an_aid_in_both_views() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let shift = |h: &mut Harness, held: bool| {
+            h.app
+                .push_event(crate::InputEvent::Modifiers(crate::input::Modifiers {
+                    shift: held,
+                    ..Default::default()
+                }));
+        };
+        let press = |h: &mut Harness, option, index| {
+            let at = button_of(h, option, index).center();
+            click(h, at);
+        };
+        let views = |h: &Harness| h.app.study.views.map(|v| (v.grid, v.silhouette));
+
+        shift(&mut h, true);
+        press(&mut h, ViewOption::Grid, SCULPT);
+        assert_eq!(views(&h), [(true, false); 2]);
+        press(&mut h, ViewOption::Silhouette, REFERENCE);
+        assert_eq!(views(&h), [(true, true); 2]);
+        // Both ortho, then both perspective again from either side.
+        press(&mut h, ViewOption::Perspective, SCULPT);
+        assert!(h.app.cameras.iter().all(|c| c.ortho));
+        // Already on in one view and off in the other: both take the
+        // clicked view's new state.
+        h.app.cameras[SCULPT].ortho = false;
+        press(&mut h, ViewOption::Perspective, REFERENCE);
+        assert!(h.app.cameras.iter().all(|c| !c.ortho));
+
+        // A plain click switches its own view only.
+        shift(&mut h, false);
+        press(&mut h, ViewOption::Grid, REFERENCE);
+        assert_eq!(views(&h), [(true, true), (false, true)]);
+
+        // Shift + a lighting lights both views.
+        press(&mut h, ViewOption::Lighting, SCULPT);
+        h.frames(1);
+        let rows = h.app.flyout.clone().unwrap().rows;
+        shift(&mut h, true);
+        click(&mut h, rows[2].center());
+        assert!(
+            h.app
+                .study
+                .views
+                .iter()
+                .all(|v| v.lighting == Light::ALL[2])
+        );
     }
 
     #[test]

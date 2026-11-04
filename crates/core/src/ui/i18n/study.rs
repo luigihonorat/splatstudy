@@ -52,6 +52,9 @@ pub struct StudyTr {
     /// Under the shortcuts: what Tab does after Shift+Tab, and in a text
     /// field.
     pub panels_note: &'static str,
+    /// Under a toolbar button's tooltip: Shift + click does the same in
+    /// both views.
+    pub both_views_hint: &'static str,
 }
 
 pub const JA: StudyTr = StudyTr {
@@ -85,6 +88,7 @@ pub const JA: StudyTr = StudyTr {
     hide_panels_and_reference: "パネルとモチーフを隠す",
     panels_note: "Shift+Tab のあとの Tab は、パネルとモチーフを両方戻す
 文字の入力中は、Tab で次の欄へ移る",
+    both_views_hint: "Shift＋クリック：両方のビューに",
 };
 
 pub const EN: StudyTr = StudyTr {
@@ -118,6 +122,7 @@ pub const EN: StudyTr = StudyTr {
     hide_panels_and_reference: "hide panels and reference",
     panels_note: "after Shift+Tab, Tab brings back the panels and the reference
 in a text field, Tab goes to the next field",
+    both_views_hint: "shift-click: both views",
 };
 
 pub const FR: StudyTr = StudyTr {
@@ -151,6 +156,7 @@ pub const FR: StudyTr = StudyTr {
     hide_panels_and_reference: "masquer les panneaux et le modèle",
     panels_note: "après Maj+Tab, Tab rétablit les panneaux et le modèle
 dans un champ de texte, Tab passe au champ suivant",
+    both_views_hint: "Maj + clic : les deux vues",
 };
 
 fn ja_minutes(n: u32) -> String {
