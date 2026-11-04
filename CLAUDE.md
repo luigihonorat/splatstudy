@@ -42,7 +42,7 @@ cargo build -p splatstudy-native     # デスクトップ版（SDL3 をソース
 - 依存クレートを追加したら `cargo deny check licenses`（GPL 系は不可）。配布物には必ずライセンス表示を付ける（`cargo xtask notices`、リリースの web ビルドでは自動。cargo-about が必要）。クレート以外の同梱物（C ライブラリ、フォント、素材）は xtask の `notices` に足す。
 - UI の文字列はすべて `crates/core/src/ui/i18n.rs`（日本語・英語・フランス語）。日本語を変えたら `crates/core/assets/fonts/subset.py` でフォントを作り直す。
 - デザインは thevirtualform.com に合わせる：モノクロ、1px の線、箱を使わない、選択中は文字色と 1px の下線。色は `ui/theme.rs` のトークンだけを使う。
-- 彫刻ビューでは左ドラッグ＝彫る。視点操作は Alt / Space ＋ドラッグ（Houdini 式）。
+- 彫刻ビューでは左ドラッグ＝彫る。視点操作は「視点操作」メニューのスタイル（ZBrush 風・Blender 風・Maya 風）に従う。Space 長押し＝ツールのパイメニュー。
 - ローダーは `Result` を返し、壊れた入力でパニックしない。
 - 小さくコミットする。コミットは `git commit -s`（DCO の Signed-off-by）で、`Co-Authored-By: Claude` も付ける。詳しくは `CONTRIBUTING.md`。
 - メモ・計画・開発ログはリポジトリの外（`../`）に置く。
