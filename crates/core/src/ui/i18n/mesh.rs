@@ -63,6 +63,9 @@ pub struct MeshTr {
     pub quad_remeshed: &'static str,
     /// Notice when no clean quad mesh came out.
     pub quad_failed: &'static str,
+    /// The shortcuts window: hold the key and the tools open in a ring
+    /// round the pointer.
+    pub tool_pie: &'static str,
 }
 
 pub const JA: MeshTr = MeshTr {
@@ -98,6 +101,7 @@ pub const JA: MeshTr = MeshTr {
     quads: "クアッド数",
     quad_remeshed: "クアッドでリメッシュしました。元に戻すと前のメッシュに戻ります",
     quad_failed: "この形はクアッドリメッシュできませんでした。塑像はそのままです",
+    tool_pie: "ツールのパイメニュー（押したまま）",
 };
 
 pub const EN: MeshTr = MeshTr {
@@ -133,6 +137,7 @@ pub const EN: MeshTr = MeshTr {
     quads: "quads",
     quad_remeshed: "quad remeshed; undo brings the previous mesh back",
     quad_failed: "this shape could not be quad remeshed; the sculpt is unchanged",
+    tool_pie: "tool pie menu (hold)",
 };
 
 pub const FR: MeshTr = MeshTr {
@@ -168,4 +173,5 @@ pub const FR: MeshTr = MeshTr {
     quads: "quads",
     quad_remeshed: "remaillé en quads ; annuler rétablit le maillage précédent",
     quad_failed: "cette forme n'a pas pu être remaillée en quads ; la sculpture est inchangée",
+    tool_pie: "menu circulaire des outils (maintenir)",
 };

@@ -3,6 +3,7 @@
 //! Sculpting: the tools, strokes on the clay and the sculpt panel.
 
 mod levels;
+mod tool_pie;
 
 use std::sync::Arc;
 
@@ -16,6 +17,8 @@ use crate::meshio::{self, Soup};
 use crate::quad;
 use crate::reference::Content;
 use crate::render::clay::GpuMesh;
+pub(super) use tool_pie::TOOL_PIE_KEY;
+
 use crate::sculpt::{
     Brush, Dab, Falloff, Hit, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, START_LEVEL, Sculpt,
     cube_sphere,
@@ -112,6 +115,8 @@ pub(super) struct ToolSettings {
     /// Asked for in the frame at this time, done at the start of the next,
     /// so the notice saying so shows while it runs.
     pending: Option<(Pending, f64)>,
+    /// The tool pie menu, while it is open.
+    pie: Option<crate::ui::pie::Pie>,
 }
 
 /// A slow operation waiting for the next frame.
@@ -143,6 +148,7 @@ impl Default for ToolSettings {
             threshold: voxel::DEFAULT_THRESHOLD,
             quads: quad::DEFAULT_QUADS as f32,
             pending: None,
+            pie: None,
         }
     }
 }
@@ -255,6 +261,7 @@ impl App {
         let pressed = |m: M, key: Key| ui.input_mut(|i| i.consume_key(m, key));
         // The timelapse shows the clay as it was: no sculpting until it closes.
         if self.playback.is_none() {
+            self.tool_pie_keys(ui);
             if pressed(M::COMMAND | M::SHIFT, Key::Z) || pressed(M::COMMAND, Key::Y) {
                 self.sculpt.redo();
             } else if pressed(M::COMMAND, Key::Z) {
@@ -767,7 +774,10 @@ impl App {
         else {
             return;
         };
-        if self.playback.is_some() || matches!(self.drags[SCULPT], Some(Drag::Navigate { .. })) {
+        if self.playback.is_some()
+            || self.pie_open()
+            || matches!(self.drags[SCULPT], Some(Drag::Navigate { .. }))
+        {
             return;
         }
         let ink = theme::VIEW_INK.gamma_multiply(0.6);

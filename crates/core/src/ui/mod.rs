@@ -5,6 +5,7 @@
 pub mod fonts;
 pub mod i18n;
 pub mod menu;
+pub mod pie;
 pub mod theme;
 
 use egui::{Response, Sense, Stroke, Ui, WidgetText};

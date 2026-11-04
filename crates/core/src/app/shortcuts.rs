@@ -5,7 +5,7 @@
 
 use egui::{Align2, Key, RichText};
 
-use super::sculpting::{BRUSHES, brush_name};
+use super::sculpting::{BRUSHES, TOOL_PIE_KEY, brush_name};
 use super::views::viewpoints;
 use super::{App, REPO_URL, SITE_URL, WEB};
 use crate::navigation::NavStyle;
@@ -93,6 +93,7 @@ impl App {
                     })
                     .collect();
                 rows.extend([
+                    (tr.mesh.tool_pie, TOOL_PIE_KEY.name().to_owned()),
                     (tr.invert, self.nav.invert_key().to_owned()),
                     (tr.size, "[  ]".to_owned()),
                     (tr.undo, self.keys("Z")),

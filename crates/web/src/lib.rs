@@ -333,6 +333,7 @@ fn listen(
     for (name, pressed) in [("keydown", true), ("keyup", false)] {
         let s = shell.clone();
         let p = pending.clone();
+        let c = canvas.clone();
         on(&window, name, false, move |e: KeyboardEvent| {
             let modifiers = [e.alt_key(), e.ctrl_key(), e.shift_key(), e.meta_key()];
             let mut events = Vec::new();
@@ -358,7 +359,12 @@ fn listen(
                 // and open, not the browser's.
                 let command = if is_mac() { e.meta_key() } else { e.ctrl_key() };
                 let file_key = command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o");
-                if matches!(name.as_str(), "Alt" | "Tab" | " " | "F2")
+                // Space holds the tool pie: the page mustn't scroll or
+                // press a focused button with it, but a text field in the
+                // page keeps it for typing.
+                let space = name == " " && canvas_has_keys(&c);
+                if matches!(name.as_str(), "Alt" | "Tab" | "F2")
+                    || space
                     || (!shortcut && name.starts_with("Arrow"))
                     || file_key
                 {
@@ -383,6 +389,21 @@ fn listen(
         })?;
     }
     Ok(())
+}
+
+/// Whether keys go to the app: the canvas has the focus, or nothing in the
+/// page does. The app's own text fields type through the IME's input
+/// (see `ime`), which then has the focus.
+fn canvas_has_keys(canvas: &HtmlCanvasElement) -> bool {
+    let active = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.active_element());
+    match active {
+        None => true,
+        Some(element) => {
+            element.is_same_node(Some(canvas)) || element.tag_name().eq_ignore_ascii_case("body")
+        }
+    }
 }
 
 fn pointer(e: &DomPointer, phase: PointerPhase) -> PointerEvent {

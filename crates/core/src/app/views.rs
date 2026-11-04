@@ -216,6 +216,7 @@ impl App {
                 self.debug_hud(ui, left);
             }
         }
+        self.tool_pie_ui(ui);
     }
 
     /// The point of the rendered view under `pos`, a point of the screen in
@@ -257,7 +258,8 @@ impl App {
         };
         let camera_before = self.cameras[index];
 
-        if self.drags[index].is_none() && response.hovered() {
+        // An open pie menu takes every press.
+        if self.drags[index].is_none() && response.hovered() && !self.pie_open() {
             for (button, ours) in [
                 (PointerButton::Primary, Button::Primary),
                 (PointerButton::Middle, Button::Middle),
