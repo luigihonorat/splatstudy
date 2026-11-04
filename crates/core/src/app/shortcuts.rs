@@ -187,6 +187,39 @@ mod tests {
 
     use super::super::study::tests::Harness;
     use super::super::{REFERENCE, SCULPT};
+    use super::*;
+    use crate::sculpt::Brush;
+
+    #[test]
+    fn the_digit_row_and_the_letters_pick_the_tools() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let digits = [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+        ];
+        for (&(brush, letter, _), digit) in BRUSHES.iter().zip(digits) {
+            h.key(digit, false);
+            assert_eq!(h.app.tool.tool, brush, "{digit:?}");
+            h.key(Key::Num1, false);
+            h.key(letter, false);
+            assert_eq!(h.app.tool.tool, brush, "{letter:?}");
+        }
+        assert_eq!(BRUSHES[0].0, Brush::Move);
+        assert_eq!(BRUSHES[7].0, Brush::Mask);
+        // 5 picks a tool now, not the orthographic view.
+        assert!(!h.app.cameras[SCULPT].ortho);
+        assert_eq!(brush_keys(Brush::Move), "1 / M");
+        assert_eq!(brush_keys(Brush::Smooth), "4 / S / Shift");
+    }
 
     #[test]
     fn the_numpad_turns_both_views_and_picks_no_tool() {

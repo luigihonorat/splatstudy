@@ -6,7 +6,7 @@
 
 use egui::{Align2, RichText};
 
-use super::sculpting::{BRUSHES, brush_name};
+use super::sculpting::{BRUSHES, brush_digit, brush_name};
 use super::study::Layout;
 use super::{App, Request, SCULPT};
 use crate::input::FilePurpose;
@@ -207,7 +207,9 @@ impl App {
                 ui.label(h.sculpt_text.replace("{invert}", self.nav.invert_key()));
                 let keys: Vec<String> = BRUSHES
                     .iter()
-                    .map(|&(brush, key, _)| format!("{} {}", key.name(), brush_name(tr, brush)))
+                    .map(|&(brush, _, _)| {
+                        format!("{} {}", brush_digit(brush), brush_name(tr, brush))
+                    })
                     .collect();
                 ui.label(RichText::new(keys.join("   ")).color(muted));
                 ui::section(ui, h.study_heading);

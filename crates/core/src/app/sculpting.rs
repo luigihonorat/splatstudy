@@ -38,7 +38,8 @@ const TICK: f32 = 0.3;
 /// The stabiliser's longest string, in points.
 const MAX_STABILISER: f32 = 120.0;
 
-/// Each brush with its shortcut and starting strength, in `Brush::ALL` order.
+/// Each brush with its letter key and starting strength, in `Brush::ALL`
+/// order; its digit is in `DIGITS`.
 /// (F frames the sculpt, so flatten takes T, for trim; M is move, so the
 /// mask takes A.)
 pub(super) const BRUSHES: [(Brush, Key, f32); 8] = [
@@ -51,6 +52,22 @@ pub(super) const BRUSHES: [(Brush, Key, f32); 8] = [
     (Brush::Pinch, Key::P, 0.5),
     (Brush::Mask, Key::A, 1.0),
 ];
+
+/// The digit row, 1 to 9 then 0: tool `k` of `BRUSHES` takes `DIGITS[k]`,
+/// so a new tool gets the next digit. 9 and 0 are free.
+const DIGITS: [Key; 10] = [
+    Key::Num1,
+    Key::Num2,
+    Key::Num3,
+    Key::Num4,
+    Key::Num5,
+    Key::Num6,
+    Key::Num7,
+    Key::Num8,
+    Key::Num9,
+    Key::Num0,
+];
+const _: () = assert!(BRUSHES.len() <= DIGITS.len(), "a tool without a digit");
 
 pub(super) fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
     match brush {
@@ -80,14 +97,21 @@ pub(super) fn brush_icon(brush: Brush) -> fn(&egui::Painter, Rect, egui::Color32
     }
 }
 
+/// The digit that picks `brush`, as the help shows it.
+pub(super) fn brush_digit(brush: Brush) -> &'static str {
+    DIGITS[tool_index(brush)].name()
+}
+
 /// The keys that pick `brush`, as the shortcuts window and the toolbar's
-/// tooltip show them: Shift smooths with any tool while it is held.
+/// tooltip show them: its digit, its letter, and for smooth Shift, which
+/// smooths with any tool while it is held.
 pub(super) fn brush_keys(brush: Brush) -> String {
-    let key = BRUSHES[tool_index(brush)].1.name();
+    let index = tool_index(brush);
+    let keys = format!("{} / {}", brush_digit(brush), BRUSHES[index].1.name());
     if brush == Brush::Smooth {
-        format!("{key} / Shift")
+        format!("{keys} / Shift")
     } else {
-        key.to_owned()
+        keys
     }
 }
 
@@ -305,8 +329,8 @@ impl App {
             if pressed(M::ALT, Key::M) {
                 self.sculpt.edit_layer(LayerOp::ClearMask);
             }
-            for (brush, key, _) in BRUSHES {
-                if pressed(M::NONE, key) {
+            for ((brush, key, _), digit) in BRUSHES.into_iter().zip(DIGITS) {
+                if pressed(M::NONE, digit) || pressed(M::NONE, key) {
                     self.tool.tool = brush;
                 }
             }

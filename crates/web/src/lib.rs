@@ -363,9 +363,16 @@ fn listen(
                 }
             } else if !ime::is_ime_key(&e) {
                 // On a Mac, Option with a letter types another character
-                // (Option+M is µ): the key is the letter under it.
-                let key = Key::from_name(&name)
-                    .or_else(|| e.alt_key().then(|| Key::from_name(&e.code())).flatten());
+                // (Option+M is µ): the key is the letter under it. The digit
+                // row picks tools by place, whatever the layout prints on
+                // it (AZERTY types & é " without Shift).
+                let code = e.code();
+                let key = if code.starts_with("Digit") {
+                    Key::from_name(&code)
+                } else {
+                    Key::from_name(&name)
+                        .or_else(|| e.alt_key().then(|| Key::from_name(&code)).flatten())
+                };
                 if let Some(key) = key {
                     events.push(InputEvent::Key {
                         key,
