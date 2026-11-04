@@ -131,7 +131,7 @@ impl App {
         if self.shot.pending.is_none()
             && let Some(frame) = self.shot.asked.take()
         {
-            self.shot.pending = self.start_screenshot(frame);
+            self.shot.pending = Some(self.start_screenshot(frame));
         }
         let Some(pending) = &self.shot.pending else {
             return;
@@ -160,8 +160,7 @@ impl App {
         }
     }
 
-    /// The picture's size and layout, and the share of it the sculpt
-    /// takes, as the views are now.
+    /// The picture's size, and its layout as the window's views are now.
     fn shot_placement(&self, frame: ShotFrame) -> ([u32; 2], Layout) {
         let max = self.device.limits().max_texture_dimension_2d;
         let rects = self.view_rects.into_iter().filter(|&r| shown(r));
@@ -183,7 +182,7 @@ impl App {
 
     /// Draws the views offscreen into a picture of `frame`'s shape and
     /// starts reading it back.
-    fn start_screenshot(&mut self, frame: ShotFrame) -> Option<Pending> {
+    fn start_screenshot(&mut self, frame: ShotFrame) -> Pending {
         let (size, layout) = self.shot_placement(frame);
         let placement = place_split(size, layout, self.split, self.study.swapped);
         let mut compositor = Compositor::placed(&self.device, size, placement);
@@ -267,11 +266,11 @@ impl App {
             1 => format!("{stem}-screenshot.png"),
             n => format!("{stem}-screenshot-{n}.png"),
         };
-        Some(Pending {
+        Pending {
             _compositor: compositor,
             readback,
             name,
-        })
+        }
     }
 }
 
