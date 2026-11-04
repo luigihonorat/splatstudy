@@ -785,25 +785,40 @@ impl App {
             painter.line_segment([centre, screen], Stroke::new(1.0, ink.gamma_multiply(0.5)));
             painter.circle_filled(screen, 1.5, ink);
         }
-        let outline = self.pick(rect, brush).and_then(|hit| {
+        let camera = &self.cameras[SCULPT];
+        let draw = |ring: Vec<Pos2>, tick: [Pos2; 2], line: Stroke| {
+            let ring = ring.into_iter().map(|p| self.view_pos(rect, p)).collect();
+            painter.add(egui::Shape::closed_line(ring, line));
+            painter.line_segment(tick.map(|p| self.view_pos(rect, p)), line);
+        };
+        let hit = self.pick(rect, brush);
+        // The brush's size on the clay, in the clay's units.
+        let radius =
+            hit.map(|hit| self.tool.radius * camera.world_per_point(hit.point, rect.height()));
+        let outline = hit.zip(radius).and_then(|(hit, radius)| {
             let normal = self.sculpt.normal_at(&hit);
-            surface_outline(
-                &self.cameras[SCULPT],
-                rect,
-                hit.point,
-                normal,
-                self.tool.radius,
-            )
+            surface_outline(camera, rect, hit.point, normal, radius)
         });
         match outline {
-            Some((ring, tick)) => {
-                let ring = ring.into_iter().map(|p| self.view_pos(rect, p)).collect();
-                painter.add(egui::Shape::closed_line(ring, line));
-                painter.line_segment(tick.map(|p| self.view_pos(rect, p)), line);
-            }
+            Some((ring, tick)) => draw(ring, tick, line),
             None => {
                 painter.circle_stroke(centre, self.tool.radius, line);
             }
+        }
+        // With symmetry on, the other side the stroke reaches, in grey.
+        if self.tool.symmetry
+            && let Some((hit, radius)) = hit.zip(radius)
+            && let Some(other) = mirrored_hit(&self.sculpt, camera.eye(), hit.point, radius)
+            && let Some((ring, tick)) = surface_outline(
+                camera,
+                rect,
+                other.point,
+                self.sculpt.normal_at(&other),
+                radius,
+            )
+        {
+            let grey = theme::MIRROR_INK.gamma_multiply(0.6);
+            draw(ring, tick, Stroke::new(1.0, grey));
         }
         painter.circle_filled(centre, 1.5, ink);
     }
@@ -823,11 +838,33 @@ fn project(to_clip: Mat4, rect: Rect, p: Vec3) -> Option<Pos2> {
     ))
 }
 
+/// Two mirrored dabs closer than this share of the radius are one: the
+/// same rule as `Sculpt::dab`.
+const SAME_DAB: f32 = 0.05;
+/// The mirror image of a point is taken to be on the clay when a ray
+/// towards it meets the surface within this share of the brush radius:
+/// the clay may be a little lopsided, but the dab still reaches it.
+const MIRROR_SLACK: f32 = 0.5;
+
+/// Where the mirrored half of a symmetric dab at `point` lands, as an eye
+/// at `eye` sees it: the point mirrored across the symmetry plane (x = 0,
+/// as the dabs are), found on the clay by a ray from the eye. `None` when
+/// the two dabs are one, or when the mirrored point is out of sight:
+/// facing away, behind other clay, or off the clay. `radius` is the
+/// brush's, in the clay's units.
+fn mirrored_hit(sculpt: &Sculpt, eye: Vec3, point: Vec3, radius: f32) -> Option<Hit> {
+    let target = Vec3::new(-point.x, point.y, point.z);
+    if target.distance(point) <= radius * SAME_DAB {
+        return None;
+    }
+    let hit = sculpt.raycast(eye, (target - eye).normalize_or_zero())?;
+    (hit.point.distance(target) <= radius * MIRROR_SLACK).then_some(hit)
+}
+
 /// The brush outline on the clay, as `camera` sees it in a view of `rect`:
-/// a circle around `centre` lying square to `normal`, as wide as a circle
-/// of `radius` points facing the camera there would be, and a short tick
-/// along the normal. In the rendered view's points; `None` if part of it
-/// is behind the camera.
+/// a circle of `radius` (in the clay's units) around `centre`, lying
+/// square to `normal`, and a short tick along the normal. In the rendered
+/// view's points; `None` if part of it is behind the camera.
 fn surface_outline(
     camera: &OrbitCamera,
     rect: Rect,
@@ -835,7 +872,6 @@ fn surface_outline(
     normal: Vec3,
     radius: f32,
 ) -> Option<(Vec<Pos2>, [Pos2; 2])> {
-    let radius = radius * camera.world_per_point(centre, rect.height());
     let (u, v) = normal.any_orthonormal_pair();
     let to_clip = camera.projection(rect.width() / rect.height()) * camera.view();
     let ring = (0..CURSOR_SEGMENTS)
@@ -864,8 +900,9 @@ mod tests {
         let camera = OrbitCamera::default();
         let rect = view();
         let towards_eye = (camera.eye() - camera.target).normalize();
+        let radius = 40.0 * camera.world_per_point(camera.target, rect.height());
         let (ring, tick) =
-            surface_outline(&camera, rect, camera.target, towards_eye, 40.0).unwrap();
+            surface_outline(&camera, rect, camera.target, towards_eye, radius).unwrap();
         let centre = rect.center();
         assert!(tick[0].distance(centre) < 0.01);
         for p in &ring {
@@ -883,7 +920,8 @@ mod tests {
         let camera = OrbitCamera::default();
         let rect = view();
         let (_, up) = camera.right_up();
-        let (ring, tick) = surface_outline(&camera, rect, camera.target, up, 40.0).unwrap();
+        let radius = 40.0 * camera.world_per_point(camera.target, rect.height());
+        let (ring, tick) = surface_outline(&camera, rect, camera.target, up, radius).unwrap();
         let (mut lo, mut hi) = (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN));
         for p in &ring {
             lo = lo.min(*p);
@@ -894,6 +932,38 @@ mod tests {
         // The tick points up the screen, a share of the radius long.
         let rise = tick[0].y - tick[1].y;
         assert!((rise - 40.0 * TICK).abs() < 1.0, "{rise}");
+    }
+
+    #[test]
+    fn the_mirrored_brush_shows_only_where_it_can_be_seen() {
+        let sculpt = start_sculpt();
+        let camera = OrbitCamera::default();
+        let eye = camera.eye();
+        let radius = 0.1;
+        let first = |dir: Vec3| sculpt.raycast(eye, dir.normalize()).unwrap();
+        // From the front, a point to the right: its mirror image is the
+        // same place to the left, in sight.
+        let right = first(Vec3::new(0.4, 0.2, 0.0) - eye);
+        assert!(right.point.x > 0.2);
+        let left = mirrored_hit(&sculpt, eye, right.point, radius).unwrap();
+        let expected = Vec3::new(-right.point.x, right.point.y, right.point.z);
+        assert!(left.point.distance(expected) < 1e-3, "{left:?}");
+        // On the symmetry plane, both dabs are one: no second outline.
+        let middle = first(Vec3::new(0.0, 0.2, 0.0) - eye);
+        assert!(mirrored_hit(&sculpt, eye, middle.point, radius).is_none());
+        // From the right side, a point facing the eye: its mirror image is
+        // on the far side, behind the clay.
+        let mut side = camera;
+        side.look_from(std::f32::consts::FRAC_PI_2 * 0.8, 0.0);
+        let eye = side.eye();
+        let near = sculpt
+            .raycast(eye, (side.target - eye).normalize())
+            .unwrap();
+        assert!(near.point.x > 0.5);
+        assert!(mirrored_hit(&sculpt, eye, near.point, radius).is_none());
+        // A point off the clay: what the ray meets is too far from it.
+        let off = Vec3::new(0.5, 0.0, 1.6);
+        assert!(mirrored_hit(&sculpt, camera.eye(), off, radius).is_none());
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub const CLAY: Color32 = hex(0xC4C4C4);
 /// Text and outlines drawn over the black views.
 pub const VIEW_TEXT: Color32 = hex(0x8A8A8A);
 pub const VIEW_INK: Color32 = hex(0xF2F2F2);
+/// The brush outline's mirror image on the clay's other side, with
+/// symmetry on: a muted grey beside the brush's own `VIEW_INK`.
+pub const MIRROR_INK: Color32 = hex(0x8F8F8F);
 /// Silhouette mode: shapes filled flat on the black view.
 pub const SILHOUETTE_INK: Color32 = hex(0xE6E6E6);
 /// Plumb line, grid and other guides over the views.
