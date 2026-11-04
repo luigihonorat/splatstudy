@@ -135,7 +135,9 @@ impl Default for ToolSettings {
             radius: 48.0,
             strength: BRUSHES.map(|(_, _, strength)| strength),
             falloff: [Falloff::Smooth; 7],
-            symmetry: true,
+            // A study from a reference is rarely symmetric: mirroring is
+            // asked for, not assumed.
+            symmetry: false,
             stabiliser: 0.0,
             resolution: voxel::DEFAULT_RESOLUTION as f32,
             threshold: voxel::DEFAULT_THRESHOLD,
@@ -892,6 +894,13 @@ mod tests {
         // The tick points up the screen, a share of the radius long.
         let rise = tick[0].y - tick[1].y;
         assert!((rise - 40.0 * TICK).abs() < 1.0, "{rise}");
+    }
+
+    #[test]
+    fn symmetry_starts_off() {
+        let tool = ToolSettings::default();
+        assert!(!tool.symmetry);
+        assert_eq!(tool.tool, Brush::Clay);
     }
 
     #[test]
