@@ -344,6 +344,8 @@ impl App {
         }
     }
 
+    /// The reference panel, in groups that fold away: the reference
+    /// itself, then for a 3D one its alignment and crop, and the credit.
     pub(super) fn reference_panel(&mut self, ui: &mut egui::Ui) {
         // The whole panel scrolls when it is taller than the window (the
         // crop sliders and the credit fields together), behind a thin line
@@ -354,117 +356,152 @@ impl App {
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 let tr = self.lang.tr();
-                ui::section(ui, tr.reference_tools);
-                if ui::choice(ui, tr.open_reference, false).clicked() {
-                    self.request(Request::OpenFile {
-                        purpose: FilePurpose::Reference,
-                        extensions: REFERENCE_EXTENSIONS,
+                ui::group(ui, "reference", tr.reference_tools, |ui| {
+                    self.reference_file(ui)
+                });
+                let Some(r) = &self.reference.current else {
+                    return;
+                };
+                if !matches!(r.content, Content::Image(_)) {
+                    ui::group(ui, "alignment", tr.refs.alignment, |ui| {
+                        self.reference_alignment(ui)
                     });
+                    ui::group(ui, "crop", tr.refs.crop, |ui| self.reference_crop(ui));
                 }
-                if self.reference.current.is_some() {
-                    if ui::choice(ui, tr.remove_reference, false).clicked() {
-                        self.remove_reference();
-                    }
-                    self.reference_controls(ui);
-                }
+                ui::group(ui, "credit", tr.refs.credit, |ui| self.reference_credit(ui));
             });
     }
 
-    /// Alignment, crop and credit.
-    fn reference_controls(&mut self, ui: &mut egui::Ui) {
+    /// Opening and removing the reference, its file's name, and for a
+    /// picture showing all of it again.
+    fn reference_file(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
-        let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+        if ui::choice(ui, tr.open_reference, false).clicked() {
+            self.request(Request::OpenFile {
+                purpose: FilePurpose::Reference,
+                extensions: REFERENCE_EXTENSIONS,
+            });
+        }
+        if self.reference.current.is_none() {
+            return;
+        }
+        if ui::choice(ui, tr.remove_reference, false).clicked() {
+            self.remove_reference();
+            return;
+        }
         let state = &mut self.reference;
-        let Some(r) = state.current.as_mut() else {
+        let Some(r) = state.current.as_ref() else {
             return;
         };
+        let muted = ui.visuals().widgets.inactive.fg_stroke.color;
         ui.label(
             RichText::new(&r.source.name)
                 .font(fonts::regular(11.0))
                 .color(muted),
         );
-        ui.add_space(6.0);
-
         if matches!(r.content, Content::Image(_)) {
+            ui.add_space(6.0);
             if ui::choice(ui, tr.refs.fit_image, false).clicked() {
                 state.image_view = ImageView::default();
             }
-        } else {
-            ui::section(ui, tr.refs.up);
-            ui.horizontal(|ui| {
-                for (label, up) in [("y", UpAxis::Y), ("z", UpAxis::Z), ("-y", UpAxis::NegY)] {
-                    if ui::choice(ui, label, r.align.up == up).clicked() && r.align.up != up {
-                        r.align.up = up;
-                        // The crop keeps the same part of the file.
-                        if let Some(crop) = r.crop {
-                            state.crop.match_box(crop, up);
-                        }
-                    }
-                }
-            });
-            let mut degrees = r.align.yaw.to_degrees();
-            if ui::slider(ui, tr.refs.turn, &mut degrees, -180.0..=180.0, |v| {
-                format!("{v:.0}°")
-            })
-            .changed()
-            {
-                r.align.yaw = degrees.to_radians();
-            }
-            ui.horizontal(|ui| {
-                for (label, turn) in [("-90°", -FRAC_PI_2), ("+90°", FRAC_PI_2)] {
-                    if ui::choice(ui, label, false).clicked() {
-                        r.align.yaw = wrap_angle(r.align.yaw + turn);
-                    }
-                }
-            });
-            if ui::choice(ui, tr.refs.fit, false).clicked() {
-                r.fit();
-            }
+        }
+    }
 
-            ui.add_space(10.0);
-            let on = r.crop.is_some();
-            if ui::choice(ui, tr.refs.crop, on).clicked() {
-                r.crop = if on {
-                    None
-                } else {
-                    state.crop.to_box(r.align.up)
-                };
-                r.fit();
-            }
-            if r.crop.is_some() {
-                let labels = [
-                    tr.refs.crop_left,
-                    tr.refs.crop_right,
-                    tr.refs.crop_bottom,
-                    tr.refs.crop_top,
-                    tr.refs.crop_back,
-                    tr.refs.crop_front,
-                ];
-                for (i, label) in labels.into_iter().enumerate() {
-                    let sides = &mut state.crop.sides;
-                    let response = ui::slider(ui, label, &mut sides[i], 0.0..=1.0, |v| {
-                        format!("{:.0}%", v * 100.0)
-                    });
-                    if response.changed() {
-                        // Each side stays short of its opposite.
-                        let (lo, hi) = (i & !1, i | 1);
-                        if i == lo {
-                            sides[lo] = sides[lo].min(sides[hi] - 0.01);
-                        } else {
-                            sides[hi] = sides[hi].max(sides[lo] + 0.01);
-                        }
-                        r.crop = state.crop.to_box(r.align.up);
-                    }
-                    // Re-fit once the side is let go, not while it moves.
-                    if response.drag_stopped() || response.clicked() {
-                        r.fit();
+    /// Which way is up, the turn about it, and fitting it to the clay.
+    fn reference_alignment(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        let state = &mut self.reference;
+        let Some(r) = state.current.as_mut() else {
+            return;
+        };
+        ui::section(ui, tr.refs.up);
+        ui.horizontal(|ui| {
+            for (label, up) in [("y", UpAxis::Y), ("z", UpAxis::Z), ("-y", UpAxis::NegY)] {
+                if ui::choice(ui, label, r.align.up == up).clicked() && r.align.up != up {
+                    r.align.up = up;
+                    // The crop keeps the same part of the file.
+                    if let Some(crop) = r.crop {
+                        state.crop.match_box(crop, up);
                     }
                 }
+            }
+        });
+        let mut degrees = r.align.yaw.to_degrees();
+        if ui::slider(ui, tr.refs.turn, &mut degrees, -180.0..=180.0, |v| {
+            format!("{v:.0}°")
+        })
+        .changed()
+        {
+            r.align.yaw = degrees.to_radians();
+        }
+        ui.horizontal(|ui| {
+            for (label, turn) in [("-90°", -FRAC_PI_2), ("+90°", FRAC_PI_2)] {
+                if ui::choice(ui, label, false).clicked() {
+                    r.align.yaw = wrap_angle(r.align.yaw + turn);
+                }
+            }
+        });
+        if ui::choice(ui, tr.refs.fit, false).clicked() {
+            r.fit();
+        }
+    }
+
+    /// The crop box, on or off, and its six sides.
+    fn reference_crop(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        let state = &mut self.reference;
+        let Some(r) = state.current.as_mut() else {
+            return;
+        };
+        let on = r.crop.is_some();
+        if ui::choice(ui, tr.refs.crop_box, on).clicked() {
+            r.crop = if on {
+                None
+            } else {
+                state.crop.to_box(r.align.up)
+            };
+            r.fit();
+        }
+        if r.crop.is_none() {
+            return;
+        }
+        let labels = [
+            tr.refs.crop_left,
+            tr.refs.crop_right,
+            tr.refs.crop_bottom,
+            tr.refs.crop_top,
+            tr.refs.crop_back,
+            tr.refs.crop_front,
+        ];
+        for (i, label) in labels.into_iter().enumerate() {
+            let sides = &mut state.crop.sides;
+            let response = ui::slider(ui, label, &mut sides[i], 0.0..=1.0, |v| {
+                format!("{:.0}%", v * 100.0)
+            });
+            if response.changed() {
+                // Each side stays short of its opposite.
+                let (lo, hi) = (i & !1, i | 1);
+                if i == lo {
+                    sides[lo] = sides[lo].min(sides[hi] - 0.01);
+                } else {
+                    sides[hi] = sides[hi].max(sides[lo] + 0.01);
+                }
+                r.crop = state.crop.to_box(r.align.up);
+            }
+            // Re-fit once the side is let go, not while it moves.
+            if response.drag_stopped() || response.clicked() {
+                r.fit();
             }
         }
+    }
 
-        ui.add_space(10.0);
-        ui::section(ui, tr.refs.credit);
+    /// Who made the reference, under what licence, and where it is from.
+    fn reference_credit(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+        let Some(r) = self.reference.current.as_mut() else {
+            return;
+        };
         let credit = &mut r.credit;
         for (label, text) in [
             (tr.refs.title, &mut credit.title),

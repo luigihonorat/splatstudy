@@ -51,6 +51,64 @@ pub fn section(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
+/// A group of controls under a heading that folds it away. The heading is
+/// small and muted like a [`section`]'s, over a 1px line across the panel,
+/// with a thin chevron at the right: down while the group is open, sideways
+/// while it is closed. A click on the heading opens or closes the group,
+/// and it stays so for the session. `key` names the group in any language.
+/// Returns what `add` returned, while the group is open.
+pub fn group<R>(ui: &mut Ui, key: &str, title: &str, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    let id = ui.make_persistent_id(("group", key));
+    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+    let visuals = ui.visuals().clone();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let line = visuals.widgets.noninteractive.bg_stroke.color;
+        let color = if response.hovered() {
+            visuals.widgets.active.fg_stroke.color
+        } else {
+            visuals.widgets.inactive.fg_stroke.color
+        };
+        painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, line));
+        let y = rect.center().y + 2.0;
+        painter.text(
+            egui::pos2(rect.left(), y),
+            egui::Align2::LEFT_CENTER,
+            title,
+            fonts::regular(12.0),
+            color,
+        );
+        // A 7-point chevron, its point on a half pixel so the 1px lines
+        // stay sharp.
+        let tip = egui::pos2(rect.right().round() - 4.5, y.round() + 0.5);
+        let arm = 3.5;
+        let points = if open {
+            [
+                tip + egui::vec2(-arm, -arm / 2.0 - 1.0),
+                tip + egui::vec2(0.0, arm / 2.0),
+                tip + egui::vec2(arm, -arm / 2.0 - 1.0),
+            ]
+        } else {
+            [
+                tip + egui::vec2(-arm / 2.0 - 1.0, -arm),
+                tip + egui::vec2(arm / 2.0, 0.0),
+                tip + egui::vec2(-arm / 2.0 - 1.0, arm),
+            ]
+        };
+        painter.add(egui::Shape::line(points.to_vec(), Stroke::new(1.0, color)));
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let inner = open.then(|| add(ui));
+    ui.add_space(if open { 10.0 } else { 0.0 });
+    inner
+}
+
 /// A slider in the site's style: label and value on one line, a 1px track
 /// underneath, filled in the text colour up to a small round handle.
 pub fn slider(
@@ -243,7 +301,48 @@ fn slider_with(
 
 #[cfg(test)]
 mod tests {
-    use super::typed_number;
+    use super::{group, typed_number};
+
+    #[test]
+    fn a_click_on_its_heading_folds_a_group_and_opens_it_again() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(super::fonts::definitions());
+        let heading = egui::pos2(40.0, 10.0);
+        let mut frame = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut shown = None;
+            let mut output = ctx.run_ui(raw, |ui| {
+                shown = Some(group(ui, "tools", "tools", |ui| ui.label("inside")).is_some());
+            });
+            output.textures_delta.clear();
+            shown.unwrap()
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos: heading,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let click = || {
+            vec![
+                egui::Event::PointerMoved(heading),
+                button(true),
+                button(false),
+            ]
+        };
+        assert!(frame(vec![]), "open at first");
+        frame(click());
+        assert!(!frame(vec![]), "folded, and it stays so");
+        frame(click());
+        assert!(frame(vec![]));
+    }
 
     #[test]
     fn typed_numbers_read_with_or_without_separators() {

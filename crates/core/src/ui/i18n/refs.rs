@@ -30,6 +30,11 @@ pub struct RefTr {
     pub thinned: &'static str,
     /// Notice when a mesh is larger than the GPU's buffers.
     pub mesh_too_large: &'static str,
+    /// Heading of the reference panel's group that sets which way is up
+    /// and how the reference turns.
+    pub alignment: &'static str,
+    /// The switch for the crop box, under the "crop" heading.
+    pub crop_box: &'static str,
 }
 
 pub const JA: RefTr = RefTr {
@@ -51,6 +56,8 @@ pub const JA: RefTr = RefTr {
     source: "出典",
     thinned: "スプラットが多いため、一部を間引いて表示しています",
     mesh_too_large: "メッシュが大きすぎて、この GPU では表示できません",
+    alignment: "位置合わせ",
+    crop_box: "切り抜き枠",
 };
 
 pub const EN: RefTr = RefTr {
@@ -72,6 +79,8 @@ pub const EN: RefTr = RefTr {
     source: "source",
     thinned: "too many splats for this GPU: showing part of them",
     mesh_too_large: "this mesh is too large for this GPU",
+    alignment: "alignment",
+    crop_box: "crop box",
 };
 
 pub const FR: RefTr = RefTr {
@@ -93,4 +102,6 @@ pub const FR: RefTr = RefTr {
     source: "source",
     thinned: "trop de splats pour ce GPU : une partie seulement est affichée",
     mesh_too_large: "ce maillage est trop grand pour ce GPU",
+    alignment: "alignement",
+    crop_box: "boîte de recadrage",
 };

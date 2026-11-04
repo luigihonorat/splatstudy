@@ -558,13 +558,28 @@ impl App {
         self.advance_playback(ui);
     }
 
+    /// The sculpt panel, in groups that fold away: the brush, the
+    /// subdivision levels, and the remeshes.
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
         if self.playback.is_some() {
             self.playback_panel(ui);
             return;
         }
+        let m = self.lang.tr().mesh;
+        ui::group(ui, "brush", m.brush, |ui| self.brush_controls(ui));
+        ui::group(ui, "subdivision", m.subdivision, |ui| {
+            if ui::choice(ui, m.subdivide, false).clicked() {
+                self.ask_subdivide();
+            }
+            self.levels_panel(ui);
+        });
+        ui::group(ui, "remeshing", m.remeshing, |ui| self.remesh_controls(ui));
+    }
+
+    /// The tools, and the chosen one's size, strength, stabiliser,
+    /// falloff and symmetry.
+    fn brush_controls(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
-        ui::section(ui, tr.tools);
         for (brush, _, _) in BRUSHES {
             if ui::choice(ui, brush_name(tr, brush), self.tool.tool == brush).clicked() {
                 self.tool.tool = brush;
@@ -612,30 +627,19 @@ impl App {
         if ui::choice(ui, tr.symmetry, self.tool.symmetry).clicked() {
             self.tool.symmetry = !self.tool.symmetry;
         }
-        ui.add_space(10.0);
-        ui::section(ui, tr.mesh.mesh);
+    }
+
+    /// The voxel remesh and the mesh from the reference, which share its
+    /// resolution, then the quad remesh.
+    fn remesh_controls(&mut self, ui: &mut egui::Ui) {
+        let m = self.lang.tr().mesh;
         let range = voxel::MIN_RESOLUTION as f32..=voxel::MAX_RESOLUTION as f32;
-        ui::slider(
-            ui,
-            tr.mesh.resolution,
-            &mut self.tool.resolution,
-            range,
-            |v| format!("{v:.0}"),
-        );
-        if ui::choice(ui, tr.mesh.remesh, false).clicked() {
-            self.ask_remesh();
-        }
-        let range = quad::MIN_QUADS as f32..=quad::MAX_QUADS as f32;
-        ui::typed_slider(ui, tr.mesh.quads, &mut self.tool.quads, range, 100.0, |v| {
+        ui::slider(ui, m.resolution, &mut self.tool.resolution, range, |v| {
             format!("{v:.0}")
         });
-        if ui::choice(ui, tr.mesh.quad_remesh, false).clicked() {
-            self.ask_quad_remesh();
+        if ui::choice(ui, m.remesh, false).clicked() {
+            self.ask_remesh();
         }
-        if ui::choice(ui, tr.mesh.subdivide, false).clicked() {
-            self.ask_subdivide();
-        }
-        self.levels_panel(ui);
         // Clay from the reference: the threshold only matters for splats.
         let loaded = self.has_reference();
         let splats = matches!(
@@ -644,16 +648,24 @@ impl App {
         );
         if splats {
             let threshold = &mut self.tool.threshold;
-            ui::slider(ui, tr.mesh.threshold, threshold, 0.05..=1.0, |v| {
+            ui::slider(ui, m.threshold, threshold, 0.05..=1.0, |v| {
                 format!("{:.0}%", v * 100.0)
             });
         }
         if ui
-            .add_enabled_ui(loaded, |ui| ui::choice(ui, tr.mesh.from_reference, false))
+            .add_enabled_ui(loaded, |ui| ui::choice(ui, m.from_reference, false))
             .inner
             .clicked()
         {
-            self.ask(Pending::FromReference, tr.mesh.from_reference);
+            self.ask(Pending::FromReference, m.from_reference);
+        }
+        ui.add_space(10.0);
+        let range = quad::MIN_QUADS as f32..=quad::MAX_QUADS as f32;
+        ui::typed_slider(ui, m.quads, &mut self.tool.quads, range, 100.0, |v| {
+            format!("{v:.0}")
+        });
+        if ui::choice(ui, m.quad_remesh, false).clicked() {
+            self.ask_quad_remesh();
         }
     }
 
