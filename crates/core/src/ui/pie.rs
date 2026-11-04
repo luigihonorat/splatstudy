@@ -12,14 +12,16 @@
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use egui::{Color32, Event, Key, Order, Pos2, Rect, Sense, Stroke};
+use egui::{Align2, Color32, Event, Key, Order, Pos2, Rect, Sense, Stroke};
 
 use super::{fonts, theme};
 
 /// Around the centre, a disc where nothing is chosen, in points.
 pub const DEAD_ZONE: f32 = 22.0;
-/// From the centre to the middle of each label, in points.
-const LABEL_RADIUS: f32 = 84.0;
+/// From the centre to each label's anchor, in points.
+const LABEL_RADIUS: f32 = 72.0;
+/// Room round a label that still counts as on it, in points.
+const LABEL_SLACK: f32 = 4.0;
 /// Room around the labels inside the ring's edge, in points.
 const MARGIN: f32 = 14.0;
 
@@ -38,11 +40,38 @@ pub fn slice_at(centre: Pos2, pos: Pos2, count: usize) -> Option<usize> {
     Some((from_top.rem_euclid(TAU) / width) as usize % count)
 }
 
+/// The choice a pointer at `pos` points to, for a menu centred on
+/// `centre` with its labels in `labels`: the label under the pointer, so a
+/// click on a label picks it, or else the slice it points to.
+pub fn choice_at(centre: Pos2, pos: Pos2, labels: &[Rect]) -> Option<usize> {
+    labels
+        .iter()
+        .position(|rect| rect.expand(LABEL_SLACK).contains(pos))
+        .or_else(|| slice_at(centre, pos, labels.len()))
+}
+
 /// The direction slice `index` of `count` points to, as a unit vector on
 /// the screen.
 fn direction(index: usize, count: usize) -> egui::Vec2 {
     let angle = index as f32 / count as f32 * TAU - FRAC_PI_2;
     egui::vec2(angle.cos(), angle.sin())
+}
+
+/// Where the label of slice `index` of `count`, `size` large, sits round
+/// `centre`: on its slice's direction, reaching away from the centre on
+/// the left and right, so neighbours near the top and bottom don't run
+/// into each other; centred straight up and down.
+fn label_rect(centre: Pos2, index: usize, count: usize, size: egui::Vec2) -> Rect {
+    let d = direction(index, count);
+    let anchor = centre + d * LABEL_RADIUS;
+    let align = if d.x > 0.2 {
+        Align2::LEFT_CENTER
+    } else if d.x < -0.2 {
+        Align2::RIGHT_CENTER
+    } else {
+        Align2::CENTER_CENTER
+    };
+    align.anchor_size(anchor, size)
 }
 
 /// What an open menu did this frame.
@@ -56,11 +85,13 @@ pub enum Outcome {
     Cancelled,
 }
 
-/// An open pie menu: where it opened and the key that holds it.
+/// An open pie menu: where it opened, the key that holds it, and the
+/// choice the pointer was last on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pie {
     pub centre: Pos2,
     key: Key,
+    hovered: Option<usize>,
 }
 
 impl Pie {
@@ -79,15 +110,20 @@ impl Pie {
             i.events.remove(at);
             i.events
                 .retain(|e| !matches!(e, Event::Key { key: k, .. } if *k == key));
-            Some(Pie { centre, key })
+            Some(Pie {
+                centre,
+                key,
+                hovered: None,
+            })
         })
     }
 
-    /// The keys: letting go of the menu's key picks the slice under the
-    /// pointer, or nothing in the dead centre; Escape closes it. Takes
-    /// both keys' events, so they do nothing else while it is open. Call
-    /// it early in the frame, before other shortcuts.
-    pub fn keys(&self, ui: &egui::Ui, count: usize) -> Outcome {
+    /// The keys: letting go of the menu's key picks the choice the menu
+    /// last showed under the pointer, or nothing in the dead centre;
+    /// Escape closes it. Takes both keys' events, so they do nothing else
+    /// while it is open. Call it early in the frame, before other
+    /// shortcuts.
+    pub fn keys(&self, ui: &egui::Ui) -> Outcome {
         ui.input_mut(|i| {
             let escape = i.consume_key(egui::Modifiers::NONE, Key::Escape);
             let released = i
@@ -101,11 +137,7 @@ impl Pie {
             if escape {
                 Outcome::Cancelled
             } else if released || !held {
-                match i
-                    .pointer
-                    .latest_pos()
-                    .and_then(|p| slice_at(self.centre, p, count))
-                {
+                match self.hovered {
                     Some(index) => Outcome::Picked(index),
                     None => Outcome::Cancelled,
                 }
@@ -118,11 +150,9 @@ impl Pie {
     /// Draws the menu over everything, with `labels` round it and the one
     /// at `chosen` underlined, and takes presses: one on a slice picks it,
     /// one in the dead centre closes the menu.
-    pub fn show(&self, ui: &egui::Ui, labels: &[&str], chosen: Option<usize>) -> Outcome {
+    pub fn show(&mut self, ui: &egui::Ui, labels: &[&str], chosen: Option<usize>) -> Outcome {
         let ctx = ui.ctx();
         let count = labels.len();
-        let pointer = ctx.input(|i| i.pointer.latest_pos());
-        let hovered = pointer.and_then(|p| slice_at(self.centre, p, count));
         let font = fonts::light(16.0);
         let galleys: Vec<_> = labels
             .iter()
@@ -133,14 +163,16 @@ impl Pie {
             })
             .collect();
         // The ring reaches just past the farthest label's corner.
-        let label_rect = |index: usize, size: egui::Vec2| {
-            Rect::from_center_size(self.centre + direction(index, count) * LABEL_RADIUS, size)
-        };
-        let reach = galleys
+        let label_rect = |index, size| label_rect(self.centre, index, count, size);
+        let rects: Vec<Rect> = (galleys.iter().enumerate())
+            .map(|(index, g)| label_rect(index, g.size()))
+            .collect();
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        let hovered = pointer.and_then(|p| choice_at(self.centre, p, &rects));
+        self.hovered = hovered;
+        let reach = rects
             .iter()
-            .enumerate()
-            .map(|(index, g)| {
-                let rect = label_rect(index, g.size());
+            .map(|rect| {
                 [
                     rect.left_top(),
                     rect.right_top(),
@@ -186,8 +218,7 @@ impl Pie {
                         .collect();
                     painter.add(egui::Shape::line(arc, Stroke::new(2.0, theme::VIEW_INK)));
                 }
-                for (index, galley) in galleys.into_iter().enumerate() {
-                    let rect = label_rect(index, galley.size());
+                for (index, (galley, rect)) in galleys.into_iter().zip(&rects).enumerate() {
                     let lit = hovered == Some(index);
                     let color = if lit || chosen == Some(index) {
                         theme::VIEW_INK
@@ -261,6 +292,18 @@ mod tests {
             // The labels sit in their own slices.
             let label = C + direction(index, 7) * LABEL_RADIUS;
             assert_eq!(slice_at(C, label, 7), Some(index));
+        }
+        // Labels as wide as the longest tool names don't run into each
+        // other, and each lies across its own slice.
+        let size = egui::vec2(120.0, 20.0);
+        let rects: Vec<Rect> = (0..7).map(|i| label_rect(C, i, 7, size)).collect();
+        for (i, a) in rects.iter().enumerate() {
+            // A label is its own choice wherever it reaches.
+            assert_eq!(choice_at(C, a.center(), &rects), Some(i), "{i}");
+            assert_eq!(choice_at(C, a.right_bottom(), &rects), Some(i), "{i}");
+            for b in &rects[i + 1..] {
+                assert!(!a.intersects(*b), "{a:?} {b:?}");
+            }
         }
         // Just past the first slice's left edge is the last slice.
         let a = -FRAC_PI_2 - 0.51 * width;

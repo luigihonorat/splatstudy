@@ -18,7 +18,7 @@ impl App {
     /// shortcuts, so Escape closes the pie and nothing else.
     pub(super) fn tool_pie_keys(&mut self, ui: &egui::Ui) {
         match self.tool.pie {
-            Some(pie) => self.tool_pie_outcome(pie.keys(ui, BRUSHES.len())),
+            Some(pie) => self.tool_pie_outcome(pie.keys(ui)),
             // Not in the middle of a stroke or a turn of the view.
             None if self.drags[SCULPT].is_none() && self.playback.is_none() => {
                 self.tool.pie = Pie::open(ui, TOOL_PIE_KEY, self.view_rects[SCULPT]);
@@ -29,16 +29,15 @@ impl App {
 
     /// Draws the open tool pie over everything and takes clicks on it.
     pub(in crate::app) fn tool_pie_ui(&mut self, ui: &egui::Ui) {
-        let Some(pie) = self.tool.pie else {
-            return;
-        };
         if self.playback.is_some() {
             self.tool.pie = None;
-            return;
         }
         let tr = self.lang.tr();
         let labels = BRUSHES.map(|(brush, _, _)| brush_name(tr, brush));
         let chosen = BRUSHES.iter().position(|&(b, _, _)| b == self.tool.tool);
+        let Some(pie) = &mut self.tool.pie else {
+            return;
+        };
         let outcome = pie.show(ui, &labels, chosen);
         self.tool_pie_outcome(outcome);
     }
