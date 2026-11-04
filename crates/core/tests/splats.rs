@@ -570,7 +570,13 @@ fn timings_of_large_captures() {
     };
     let t = Instant::now();
     let pass = SplatPass::new(&device, loaded).expect("splats");
-    println!("upload {} splats: {:.0} ms", pass.len(), ms(t));
+    println!(
+        "upload {} splats: {:.0} ms, {:.0} MB on the GPU with view-dependent colour of degree {}",
+        pass.len(),
+        ms(t),
+        pass.gpu_bytes() as f64 / 1e6,
+        pass.view_dependent_degree()
+    );
     drop(pass);
 
     for n in [1_000_000, 2_000_000] {
@@ -629,5 +635,60 @@ fn timings_of_large_captures() {
                  sort and draw {frame_all:.1} ms ({frame_cpu:.1} on the CPU)"
             );
         }
+
+        // Drawing alone, with view-dependent colour of each degree: the
+        // same view each time, so nothing is sorted again. The best of
+        // five runs of ten frames, against the GPU's own noise.
+        for degree in 0..=3 {
+            let mut s = s.clone();
+            s.harmonics = some_harmonics(&s, degree);
+            let pass = SplatPass::new(&device, &s).expect("splats");
+            let camera = OrbitCamera::default();
+            let draw = |look: &SplatLook| {
+                pass.prepare(&queue, Slot::ReferenceView, &camera, size, look);
+                let mut best = f64::MAX;
+                for _ in 0..5 {
+                    let t = Instant::now();
+                    for _ in 0..10 {
+                        let mut encoder = device.create_command_encoder(&Default::default());
+                        {
+                            let mut rpass = target.begin_pass(&mut encoder, VIEW_BG);
+                            pass.draw(&mut rpass, Slot::ReferenceView);
+                        }
+                        queue.submit([encoder.finish()]);
+                        device
+                            .poll(wgpu::PollType::wait_indefinitely())
+                            .expect("poll");
+                    }
+                    best = best.min(ms(t) / 10.0);
+                }
+                best
+            };
+            let on = SplatLook::default();
+            let off = SplatLook {
+                view_dependent: false,
+                ..on
+            };
+            draw(&on); // warm up
+            println!(
+                "{n} splats, degree {degree}: draw {:.1} ms, {:.1} ms with it off; {:.0} MB on the GPU",
+                draw(&on),
+                draw(&off),
+                pass.gpu_bytes() as f64 / 1e6
+            );
+        }
     }
+}
+
+/// View-dependent colour of `degree` for every splat of `s`, small and
+/// varied.
+fn some_harmonics(s: &Splats, degree: u8) -> splatstudy_core::reference::Harmonics {
+    let mut h = splatstudy_core::reference::Harmonics::new(degree);
+    for (i, c) in s.colors.iter().enumerate() {
+        let base = [c[0], c[1], c[2]];
+        h.push(base.map(|v| f32::from(v) / 255.0), base, |j, ch| {
+            ((i * 7 + j * 3 + ch) % 11) as f32 * 0.02 - 0.1
+        });
+    }
+    h
 }
