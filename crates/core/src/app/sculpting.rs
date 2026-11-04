@@ -436,7 +436,7 @@ impl App {
     /// [`quad::remesh`]); leaves it as it is, with a notice, if that fails.
     pub(super) fn quad_remesh(&mut self) {
         let m = self.lang.tr().mesh;
-        let quads = (self.tool.quads / 100.0).round() as u32 * 100;
+        let quads = self.tool.quads.round() as u32;
         match quad::remesh(&self.sculpt.mesh, quads) {
             Some(mesh) => {
                 let count = mesh.positions.len();
@@ -620,8 +620,8 @@ impl App {
             self.ask_remesh();
         }
         let range = quad::MIN_QUADS as f32..=quad::MAX_QUADS as f32;
-        ui::slider(ui, tr.mesh.quads, &mut self.tool.quads, range, |v| {
-            format!("{:.0}", (v / 100.0).round() * 100.0)
+        ui::typed_slider(ui, tr.mesh.quads, &mut self.tool.quads, range, 100.0, |v| {
+            format!("{v:.0}")
         });
         if ui::choice(ui, tr.mesh.quad_remesh, false).clicked() {
             self.ask_quad_remesh();
