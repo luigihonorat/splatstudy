@@ -37,6 +37,8 @@ pub(super) enum ViewOption {
     Frame,
     /// Back to the starting camera, keeping the projection.
     Reset,
+    /// Hides the side panels, or shows them: shared by both views.
+    Panels,
 }
 
 /// What the reference view holds, which decides what its toolbar offers.
@@ -65,6 +67,7 @@ impl ViewOption {
             Link => "L",
             Frame => "F",
             Reset => "Home",
+            Panels => "Tab",
         }
     }
 
@@ -87,6 +90,7 @@ impl ViewOption {
             Frame if kind == RefKind::Image => tr.refs.fit_image,
             Frame => st.frame_reference,
             Reset => tr.reset_view,
+            Panels => st.hide_panels,
         }
         .to_owned()
     }
@@ -109,6 +113,7 @@ impl ViewOption {
             Link => icons::link(painter, rect, colour),
             Frame => icons::frame(painter, rect, colour),
             Reset => icons::reset(painter, rect, colour),
+            Panels => icons::panels(painter, rect, colour),
         }
     }
 }
@@ -122,9 +127,9 @@ pub(super) fn lighting_name(st: &StudyTr, lighting: Light) -> &'static str {
 }
 
 /// The buttons of view `index`'s toolbar, in groups from the top:
-/// display, guides, comparison and camera. A picture has no camera, light
-/// or outline of its own, and only the clay has edges, a ghost and a
-/// difference.
+/// display, guides, comparison and camera, then the sculpt's hides the
+/// panels. A picture has no camera, light or outline of its own, and only
+/// the clay has edges, a ghost and a difference.
 pub(super) fn groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
     use ViewOption::*;
     if index == SCULPT {
@@ -133,6 +138,7 @@ pub(super) fn groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
             vec![Grid, Plumb],
             vec![Silhouette, Difference, Ghost, Mirror],
             vec![Frame, Reset, Link],
+            vec![Panels],
         ];
     }
     match kind {
@@ -242,6 +248,7 @@ impl App {
             Ghost => self.study.ghost,
             Mirror => aids.mirror,
             Link => self.study.link,
+            Panels => self.panels.hidden(),
             Lighting | Frame | Reset => false,
         }
     }
@@ -268,6 +275,7 @@ impl App {
             Frame if index == SCULPT => self.frame_sculpt(),
             Frame => self.frame_reference(),
             Reset => self.reset_view(index),
+            Panels => self.toggle_panels(),
         }
         self.dirty = true;
     }
@@ -280,7 +288,12 @@ impl App {
             if !shown(rect) {
                 return None;
             }
-            let groups = groups(index, kind);
+            let mut groups = groups(index, kind);
+            // The reference alone has the sculpt's panel button, so it
+            // is never out of reach.
+            if index == REFERENCE && !shown(rects[SCULPT]) {
+                groups.push(vec![ViewOption::Panels]);
+            }
             let sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
             let (panels, buttons) = layout(rect, on_left(index, self.study.swapped), &sizes);
             Some(Toolbar {

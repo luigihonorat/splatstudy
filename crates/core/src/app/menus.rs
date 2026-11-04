@@ -114,6 +114,8 @@ impl App {
         ui.separator();
         self.study_toggle_items(ui);
         ui.separator();
+        self.panel_items(ui);
+        ui.separator();
         if menu::action(ui, true, tr.switch_theme, "") {
             self.theme = self.theme.toggled();
             ui::theme::apply(ui.ctx(), self.theme);

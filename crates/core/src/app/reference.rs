@@ -335,7 +335,7 @@ impl App {
     }
 
     /// Moves a mesh reference's vertices again after its placement changed.
-    fn refresh_mesh(&mut self) {
+    pub(super) fn refresh_mesh(&mut self) {
         let state = &mut self.reference;
         if let (Some(r), Some(Drawn::Mesh { built_for, .. })) = (&state.current, &state.drawn)
             && *built_for != (r.align, r.crop)
@@ -368,8 +368,6 @@ impl App {
                     self.reference_controls(ui);
                 }
             });
-        // Before this frame's views are drawn.
-        self.refresh_mesh();
     }
 
     /// Alignment, crop and credit.

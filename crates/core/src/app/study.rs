@@ -1107,7 +1107,7 @@ fn paint_grid(painter: &egui::Painter, rect: Rect, divisions: u32) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn timer(minutes: u32, rounds: u32) -> PoseTimer {
@@ -1174,8 +1174,8 @@ mod tests {
 
     /// The whole app offscreen, driven by input events. `None` without a
     /// GPU adapter, and the tests that need one skip.
-    struct Harness {
-        app: App,
+    pub(in crate::app) struct Harness {
+        pub(in crate::app) app: App,
         view: wgpu::TextureView,
         time: f64,
     }
@@ -1183,7 +1183,7 @@ mod tests {
     const SIZE: [u32; 2] = [1280, 720];
 
     impl Harness {
-        fn new() -> Option<Self> {
+        pub(in crate::app) fn new() -> Option<Self> {
             let instance =
                 wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
             let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
@@ -1214,14 +1214,14 @@ mod tests {
             Some(h)
         }
 
-        fn frames(&mut self, n: usize) {
+        pub(in crate::app) fn frames(&mut self, n: usize) {
             for _ in 0..n {
                 self.time += 1.0 / 60.0;
                 self.app.frame(self.time, &self.view, SIZE, 1.0);
             }
         }
 
-        fn pointer(&mut self, phase: crate::PointerPhase, pos: Pos2) {
+        pub(in crate::app) fn pointer(&mut self, phase: crate::PointerPhase, pos: Pos2) {
             use crate::{Button, InputEvent, PointerEvent, PointerKind, PointerPhase};
             let button =
                 matches!(phase, PointerPhase::Down | PointerPhase::Up).then_some(Button::Primary);
@@ -1532,7 +1532,7 @@ mod tests {
 
     impl Harness {
         /// A key pressed and let go, with `shift` held.
-        fn key(&mut self, key: Key, shift: bool) {
+        pub(in crate::app) fn key(&mut self, key: Key, shift: bool) {
             let modifiers = |shift| {
                 crate::InputEvent::Modifiers(crate::input::Modifiers {
                     shift,

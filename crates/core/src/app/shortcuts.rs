@@ -106,6 +106,8 @@ impl App {
                         rows.push((label, key.name().to_owned()));
                     }
                 }
+                rows.push((tr.study.hide_panels, "Tab".to_owned()));
+                rows.push((tr.study.hide_panels_and_reference, "Shift+Tab".to_owned()));
                 rows.push((tr.frame_sculpt, "F".to_owned()));
                 rows.push((tr.reset_view, "Home".to_owned()));
                 for (label, key) in [
@@ -146,6 +148,8 @@ impl App {
                             ui.end_row();
                         }
                     });
+                ui.add_space(6.0);
+                ui.label(RichText::new(tr.study.panels_note).color(muted));
                 ui::section(ui, tr.navigation);
                 ui.label(RichText::new(self.nav_hint()).color(muted));
             });

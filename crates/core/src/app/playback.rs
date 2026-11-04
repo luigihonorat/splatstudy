@@ -50,7 +50,7 @@ impl App {
     }
 
     /// Moves the playhead with the clock and brings the clay up to it.
-    fn advance_playback(&mut self, ui: &egui::Ui) {
+    pub(super) fn advance_playback(&mut self, ui: &egui::Ui) {
         let Some(p) = &mut self.playback else {
             return;
         };
@@ -77,7 +77,6 @@ impl App {
     }
 
     pub(super) fn playback_panel(&mut self, ui: &mut egui::Ui) {
-        self.advance_playback(ui);
         let tr = self.lang.tr();
         let Some(p) = &mut self.playback else {
             return;

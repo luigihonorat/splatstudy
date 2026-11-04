@@ -550,9 +550,15 @@ impl App {
         }
     }
 
-    pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
+    /// What the sculpt panel did each frame, done whether it shows or
+    /// not: the slow operation asked for last frame, and the timelapse.
+    pub(super) fn sculpt_upkeep(&mut self, ui: &egui::Ui) {
         self.run_pending();
         self.sync_clay();
+        self.advance_playback(ui);
+    }
+
+    pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
         if self.playback.is_some() {
             self.playback_panel(ui);
             return;
@@ -649,8 +655,6 @@ impl App {
         {
             self.ask(Pending::FromReference, tr.mesh.from_reference);
         }
-        self.sculpt.refresh();
-        self.sync_clay();
     }
 
     fn pressure(&self) -> f32 {

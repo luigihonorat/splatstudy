@@ -219,6 +219,14 @@ pub fn reset(painter: &Painter, rect: Rect, colour: Color32) {
     pen.polyline(&[(x - 3.5, y - 1.0), (x, y), (x - 0.5, y + 3.5)], false);
 }
 
+/// The side panels: a window with a column down each side.
+pub fn panels(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.polyline(&[(1.5, 2.5), (14.5, 2.5), (14.5, 13.5), (1.5, 13.5)], true);
+    pen.line((5.5, 2.5), (5.5, 13.5));
+    pen.line((10.5, 2.5), (10.5, 13.5));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

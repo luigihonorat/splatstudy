@@ -45,6 +45,13 @@ pub struct StudyTr {
     /// In the view menu, over the items that switch one view's own aids.
     pub sculpt_view: &'static str,
     pub reference_view: &'static str,
+    /// Hides the side panels (Tab), and the reference view too
+    /// (Shift+Tab), so the views take the whole window.
+    pub hide_panels: &'static str,
+    pub hide_panels_and_reference: &'static str,
+    /// Under the shortcuts: what Tab does after Shift+Tab, and in a text
+    /// field.
+    pub panels_note: &'static str,
 }
 
 pub const JA: StudyTr = StudyTr {
@@ -74,6 +81,10 @@ pub const JA: StudyTr = StudyTr {
     frame_reference: "モチーフに合わせる",
     sculpt_view: "塑像のビュー",
     reference_view: "モチーフのビュー",
+    hide_panels: "パネルを隠す",
+    hide_panels_and_reference: "パネルとモチーフを隠す",
+    panels_note: "Shift+Tab のあとの Tab は、パネルとモチーフを両方戻す
+文字の入力中は、Tab で次の欄へ移る",
 };
 
 pub const EN: StudyTr = StudyTr {
@@ -103,6 +114,10 @@ pub const EN: StudyTr = StudyTr {
     frame_reference: "frame reference",
     sculpt_view: "sculpt view",
     reference_view: "reference view",
+    hide_panels: "hide panels",
+    hide_panels_and_reference: "hide panels and reference",
+    panels_note: "after Shift+Tab, Tab brings back the panels and the reference
+in a text field, Tab goes to the next field",
 };
 
 pub const FR: StudyTr = StudyTr {
@@ -132,6 +147,10 @@ pub const FR: StudyTr = StudyTr {
     frame_reference: "cadrer le modèle",
     sculpt_view: "vue sculpture",
     reference_view: "vue modèle",
+    hide_panels: "masquer les panneaux",
+    hide_panels_and_reference: "masquer les panneaux et le modèle",
+    panels_note: "après Maj+Tab, Tab rétablit les panneaux et le modèle
+dans un champ de texte, Tab passe au champ suivant",
 };
 
 fn ja_minutes(n: u32) -> String {

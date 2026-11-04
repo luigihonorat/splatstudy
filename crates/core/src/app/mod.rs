@@ -12,6 +12,7 @@
 //! - `reference`: the reference and its panel
 //! - `study`: comparison aids (camera link, silhouette, ghost, guides, timer)
 //! - `toolbar`: each view's toolbar of view options
+//! - `panels`: hiding the side panels (Tab, Shift+Tab)
 //! - `files`: scenes, opening and importing
 //! - `export`: exporting the timelapse
 //! - `help`: getting started and preferences
@@ -22,6 +23,7 @@ mod export;
 mod files;
 mod help;
 mod menus;
+mod panels;
 mod playback;
 mod reference;
 mod sculpting;
@@ -146,6 +148,8 @@ pub struct App {
     mac: bool,
     show_shortcuts: bool,
     show_about: bool,
+    /// Whether the side panels show.
+    panels: panels::Panels,
     quit: bool,
     debug: bool,
     /// Share of the central width given to the sculpt view.
@@ -220,6 +224,7 @@ impl App {
             mac: cfg!(target_os = "macos"),
             show_shortcuts: false,
             show_about: false,
+            panels: Default::default(),
             quit: false,
             debug: false,
             split: 0.5,
@@ -301,6 +306,7 @@ impl App {
             Pos2::ZERO,
             egui::vec2(size_px[0] as f32, size_px[1] as f32) / ppp,
         );
+        self.panel_keys();
         let mut raw = egui::RawInput {
             screen_rect: Some(screen),
             time: Some(now),
@@ -479,23 +485,32 @@ impl App {
             top: 14,
             bottom: 16,
         });
-        egui::Panel::left("sculpt tools")
-            .exact_size(PANEL_WIDTH)
-            .resizable(false)
-            .frame(panel_frame)
-            .show(ui, |ui| {
-                // Taller than a laptop screen once every tool is there.
-                ui.spacing_mut().scroll = reference::thin_scroll_bar();
-                egui::ScrollArea::vertical()
-                    .id_salt("sculpt panel")
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| self.sculpt_panel(ui));
-            });
-        egui::Panel::right("reference tools")
-            .exact_size(PANEL_WIDTH)
-            .resizable(false)
-            .frame(panel_frame)
-            .show(ui, |ui| self.reference_panel(ui));
+        // Hidden or not, the panels' work goes on each frame: what the
+        // keys asked for, the timelapse, the reference's mesh.
+        self.panels.settle(self.study.layout);
+        self.sculpt_upkeep(ui);
+        if !self.panels.hidden() {
+            egui::Panel::left("sculpt tools")
+                .exact_size(PANEL_WIDTH)
+                .resizable(false)
+                .frame(panel_frame)
+                .show(ui, |ui| {
+                    // Taller than a laptop screen once every tool is there.
+                    ui.spacing_mut().scroll = reference::thin_scroll_bar();
+                    egui::ScrollArea::vertical()
+                        .id_salt("sculpt panel")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| self.sculpt_panel(ui));
+                });
+            egui::Panel::right("reference tools")
+                .exact_size(PANEL_WIDTH)
+                .resizable(false)
+                .frame(panel_frame)
+                .show(ui, |ui| self.reference_panel(ui));
+        }
+        self.sculpt.refresh();
+        self.sync_clay();
+        self.refresh_mesh();
         egui::CentralPanel::no_frame().show(ui, |ui| self.views_ui(ui));
         self.windows(ui);
         self.notice_ui(ui);
