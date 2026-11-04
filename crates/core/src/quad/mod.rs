@@ -9,16 +9,23 @@
 //! 1. The clay is voxel remeshed finely first (two samples per quad
 //!    edge) and smoothed: that closes, merges and evens out whatever it
 //!    was, and irons out bumps smaller than a quad, so the rest always
-//!    starts from a clean, closed surface.
+//!    starts from a clean, closed surface. The fields run on a second,
+//!    coarser one.
 //! 2. Two fields are smoothed over its vertices, coarse to fine
 //!    ([`field`]): which way the quad edges run, and where the corners
 //!    fall.
-//! 3. The quads are read off the fields ([`extract`]), relaxed so they are
-//!    even, and pulled back onto the surface.
+//! 3. A mesh of mostly quads twice the size asked for is read off the
+//!    fields ([`extract`]) and pulled back onto the surface. Larger
+//!    polygons are fanned round a vertex in their middle for now.
 //! 4. Triangles that came out folded over (where the field turns sharply,
 //!    or in deep, narrow creases) are unfolded, mended by collapsing or
 //!    flipping edges, or as a last resort cut out and filled with a fan.
-//! 5. The result is checked: closed, every vertex a single fan, nothing
+//! 5. Every polygon of that mesh, quad, triangle, fanned polygon or
+//!    filled hole, is split into as many quads as it has sides ([`pure`]):
+//!    quads only, at the size asked for. The new vertices are put on the
+//!    surface and evened out, and quads that came out folded are split
+//!    along their other diagonal, or unfolded.
+//! 6. The result is checked: closed, every vertex a single fan, nothing
 //!    folded. If not, it is tried again from another start, then given up.
 //!
 //! The clay stays a triangle mesh: each quad is two triangles, listed in
@@ -27,6 +34,7 @@
 pub mod extract;
 pub mod field;
 pub mod graph;
+pub mod pure;
 pub mod surface;
 
 use std::collections::HashMap;
@@ -42,20 +50,27 @@ use surface::Surface;
 /// The quad count slider's range and starting value.
 pub const MIN_QUADS: u32 = 1_000;
 pub const MAX_QUADS: u32 = 20_000;
-pub const DEFAULT_QUADS: u32 = 5_000;
+pub const DEFAULT_QUADS: u32 = 10_000;
 
-/// Voxels along a quad edge in the fine voxel remesh the fields run on.
+/// Voxels along a quad edge in the fine voxel remesh the quads are laid
+/// on.
 const SAMPLES_PER_EDGE: f32 = 2.0;
+/// The voxel remesh the fields run on is this many times coarser.
+const FIELD_COARSER: f32 = 1.5;
 /// The fine voxel remesh is made coarser beyond this many vertices.
 const MAX_SAMPLES: usize = 250_000;
-/// At most one quad for this many vertices of the clay.
-const INPUT_VERTICES_PER_QUAD: usize = 4;
+/// At most one quad for this many vertices of the clay (the mesh read off
+/// the fields, before the split, has a quarter of that).
+const INPUT_VERTICES_PER_QUAD: usize = 1;
 /// Smoothing passes over the voxel remesh first.
 const SMOOTH_PASSES: usize = 10;
-/// Passes evening out the quads at the end.
-const RELAX_PASSES: usize = 6;
+/// Passes evening out the quads at the end (more round off ridges).
+const RELAX_PASSES: usize = 3;
 /// Further passes, only around triangles that came out flipped.
 const FIX_PASSES: usize = 8;
+/// Passes unfolding the quads after the split, half of them trying the
+/// other diagonal.
+const FINE_FIX_PASSES: usize = 16;
 /// Rounds of mending triangles still folded after those.
 const MEND_ROUNDS: usize = 6;
 /// Then rounds of cutting them out and filling the hole, before giving up.
@@ -87,31 +102,48 @@ pub fn remesh(mesh: &Mesh, quads: u32) -> Option<Mesh> {
         return None;
     }
     let edge = (area / target).sqrt();
+    // The surface the quads are laid on: two samples along each quad edge.
     let resolution = (size * SAMPLES_PER_EDGE / edge)
         .ceil()
         .clamp(voxel::MIN_RESOLUTION as f32, voxel::MAX_RESOLUTION as f32);
-    let mut base = voxel::remesh(mesh, resolution as u32)?;
-    if base.positions.len() > MAX_SAMPLES {
-        // A tangle with far more surface than its triangles' area said
-        // (a soup of crossing triangles): coarser, to keep it quick.
-        let coarser = resolution * (MAX_SAMPLES as f32 / base.positions.len() as f32).sqrt();
-        base = voxel::remesh(mesh, coarser.max(voxel::MIN_RESOLUTION as f32) as u32)?;
-    }
-    smooth(&mut base);
+    let detail = sampled(mesh, resolution)?;
     // The voxel remesh merged and closed things: measure again.
-    let edge = (area_of(&base) / target).sqrt();
+    let edge = (area_of(&detail) / target).sqrt();
     if !(edge > 0.0 && edge.is_finite()) {
         return None;
     }
+    // The fields need fewer samples, as the edges of the mesh read off
+    // them are twice as long: two thirds of the resolution, less than half
+    // the samples. (Half would be quicker still, but its corners fall less
+    // well on ridges and tips.)
+    let base = sampled(
+        mesh,
+        (resolution / FIELD_COARSER).max(voxel::MIN_RESOLUTION as f32),
+    )?;
     let hierarchy = Hierarchy::build(Graph::of_mesh(&base));
-    let surface = Surface::new(&base, edge * 0.5);
+    let surface = Surface::new(&detail, edge * 0.5);
     (0..ATTEMPTS).find_map(|attempt| {
-        let scale = edge * (1.0 + 0.04 * attempt as f32);
+        // Read off at twice the length, and split in four (see [`pure`]).
+        let scale = edge * 2.0 * (1.0 + 0.04 * attempt as f32);
         let o = field::orientation(&hierarchy, attempt);
         let p = field::position(&hierarchy, &o, scale);
         let extracted = extract::extract(&hierarchy.levels[0], &o, &p, scale)?;
-        finish(extracted, &surface)
+        finish(extracted, &surface, scale)
     })
+}
+
+/// The clay voxel remeshed at `resolution`, or coarser if that comes out
+/// far too heavy, and smoothed.
+fn sampled(mesh: &Mesh, resolution: f32) -> Option<Mesh> {
+    let mut out = voxel::remesh(mesh, resolution as u32)?;
+    if out.positions.len() > MAX_SAMPLES {
+        // A tangle with far more surface than its triangles' area said
+        // (a soup of crossing triangles): coarser, to keep it quick.
+        let coarser = resolution * (MAX_SAMPLES as f32 / out.positions.len() as f32).sqrt();
+        out = voxel::remesh(mesh, coarser.max(voxel::MIN_RESOLUTION as f32) as u32)?;
+    }
+    smooth(&mut out);
+    Some(out)
 }
 
 /// Smooths away bumps smaller than a quad (a scan's or splats' noise),
@@ -163,10 +195,15 @@ fn euler(vertices: usize, triangles: &[[u32; 3]]) -> i64 {
     vertices as i64 - (triangles.len() * 3 / 2) as i64 + triangles.len() as i64
 }
 
-/// Keeps the largest piece, evens out the quads on the surface, mends
-/// triangles that came out flipped, checks the result and makes it the
-/// clay's mesh.
-fn finish(ex: Extracted, surface: &Surface) -> Option<Mesh> {
+/// Keeps the largest piece, puts it on the surface, mends triangles that
+/// came out flipped and checks the result; then splits it into quads only,
+/// evened out, and makes that the clay's mesh.
+fn finish(ex: Extracted, surface: &Surface, scale: f32) -> Option<Mesh> {
+    refine(&coarse(ex, surface)?, surface, scale * 0.5)
+}
+
+/// The mesh read off the fields, cleaned up: see [`finish`].
+fn coarse(ex: Extracted, surface: &Surface) -> Option<Extracted> {
     let mut ex = largest_piece(ex);
     if ex.triangles.is_empty() {
         return None;
@@ -174,11 +211,10 @@ fn finish(ex: Extracted, surface: &Surface) -> Option<Mesh> {
     for v in 0..ex.positions.len() {
         land(surface, &mut ex, v);
     }
+    // Not evened out yet: at this size, sliding the corners along the
+    // surface pulls them off ridges and tips, which the quads then cut
+    // off. That waits for the split.
     let mut around = rings(&ex);
-    let all: Vec<u32> = (0..ex.positions.len() as u32).collect();
-    for _ in 0..RELAX_PASSES {
-        relax(surface, &mut ex, &around, &all, 0.5, true);
-    }
     // Triangles folded over: their corners are moved further, a few times.
     // If that is not enough, they are mended (see `mend`), and as a last
     // resort the patch round them is cut out and filled again (see
@@ -231,8 +267,75 @@ fn finish(ex: Extracted, surface: &Surface) -> Option<Mesh> {
         ex = largest_piece(ex);
         around = rings(&ex);
     }
-    is_closed_manifold(ex.positions.len(), &ex.triangles)
-        .then(|| with_quads(ex.positions, ex.triangles, &ex.quads))
+    is_closed_manifold(ex.positions.len(), &ex.triangles).then_some(ex)
+}
+
+/// Splits the coarse mesh into quads only (see [`pure`]), puts the new
+/// vertices on the surface (looking up to `reach` either way), evens the quads out there, and unfolds any
+/// that came out folded; `None` if some stay folded.
+fn refine(ex: &Extracted, surface: &Surface, reach: f32) -> Option<Mesh> {
+    let mut polygons = pure::polygons(ex);
+    pure::dissolve_twos(&mut polygons, ex.positions.len());
+    let split = pure::split(&ex.positions, &ex.normals, &polygons);
+    let (quads, corners) = (split.quads, split.corners);
+    let around = pure::rings(split.positions.len(), &quads);
+    let mut flip = vec![false; quads.len()];
+    let (triangles, pairs) = pure::triangulate(&split.positions, &quads, &flip)?;
+    let mut fine = Extracted {
+        positions: split.positions,
+        normals: split.normals,
+        triangles,
+        quads: pairs,
+        centres: Vec::new(),
+    };
+    // The new vertices, along the normal: in the middle of an edge or a
+    // polygon across a ridge they are inside it, where the nearest point
+    // would be on its side, and cut the ridge off.
+    for v in corners..fine.positions.len() {
+        match surface.along(fine.positions[v], fine.normals[v], reach) {
+            Some((p, n)) => {
+                fine.positions[v] = p;
+                fine.normals[v] = n;
+            }
+            None => land(surface, &mut fine, v),
+        }
+    }
+    let all: Vec<u32> = (0..fine.positions.len() as u32).collect();
+    for _ in 0..RELAX_PASSES {
+        relax(surface, &mut fine, &around, &all, 0.5, true);
+    }
+    // Quads with a half folded over: split along the other diagonal, or
+    // their corners moved further, along the surface first, then freely.
+    for pass in 0..=FINE_FIX_PASSES {
+        let (triangles, pairs) = pure::triangulate(&fine.positions, &quads, &flip)?;
+        fine.triangles = triangles;
+        fine.quads = pairs;
+        let bad = wrong(&fine);
+        if bad.is_empty() {
+            break;
+        }
+        if pass == FINE_FIX_PASSES {
+            return None;
+        }
+        if pass % 2 == 0 {
+            // The triangles of quad k are 2k and 2k + 1.
+            let mut folded: Vec<usize> = bad.iter().map(|&t| t / 2).collect();
+            folded.dedup();
+            for k in folded {
+                flip[k] = !flip[k];
+            }
+            continue;
+        }
+        let corners: Vec<u32> = bad.iter().flat_map(|&t| fine.triangles[t]).collect();
+        let free = pass >= FINE_FIX_PASSES / 2;
+        let (rings_out, times) = if free { (3, 20) } else { (1, 1) };
+        let near = grow(&around, corners, rings_out);
+        for _ in 0..times {
+            relax(surface, &mut fine, &around, &near, 1.0, !free);
+        }
+    }
+    is_closed_manifold(fine.positions.len(), &fine.triangles)
+        .then(|| with_quads(fine.positions, fine.triangles, &fine.quads))
 }
 
 /// Puts vertex `v` on the surface, on the side it faces.
@@ -405,6 +508,7 @@ fn mend(ex: &mut Extracted, bad: &[usize]) -> usize {
             gone[t1] = true;
             gone[t2] = true;
             into[v as usize] = u;
+            ex.centres[u as usize] |= ex.centres[v as usize];
             ex.positions[u as usize] = (ex.positions[u as usize] + ex.positions[v as usize]) * 0.5;
             mended += 1;
             continue;
@@ -530,6 +634,7 @@ fn patch(ex: &mut Extracted, around: &[Vec<u32>], bad: &[usize], width: usize) -
         let c = ex.positions.len() as u32;
         ex.positions.push(centre);
         ex.normals.push(normal);
+        ex.centres.push(true);
         for (i, &u) in hole.iter().enumerate() {
             let v = hole[(i + 1) % hole.len()];
             triangles.push([u, v, c]);
@@ -591,6 +696,7 @@ fn largest_piece(ex: Extracted) -> Extracted {
     let mut remap = vec![NONE; n];
     let mut positions = Vec::new();
     let mut normals = Vec::new();
+    let mut centres = Vec::new();
     let mut tri_remap = vec![NONE; ex.triangles.len()];
     let mut triangles = Vec::new();
     for (k, t) in ex.triangles.iter().enumerate() {
@@ -602,6 +708,7 @@ fn largest_piece(ex: Extracted) -> Extracted {
                 remap[v as usize] = positions.len() as u32;
                 positions.push(ex.positions[v as usize]);
                 normals.push(ex.normals[v as usize]);
+                centres.push(ex.centres[v as usize]);
             }
             remap[v as usize]
         });
@@ -619,6 +726,7 @@ fn largest_piece(ex: Extracted) -> Extracted {
         normals,
         triangles,
         quads,
+        centres,
     }
 }
 
@@ -673,25 +781,28 @@ pub fn is_closed_manifold(vertices: usize, triangles: &[[u32; 3]]) -> bool {
 }
 
 /// The mesh for the clay, in the order [`Mesh::new`] gives it, with the
-/// quads found again in that order.
+/// quads found again in that order. If they can't all be found (two
+/// vertices in the same place can't be told apart), in the order given.
 fn with_quads(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>, quads: &[[u32; 2]]) -> Mesh {
     let key = |p: Vec3| p.to_array().map(f32::to_bits);
-    let before: Vec<[u32; 3]> = positions.iter().map(|&p| key(p)).collect();
-    let old_triangles = triangles.clone();
-    let mut mesh = Mesh::new(positions, triangles);
+    let as_given = |positions: Vec<Vec3>, triangles: Vec<[u32; 3]>| {
+        let mut mesh = Mesh::from_ordered(positions, triangles);
+        mesh.quads = quads.to_vec();
+        mesh
+    };
+    let mesh = Mesh::new(positions.clone(), triangles.clone());
     let mut index = HashMap::with_capacity(mesh.positions.len());
     for (i, &p) in mesh.positions.iter().enumerate() {
         if index.insert(key(p), i as u32).is_some() {
-            // Two vertices in the same place: no telling them apart.
-            return mesh;
+            return as_given(positions, triangles);
         }
     }
-    let Some(remap) = before
+    let Some(remap) = positions
         .iter()
-        .map(|k| index.get(k).copied())
+        .map(|&p| index.get(&key(p)).copied())
         .collect::<Option<Vec<u32>>>()
     else {
-        return mesh;
+        return as_given(positions, triangles);
     };
     // A triangle by its corners, starting from the lowest.
     let canonical = |t: [u32; 3]| {
@@ -705,13 +816,18 @@ fn with_quads(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>, quads: &[[u32; 2]]
         .map(|(i, &t)| (canonical(t), i as u32))
         .collect();
     let new_index = |t: u32| {
-        let t = old_triangles.get(t as usize)?.map(|v| remap[v as usize]);
+        let t = triangles.get(t as usize)?.map(|v| remap[v as usize]);
         found.get(&canonical(t)).copied()
     };
-    mesh.quads = quads
+    let Some(renumbered) = quads
         .iter()
-        .filter_map(|&[a, b]| Some([new_index(a)?, new_index(b)?]))
-        .collect();
+        .map(|&[a, b]| Some([new_index(a)?, new_index(b)?]))
+        .collect::<Option<Vec<[u32; 2]>>>()
+    else {
+        return as_given(positions, triangles);
+    };
+    let mut mesh = mesh;
+    mesh.quads = renumbered;
     mesh
 }
 
@@ -735,24 +851,36 @@ mod tests {
         valence.iter().filter(|&&k| k == 4).count() as f32 / valence.len() as f32
     }
 
-    fn check(mesh: &Mesh) {
+    /// Closed, manifold, nothing folded, and quads only: every triangle
+    /// paired with another into a quad, and about as many as asked for.
+    fn check(mesh: &Mesh, asked: usize) {
         assert!(is_closed(&mesh.triangles));
         assert!(is_closed_manifold(mesh.positions.len(), &mesh.triangles));
-        let quad_triangles = mesh.quads.len() * 2;
+        let ex = Extracted {
+            positions: mesh.positions.clone(),
+            normals: mesh.normals.clone(),
+            triangles: mesh.triangles.clone(),
+            quads: Vec::new(),
+            centres: Vec::new(),
+        };
+        assert!(wrong(&ex).is_empty(), "folded");
+        let mut paired = vec![0; mesh.triangles.len()];
+        for &[a, b] in &mesh.quads {
+            paired[a as usize] += 1;
+            paired[b as usize] += 1;
+        }
+        assert!(paired.iter().all(|&k| k == 1), "every triangle in one quad");
+        let quads = mesh.quads.len();
         assert!(
-            quad_triangles as f32 > mesh.triangles.len() as f32 * 0.85,
-            "{} of {} triangles in quads",
-            quad_triangles,
-            mesh.triangles.len()
+            quads.abs_diff(asked) * 100 < asked * 15,
+            "{quads} quads for {asked}"
         );
     }
 
     #[test]
     fn a_sphere_comes_out_as_even_quads_on_the_sphere() {
         let mesh = remesh(&Mesh::icosphere(5), 2000).expect("remeshed");
-        check(&mesh);
-        let quads = mesh.quads.len();
-        assert!((1500..2600).contains(&quads), "{quads} quads");
+        check(&mesh, 2000);
         let regular = regular_share(&mesh);
         assert!(regular > 0.8, "{regular} regular");
         for p in &mesh.positions {
@@ -825,7 +953,7 @@ mod tests {
         ] {
             let before = euler(input.positions.len(), &input.triangles);
             let mesh = remesh(&input, quads).unwrap_or_else(|| panic!("{name}"));
-            check(&mesh);
+            check(&mesh, quads as usize);
             assert_eq!(
                 euler(mesh.positions.len(), &mesh.triangles),
                 before,
@@ -845,6 +973,18 @@ mod tests {
                 "{name}: {a:?} {b:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_obj_export_has_quads_only() {
+        let mesh = remesh(&lumpy(), 1500).expect("remeshed");
+        let text = String::from_utf8(crate::meshio::obj::write(&mesh)).unwrap();
+        let faces: Vec<&str> = text.lines().filter(|l| l.starts_with("f ")).collect();
+        assert_eq!(faces.len(), mesh.quads.len());
+        assert!(
+            faces.iter().all(|f| f.split_whitespace().count() == 5),
+            "f a b c d"
+        );
     }
 
     #[test]
@@ -883,6 +1023,7 @@ mod tests {
                         is_closed_manifold(out.positions.len(), &out.triangles),
                         "case {k}"
                     );
+                    assert_eq!(out.quads.len() * 2, out.triangles.len(), "case {k}");
                 }
             }
         }
@@ -915,7 +1056,7 @@ mod tests {
             .map(|&p| p * (1.0 + 0.1 * (5.0 * p.x).sin() * (4.0 * p.y).sin() * (3.0 * p.z).cos()))
             .collect();
         let clay = Mesh::new(positions, sphere.triangles.clone());
-        for quads in [MIN_QUADS, DEFAULT_QUADS, 10_000, MAX_QUADS] {
+        for quads in [MIN_QUADS, 5_000, DEFAULT_QUADS, MAX_QUADS] {
             let start = Instant::now();
             let mesh = remesh(&clay, quads).expect("remeshed");
             println!(

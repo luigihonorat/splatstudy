@@ -127,24 +127,77 @@ impl<'a> Surface<'a> {
                 break;
             }
         }
-        best.map(|(_, q, t)| {
-            // The corners' normals, blended by where `q` is in the triangle.
-            let tri = self.mesh.triangles[t as usize];
-            let [a, b, c] = tri.map(|i| self.mesh.positions[i as usize]);
-            let face = (b - a).cross(c - a);
-            let weights = [
-                (c - b).cross(q - b),
-                (a - c).cross(q - c),
-                (b - a).cross(q - a),
-            ]
-            .map(|w| w.dot(face).max(0.0));
-            let blended: Vec3 = tri
-                .iter()
-                .zip(weights)
-                .map(|(&i, w)| self.mesh.normals[i as usize] * w)
-                .sum();
-            (q, blended.normalize_or(face.normalize_or(Vec3::Y)))
+        best.map(|(_, q, t)| (q, self.normal_at(q, t)))
+    }
+
+    /// Where the line through `p` along `direction` crosses the mesh
+    /// within `reach` either way, nearest `p`, on a triangle facing the
+    /// same way as `direction`; and the surface normal there. Unlike the
+    /// nearest point, this finds the tip of a ridge from inside it.
+    pub fn along(&self, p: Vec3, direction: Vec3, reach: f32) -> Option<(Vec3, Vec3)> {
+        let d = direction.normalize_or_zero();
+        if d == Vec3::ZERO || !p.is_finite() || reach.is_nan() || reach <= 0.0 {
+            return None;
+        }
+        let from = p - d * reach;
+        let steps = ((2.0 * reach / (self.cell * 0.25)).ceil() as usize).clamp(1, 4096);
+        let mut cells: Vec<usize> = (0..=steps)
+            .map(|k| self.index(self.cell_of(from + d * (2.0 * reach * k as f32 / steps as f32))))
+            .collect();
+        cells.sort_unstable();
+        cells.dedup();
+        let mut best: Option<(f32, u32)> = None;
+        for k in cells {
+            let range = self.offsets[k] as usize..self.offsets[k + 1] as usize;
+            for &t in &self.items[range] {
+                let [a, b, c] =
+                    self.mesh.triangles[t as usize].map(|i| self.mesh.positions[i as usize]);
+                if (b - a).cross(c - a).dot(d) <= 0.0 {
+                    continue;
+                }
+                // Möller and Trumbore's line and triangle test.
+                let (e1, e2) = (b - a, c - a);
+                let h = d.cross(e2);
+                let det = e1.dot(h);
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let s = p - a;
+                let u = s.dot(h) / det;
+                let q = s.cross(e1);
+                let v = d.dot(q) / det;
+                if !(0.0..=1.0).contains(&u) || v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                let along = e2.dot(q) / det;
+                if along.abs() <= reach && best.is_none_or(|(x, _)| along.abs() < x.abs()) {
+                    best = Some((along, t));
+                }
+            }
+        }
+        best.map(|(along, t)| {
+            let q = p + d * along;
+            (q, self.normal_at(q, t))
         })
+    }
+
+    /// The corners' normals of triangle `t`, blended by where `q` is in it.
+    fn normal_at(&self, q: Vec3, t: u32) -> Vec3 {
+        let tri = self.mesh.triangles[t as usize];
+        let [a, b, c] = tri.map(|i| self.mesh.positions[i as usize]);
+        let face = (b - a).cross(c - a);
+        let weights = [
+            (c - b).cross(q - b),
+            (a - c).cross(q - c),
+            (b - a).cross(q - a),
+        ]
+        .map(|w| w.dot(face).max(0.0));
+        let blended: Vec3 = tri
+            .iter()
+            .zip(weights)
+            .map(|(&i, w)| self.mesh.normals[i as usize] * w)
+            .sum();
+        blended.normalize_or(face.normalize_or(Vec3::Y))
     }
 }
 
@@ -161,5 +214,32 @@ mod tests {
             assert!((q.length() - 1.0).abs() < 0.02, "{q}");
             assert!(n.dot(q.normalize()) > 0.95);
         }
+    }
+
+    #[test]
+    fn a_line_from_inside_finds_the_tip() {
+        // A thin cone pointing up +X: from a point inside it near the
+        // tip, the nearest point is on its side, the line along +X
+        // reaches the tip.
+        let (n, tip) = (24, Vec3::X * 2.0);
+        let mut positions = vec![tip, Vec3::ZERO];
+        for k in 0..n {
+            let a = k as f32 / n as f32 * std::f32::consts::TAU;
+            positions.push(Vec3::new(0.0, a.cos() * 0.3, a.sin() * 0.3));
+        }
+        let mut triangles = Vec::new();
+        for k in 0..n {
+            let (i, j) = (2 + k, 2 + (k + 1) % n);
+            triangles.push([0, i, j]);
+            triangles.push([1, j, i]);
+        }
+        let mesh = Mesh::new(positions, triangles);
+        let surface = Surface::new(&mesh, 0.1);
+        let inside = Vec3::new(1.7, 0.0, 0.0);
+        let (q, _) = surface.along(inside, Vec3::X, 0.5).expect("crossed");
+        assert!(q.distance(tip) < 0.02, "{q}");
+        let (q, _) = surface.nearest(inside, Vec3::X).expect("near");
+        assert!(q.distance(tip) > 0.1, "{q}");
+        assert!(surface.along(inside, Vec3::X, 0.1).is_none());
     }
 }

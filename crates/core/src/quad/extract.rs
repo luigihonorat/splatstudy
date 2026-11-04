@@ -29,6 +29,9 @@ pub struct Extracted {
     pub triangles: Vec<[u32; 3]>,
     /// Pairs of triangles that make one quad.
     pub quads: Vec<[u32; 2]>,
+    /// The vertices put in the middle of a polygon (or a hole) to fan it
+    /// into triangles: the polygon is taken back from the fan round them.
+    pub centres: Vec<bool>,
 }
 
 struct Sets {
@@ -260,7 +263,9 @@ pub fn extract(g: &Graph, o: &[Vec3], p: &[Vec3], scale: f32) -> Option<Extracte
         normals: vertices.normals,
         triangles: Vec::new(),
         quads: Vec::new(),
+        centres: Vec::new(),
     };
+    out.centres = vec![false; out.positions.len()];
     let mut taken: HashSet<(u32, u32)> = HashSet::new();
     for (a, list) in around.iter().enumerate() {
         for &b in list {
@@ -446,6 +451,7 @@ fn fan(out: &mut Extracted, polygon: &[u32]) {
     let c = out.positions.len() as u32;
     out.positions.push(centre);
     out.normals.push(normal);
+    out.centres.push(true);
     for (k, &a) in polygon.iter().enumerate() {
         let b = polygon[(k + 1) % polygon.len()];
         out.triangles.push([a, b, c]);
