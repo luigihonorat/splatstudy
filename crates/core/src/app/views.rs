@@ -248,6 +248,8 @@ impl App {
         // the clay still follows the hand. The guides stay on the screen.
         let screen = pointer;
         let pointer = pointer.map(|pos| self.view_pos(rect, pos));
+        // Zooming goes by the hand on the screen, mirrored or not.
+        let zoom = self.nav.zoom(delta.x, delta.y);
         let delta = if self.study.mirror {
             egui::vec2(-delta.x, delta.y)
         } else {
@@ -330,7 +332,7 @@ impl App {
                         free = (camera.yaw, camera.pitch);
                     }
                     NavAction::Pan => camera.pan(delta.x, delta.y, rect.height()),
-                    NavAction::Zoom => camera.dolly((delta.y * DOLLY_DRAG).exp()),
+                    NavAction::Zoom => camera.dolly((zoom * DOLLY_DRAG).exp()),
                 }
                 self.drags[index] = Some(Drag::Navigate {
                     action,

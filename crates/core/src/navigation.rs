@@ -73,6 +73,20 @@ impl NavStyle {
         }
     }
 
+    /// How far a zoom drag that moved the pointer by `dx`, `dy` points on
+    /// the screen goes, in points: positive moves the view away, negative
+    /// closer. Up is always closer. In ZBrush and Maya style a sideways
+    /// drag zooms too, right closer and left away (Maya dollies in to the
+    /// right); each step goes by whichever way the pointer moved more, so
+    /// a slanted drag doesn't cancel itself out. Blender style zooms with
+    /// up and down only.
+    pub fn zoom(self, dx: f32, dy: f32) -> f32 {
+        match self {
+            NavStyle::ZBrush | NavStyle::Maya if dx.abs() > dy.abs() => -dx,
+            _ => dy,
+        }
+    }
+
     /// Whether a turn in progress snaps to the nearest front, side, back,
     /// top or bottom view: Shift in ZBrush style.
     pub fn snaps(self, m: Modifiers) -> bool {
@@ -253,6 +267,29 @@ mod tests {
             Some(NavAction::Orbit)
         );
         assert!(!NavStyle::Maya.inverts(NONE));
+    }
+
+    #[test]
+    fn zbrush_and_maya_zoom_sideways_too() {
+        for style in [NavStyle::ZBrush, NavStyle::Maya] {
+            // Up closer, down away, as before.
+            assert_eq!(style.zoom(0.0, -5.0), -5.0, "{style:?}");
+            assert_eq!(style.zoom(0.0, 5.0), 5.0, "{style:?}");
+            // Right closer, left away.
+            assert_eq!(style.zoom(4.0, 0.0), -4.0, "{style:?}");
+            assert_eq!(style.zoom(-4.0, 0.0), 4.0, "{style:?}");
+            // A slanted step goes by the larger movement, whole.
+            assert_eq!(style.zoom(6.0, 2.0), -6.0, "{style:?}");
+            assert_eq!(style.zoom(-1.0, -3.0), -3.0, "{style:?}");
+            assert_eq!(style.zoom(1.0, 3.0), 3.0, "{style:?}");
+        }
+        // Up and right both come closer: a drag up and to the right zooms
+        // in all the way, whichever way each step leans.
+        let z = NavStyle::ZBrush;
+        assert!(z.zoom(3.0, -2.0) < 0.0 && z.zoom(2.0, -3.0) < 0.0);
+        // Blender style keeps to up and down.
+        assert_eq!(NavStyle::Blender.zoom(6.0, 2.0), 2.0);
+        assert_eq!(NavStyle::Blender.zoom(6.0, 0.0), 0.0);
     }
 
     #[test]
