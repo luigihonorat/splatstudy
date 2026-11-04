@@ -1765,13 +1765,22 @@ mod tests {
     /// The scene as "save a copy without timelapse" writes it.
     fn save_lean(s: &Sculpt, view: &View) -> Vec<u8> {
         let mut w = SceneWriter::new();
-        w.mesh(&s.mesh).levels_now(s).quads_now(s).view(view);
+        w.mesh(&s.mesh)
+            .levels_now(s)
+            .quads_now(s)
+            .layers_now(s)
+            .view(view);
         w.finish()
     }
 
     #[test]
     fn a_copy_without_its_timelapse_opens_as_the_clay_is() {
-        for live in [leveled_session(), quad_session(), session()] {
+        for live in [
+            leveled_session(),
+            quad_session(),
+            layered_session(),
+            session(),
+        ] {
             let lean = save_lean(&live, &view());
             let full = save(&live, &view());
             assert!(lean.len() < full.len(), "{} < {}", lean.len(), full.len());
@@ -1788,6 +1797,7 @@ mod tests {
             assert_eq!(scene.mesh.triangles, live.mesh.triangles);
             assert_eq!(scene.mesh.quads, sorted(&live.mesh.quads));
             assert_eq!(scene.levels.as_ref(), live.level_data());
+            assert_eq!(scene.mesh.layers, live.mesh.layers);
             assert_eq!(scene.view, Some(view()));
 
             // It opens as a new session from the clay as it is, which
