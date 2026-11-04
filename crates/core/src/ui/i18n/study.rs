@@ -38,6 +38,13 @@ pub struct StudyTr {
     pub top_light: &'static str,
     /// The mesh's edges drawn over the clay, in the view menu.
     pub wireframe: &'static str,
+    /// The perspective, on; off, the view is orthographic.
+    pub perspective: &'static str,
+    /// Fits the reference view to the reference.
+    pub frame_reference: &'static str,
+    /// In the view menu, over the items that switch one view's own aids.
+    pub sculpt_view: &'static str,
+    pub reference_view: &'static str,
 }
 
 pub const JA: StudyTr = StudyTr {
@@ -63,6 +70,10 @@ pub const JA: StudyTr = StudyTr {
     raking: "斜光",
     top_light: "天窓",
     wireframe: "ワイヤーフレーム",
+    perspective: "パース表示",
+    frame_reference: "モチーフに合わせる",
+    sculpt_view: "塑像のビュー",
+    reference_view: "モチーフのビュー",
 };
 
 pub const EN: StudyTr = StudyTr {
@@ -88,6 +99,10 @@ pub const EN: StudyTr = StudyTr {
     raking: "raking",
     top_light: "top",
     wireframe: "wireframe",
+    perspective: "perspective",
+    frame_reference: "frame reference",
+    sculpt_view: "sculpt view",
+    reference_view: "reference view",
 };
 
 pub const FR: StudyTr = StudyTr {
@@ -113,6 +128,10 @@ pub const FR: StudyTr = StudyTr {
     raking: "rasant",
     top_light: "zénithal",
     wireframe: "fil de fer",
+    perspective: "perspective",
+    frame_reference: "cadrer le modèle",
+    sculpt_view: "vue sculpture",
+    reference_view: "vue modèle",
 };
 
 fn ja_minutes(n: u32) -> String {

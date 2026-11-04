@@ -109,7 +109,7 @@ impl App {
             self.frame_sculpt();
         }
         if menu::action(ui, true, tr.reset_view, "Home") {
-            self.reset_view();
+            self.reset_view(self.focused_view());
         }
         ui.separator();
         self.study_toggle_items(ui);

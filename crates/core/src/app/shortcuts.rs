@@ -6,6 +6,7 @@
 use egui::{Align2, Key, RichText};
 
 use super::sculpting::{BRUSHES, TOOL_PIE_KEY, brush_name};
+use super::toolbar::ViewOption;
 use super::views::viewpoints;
 use super::{App, REPO_URL, SITE_URL, WEB};
 use crate::navigation::NavStyle;
@@ -25,11 +26,12 @@ impl App {
                     self.view_from(yaw, pitch);
                 }
             }
+            // In the view under the pointer.
             if pressed(M::NONE, Key::F) {
-                self.frame_sculpt();
+                self.apply(ViewOption::Frame, self.key_view(ui));
             }
             if pressed(M::NONE, Key::Home) {
-                self.reset_view();
+                self.apply(ViewOption::Reset, self.key_view(ui));
             }
             self.study_shortcuts(ui);
         }
@@ -107,6 +109,7 @@ impl App {
                 rows.push((tr.frame_sculpt, "F".to_owned()));
                 rows.push((tr.reset_view, "Home".to_owned()));
                 for (label, key) in [
+                    (tr.study.perspective, "5"),
                     (tr.link_cameras, "L"),
                     (tr.study.swap_sides, "W"),
                     (tr.mirror_view, "R"),

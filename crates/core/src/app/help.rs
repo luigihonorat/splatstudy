@@ -46,7 +46,8 @@ impl App {
     ///   through [`Request::Fetch`].
     /// - `view=<name>[,<name>…]` (repeatable) turns study aids on:
     ///   `silhouette`, `ghost`, `mirror`, `plumb`, `grid`, `link`, `swap`,
-    ///   and the layout `both`, `sculpt` or `reference`. Unknown names are
+    ///   `ortho`, and the layout `both`, `sculpt` or `reference`. The
+    ///   aids each view has of its own turn on in both. Unknown names are
     ///   logged and skipped.
     ///
     /// `lang` and `debug` are read by the shells themselves.
@@ -120,15 +121,17 @@ impl App {
         self.dirty = true;
     }
 
-    /// Turns on one study aid by its URL name; false if there is none.
+    /// Turns on one study aid by its URL name, in both views; false if
+    /// there is none.
     fn apply_view(&mut self, name: &str) -> bool {
         let st = &mut self.study;
         match name {
-            "silhouette" => st.silhouette = true,
+            "silhouette" => st.views.iter_mut().for_each(|v| v.silhouette = true),
             "ghost" => st.ghost = true,
-            "mirror" => st.mirror = true,
-            "plumb" => st.plumb = true,
-            "grid" => st.grid = true,
+            "mirror" => st.views.iter_mut().for_each(|v| v.mirror = true),
+            "plumb" => st.views.iter_mut().for_each(|v| v.plumb = true),
+            "grid" => st.views.iter_mut().for_each(|v| v.grid = true),
+            "ortho" => self.cameras.iter_mut().for_each(|c| c.ortho = true),
             "link" => st.link = true,
             "swap" => st.swapped = true,
             "both" => st.layout = Layout::Both,

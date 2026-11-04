@@ -8,18 +8,20 @@ use egui::Key;
 
 use super::reference::REFERENCE_EXTENSIONS;
 use super::sculpting::{Pending, start_sculpt};
-use super::study::Layout as ViewLayout;
+use super::study::{Aids, Layout as ViewLayout};
 use super::{App, Drag, REFERENCE, Request, SCULPT, WEB};
 use crate::input::FilePurpose;
 use crate::io::Writer;
 use crate::meshio;
 use crate::reference::Reference;
 use crate::reference::load;
-use crate::render::clay::GpuMesh;
+use crate::render::clay::{GpuMesh, Lighting};
 use crate::scene::autosave::{Autosave, Trouble};
 use crate::scene::blob::content_hash;
 use crate::scene::reference::write_reference_by_key;
-use crate::scene::{BlobKey, HistoryCache, SavedReference, Scene, SceneWriter, StudyView, View};
+use crate::scene::{
+    BlobKey, HistoryCache, SavedReference, Scene, SceneWriter, StudyView, View, ViewAids,
+};
 use crate::sculpt::Sculpt;
 use crate::sculpt::record::starts_with_mesh;
 use crate::ui::menu;
@@ -84,6 +86,7 @@ fn revision(
     sculpt: &Sculpt,
     reference: Option<&Reference>,
     study: &StudyView,
+    ortho: [bool; 2],
 ) -> u64 {
     let mut w = Writer::new();
     w.u64(generation)
@@ -98,22 +101,7 @@ fn revision(
         };
         write_reference_by_key(&mut w, r, file);
     }
-    let flags = [
-        study.swapped,
-        study.link,
-        study.mirror,
-        study.plumb,
-        study.grid,
-        study.silhouette,
-        study.ghost,
-    ];
-    for on in flags {
-        w.u8(on.into());
-    }
-    w.u8(study.layout)
-        .f32(study.plumb_x[0])
-        .f32(study.plumb_x[1])
-        .u32(study.grid_divisions);
+    study.write(&mut w, ortho);
     content_hash(&w.finish())
 }
 
@@ -360,13 +348,21 @@ impl App {
             },
             swapped: s.swapped,
             link: s.link,
-            mirror: s.mirror,
-            plumb: s.plumb,
+            views: s.views.map(|aids| ViewAids {
+                mirror: aids.mirror,
+                plumb: aids.plumb,
+                grid: aids.grid,
+                silhouette: aids.silhouette,
+                lighting: Lighting::ALL
+                    .iter()
+                    .position(|&l| l == aids.lighting)
+                    .unwrap_or(0) as u8,
+            }),
             plumb_x: s.plumb_x,
-            grid: s.grid,
             grid_divisions: s.grid_divisions,
-            silhouette: s.silhouette,
             ghost: s.ghost,
+            wireframe: s.wireframe,
+            tint: s.matching.tint,
         }
     }
 
@@ -379,13 +375,21 @@ impl App {
         };
         s.swapped = view.swapped;
         s.link = view.link;
-        s.mirror = view.mirror;
-        s.plumb = view.plumb;
+        s.views = view.views.map(|aids| Aids {
+            mirror: aids.mirror,
+            plumb: aids.plumb,
+            grid: aids.grid,
+            silhouette: aids.silhouette,
+            lighting: Lighting::ALL
+                .get(usize::from(aids.lighting))
+                .copied()
+                .unwrap_or_default(),
+        });
         s.plumb_x = view.plumb_x;
-        s.grid = view.grid;
         s.grid_divisions = view.grid_divisions;
-        s.silhouette = view.silhouette;
         s.ghost = view.ghost;
+        s.wireframe = view.wireframe;
+        s.matching.tint = view.tint;
     }
 
     /// Scene items at the top of the file menu.
@@ -468,7 +472,8 @@ impl App {
         self.files.saved = None;
         self.files.restored = false;
         self.files.replaced();
-        self.reset_view();
+        self.reset_view(SCULPT);
+        self.reset_view(REFERENCE);
     }
 
     /// Changes whenever something an autosave keeps has changed: a stroke
@@ -481,6 +486,7 @@ impl App {
             &self.sculpt,
             self.scene_reference(),
             &self.study_view(),
+            self.cameras.map(|c| c.ortho),
         )
     }
 
@@ -666,10 +672,17 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         let mut changed = |r: u64, what: &str| assert!(seen.insert(r), "{what}");
 
-        let base = revision(0, &sculpt, None, &study);
+        let base = revision(0, &sculpt, None, &study, [false; 2]);
         changed(base, "start");
-        assert_eq!(revision(0, &sculpt, None, &study), base, "nothing changed");
-        changed(revision(1, &sculpt, None, &study), "another scene");
+        assert_eq!(
+            revision(0, &sculpt, None, &study, [false; 2]),
+            base,
+            "nothing changed"
+        );
+        changed(
+            revision(1, &sculpt, None, &study, [false; 2]),
+            "another scene",
+        );
 
         sculpt.begin_stroke();
         sculpt.dab(Dab {
@@ -681,27 +694,36 @@ mod tests {
             symmetry: false,
             direction: Vec3::ZERO,
         });
-        changed(revision(0, &sculpt, None, &study), "mid-stroke");
+        changed(revision(0, &sculpt, None, &study, [false; 2]), "mid-stroke");
         sculpt.end_stroke();
-        changed(revision(0, &sculpt, None, &study), "a stroke");
+        changed(revision(0, &sculpt, None, &study, [false; 2]), "a stroke");
         sculpt.undo();
-        changed(revision(0, &sculpt, None, &study), "undo");
+        changed(revision(0, &sculpt, None, &study, [false; 2]), "undo");
         sculpt.replace_mesh(Mesh::icosphere(1));
-        changed(revision(0, &sculpt, None, &study), "a remesh");
+        changed(revision(0, &sculpt, None, &study, [false; 2]), "a remesh");
 
         let mut r = reference(&[1, 2, 3, 4]);
-        changed(revision(0, &sculpt, Some(&r), &study), "a reference");
+        changed(
+            revision(0, &sculpt, Some(&r), &study, [false; 2]),
+            "a reference",
+        );
         r.align.yaw = 0.25;
-        changed(revision(0, &sculpt, Some(&r), &study), "turned");
+        changed(revision(0, &sculpt, Some(&r), &study, [false; 2]), "turned");
         r.align.scale = 2.0;
-        changed(revision(0, &sculpt, Some(&r), &study), "scaled");
+        changed(revision(0, &sculpt, Some(&r), &study, [false; 2]), "scaled");
         r.crop = Some(Aabb {
             min: Vec3::splat(-1.0),
             max: Vec3::ONE,
         });
-        changed(revision(0, &sculpt, Some(&r), &study), "cropped");
+        changed(
+            revision(0, &sculpt, Some(&r), &study, [false; 2]),
+            "cropped",
+        );
         r.credit.author = "someone".into();
-        changed(revision(0, &sculpt, Some(&r), &study), "credited");
+        changed(
+            revision(0, &sculpt, Some(&r), &study, [false; 2]),
+            "credited",
+        );
         // The same placement on another file of the same length.
         let other = Reference {
             align: r.align,
@@ -709,25 +731,39 @@ mod tests {
             credit: r.credit.clone(),
             ..reference(&[1, 2, 3, 4])
         };
-        changed(revision(0, &sculpt, Some(&other), &study), "another file");
+        changed(
+            revision(0, &sculpt, Some(&other), &study, [false; 2]),
+            "another file",
+        );
 
-        let toggles: [fn(&mut StudyView); 11] = [
+        let toggles: [fn(&mut StudyView); 17] = [
             |s| s.swapped = true,
             |s| s.link = true,
-            |s| s.mirror = true,
-            |s| s.plumb = true,
-            |s| s.grid = true,
-            |s| s.silhouette = true,
+            |s| s.views[0].mirror = true,
+            |s| s.views[1].mirror = true,
+            |s| s.views[0].plumb = true,
+            |s| s.views[1].grid = true,
+            |s| s.views[0].silhouette = true,
+            |s| s.views[1].silhouette = true,
+            |s| s.views[1].lighting = 2,
             |s| s.ghost = true,
+            |s| s.wireframe = true,
+            |s| s.tint = true,
             |s| s.layout = 1,
             |s| s.plumb_x[0] = 0.3,
             |s| s.plumb_x[1] = 0.7,
             |s| s.grid_divisions = 6,
+            |s| s.views[0].grid = true,
         ];
         for (i, toggle) in toggles.iter().enumerate() {
             toggle(&mut study);
-            changed(revision(0, &sculpt, Some(&r), &study), &format!("aid {i}"));
+            changed(
+                revision(0, &sculpt, Some(&r), &study, [false; 2]),
+                &format!("aid {i}"),
+            );
         }
+        let ortho = revision(0, &sculpt, Some(&r), &study, [false, true]);
+        changed(ortho, "the reference view orthographic");
     }
 
     #[test]

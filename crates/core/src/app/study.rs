@@ -6,6 +6,7 @@
 
 use egui::{Align2, Color32, CursorIcon, Key, Pos2, Rect, Sense, Stroke, Vec2, pos2};
 
+use super::toolbar::{ViewOption, lighting_name};
 use super::views::shown;
 use super::{App, REFERENCE, SCULPT};
 use crate::camera::OrbitCamera;
@@ -28,6 +29,19 @@ pub(super) enum Layout {
 /// The grid's choices of divisions, across the view's height.
 pub(super) const GRID_DIVISIONS: [u32; 5] = [2, 3, 4, 6, 8];
 
+/// The aids each view has of its own. Its projection is its camera's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Aids {
+    /// Shown flipped left to right, to see the form afresh.
+    pub(super) mirror: bool,
+    pub(super) plumb: bool,
+    pub(super) grid: bool,
+    /// Filled flat: only the outline counts.
+    pub(super) silhouette: bool,
+    /// How the clay, or a mesh reference, is lit.
+    pub(super) lighting: Lighting,
+}
+
 /// Which aids are on.
 pub(super) struct StudyState {
     pub(super) layout: Layout,
@@ -35,24 +49,21 @@ pub(super) struct StudyState {
     pub(super) swapped: bool,
     /// Navigating either view turns the other the same way.
     pub(super) link: bool,
-    /// Both views shown flipped left to right, to see the form afresh.
-    pub(super) mirror: bool,
-    pub(super) plumb: bool,
+    /// Each view's own aids (indexed by `SCULPT` and `REFERENCE`).
+    pub(super) views: [Aids; 2],
+    /// The view the pointer was last over: the view menu switches its
+    /// aids.
+    pub(super) focus: usize,
     /// Where the plumb line hangs in each view, as a share of its width
     /// (indexed by `SCULPT` and `REFERENCE`).
     pub(super) plumb_x: [f32; 2],
     /// The view whose plumb line is being moved by its bob.
     pub(super) plumb_drag: Option<usize>,
-    pub(super) grid: bool,
     /// Rows of the grid; its cells are square.
     pub(super) grid_divisions: u32,
-    /// The clay, and the reference, filled flat: only the outline counts.
-    pub(super) silhouette: bool,
     /// The reference laid over the sculpt view, see-through.
     pub(super) ghost: bool,
     pub(super) timer: PoseTimer,
-    /// How the clay, and mesh references, are lit.
-    pub(super) lighting: Lighting,
     pub(super) measure: Measure,
     pub(super) matching: SilhouetteMatch,
     /// The clay's edges drawn over it: quads as quads.
@@ -323,16 +334,13 @@ impl Default for StudyState {
             layout: Layout::Both,
             swapped: false,
             link: false,
-            mirror: false,
-            plumb: false,
+            views: [Aids::default(); 2],
+            focus: SCULPT,
             plumb_x: [0.5; 2],
             plumb_drag: None,
-            grid: false,
             grid_divisions: 4,
-            silhouette: false,
             ghost: false,
             timer: PoseTimer::default(),
-            lighting: Lighting::default(),
             measure: Measure::default(),
             matching: SilhouetteMatch::default(),
             wireframe: false,
@@ -361,19 +369,20 @@ pub(super) struct ReferenceLook {
 impl App {
     /// The clay's look in the sculpt view.
     pub(super) fn sculpt_look(&self) -> Look {
-        let look = if self.study.silhouette {
+        let aids = &self.study.views[SCULPT];
+        let look = if aids.silhouette {
             Look::flat(theme::SILHOUETTE_INK)
         } else {
             Look::lit(theme::CLAY)
         };
-        look.with_lighting(self.study.lighting)
+        look.with_lighting(aids.lighting)
     }
 
     /// Draws the clay's edges over the clay just drawn in the sculpt view,
     /// when the wireframe is on: the live clay, or the timelapse's. Not
     /// over a silhouette, which is all outline.
     pub(super) fn draw_wireframe(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if !self.study.wireframe || self.study.silhouette {
+        if !self.study.wireframe || self.study.views[SCULPT].silhouette {
             return;
         }
         let (gpu, mesh) = match &self.playback {
@@ -387,21 +396,24 @@ impl App {
     /// The reference's look in its own view.
     #[allow(dead_code)] // called by the reference part's drawing, once it lands
     pub(super) fn reference_look(&self) -> ReferenceLook {
+        let aids = &self.study.views[REFERENCE];
         ReferenceLook {
-            flat: self.study.silhouette,
+            flat: aids.silhouette,
             opacity: 1.0,
             over: false,
-            lighting: self.study.lighting,
+            lighting: aids.lighting,
         }
     }
 
-    /// The reference's look as a ghost over the sculpt view, when that is on.
+    /// The reference's look as a ghost over the sculpt view, when that is
+    /// on: as the sculpt view shows its clay.
     pub(super) fn ghost_look(&self) -> Option<ReferenceLook> {
+        let aids = &self.study.views[SCULPT];
         self.study.ghost.then_some(ReferenceLook {
-            flat: self.study.silhouette,
+            flat: aids.silhouette,
             opacity: theme::GHOST_OPACITY,
             over: true,
-            lighting: self.study.lighting,
+            lighting: aids.lighting,
         })
     }
 
@@ -429,12 +441,48 @@ impl App {
     }
 
     /// Linking starts from the sculpt's view, the one being worked on.
-    fn toggle_link(&mut self) {
+    pub(super) fn toggle_link(&mut self) {
         self.study.link = !self.study.link;
         self.follow_camera(SCULPT);
     }
 
-    /// The comparison aids in the view menu.
+    /// The view whose aids the view menu switches: the one the pointer was
+    /// last over, or the one that shows.
+    pub(super) fn focused_view(&self) -> usize {
+        let shown = self.view_rects.map(shown);
+        let focus = self.study.focus;
+        if shown[focus] || !shown[1 - focus] {
+            focus
+        } else {
+            1 - focus
+        }
+    }
+
+    /// The view a key switches the aids of: the one under the pointer, or
+    /// else the one it was last over.
+    pub(super) fn key_view(&self, ui: &egui::Ui) -> usize {
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        [SCULPT, REFERENCE]
+            .into_iter()
+            .find(|&index| {
+                let rect = self.view_rects[index];
+                shown(rect) && pointer.is_some_and(|p| rect.contains(p))
+            })
+            .unwrap_or_else(|| self.focused_view())
+    }
+
+    /// One of a view's options in the view menu: its toolbar's name and
+    /// key, chosen when on.
+    fn option_item(&mut self, ui: &mut egui::Ui, option: ViewOption, index: usize) {
+        let label = option.label(self.lang.tr(), index, self.reference_kind());
+        if menu::item(ui, &label, option.keys(), self.option_on(option, index)).clicked() {
+            self.apply(option, index);
+        }
+    }
+
+    /// The comparison aids in the view menu. Each view has its own: the
+    /// items switch those of the view the pointer was last over, named at
+    /// their head.
     pub(super) fn study_toggle_items(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         let st = tr.study;
@@ -453,55 +501,60 @@ impl App {
         if menu::item(ui, st.swap_sides, "W", self.study.swapped).clicked() {
             self.study.swapped = !self.study.swapped;
         }
-        if menu::item(ui, tr.mirror_view, "R", self.study.mirror).clicked() {
-            self.study.mirror = !self.study.mirror;
+        if menu::item(ui, st.measure, "E", self.study.measure.on).clicked() {
+            self.toggle_measure();
         }
         ui.separator();
-        if menu::item(ui, tr.silhouette, "K", self.study.silhouette).clicked() {
-            self.study.silhouette = !self.study.silhouette;
-        }
-        if menu::item(ui, tr.ghost, "O", self.study.ghost).clicked() {
-            self.study.ghost = !self.study.ghost;
-        }
-        if menu::item(ui, st.wireframe, "Shift+W", self.study.wireframe).clicked() {
-            self.study.wireframe = !self.study.wireframe;
-        }
-        let tint = self.study.matching.tint;
-        if menu::item(ui, st.difference, "Shift+K", tint).clicked() {
-            self.study.matching.tint = !tint;
-        }
-        ui.separator();
-        if menu::item(ui, tr.plumb_line, "V", self.study.plumb).clicked() {
-            self.study.plumb = !self.study.plumb;
-        }
-        if menu::item(ui, tr.grid, "G", self.study.grid).clicked() {
-            self.study.grid = !self.study.grid;
+        let index = self.focused_view();
+        let view_name = |index| {
+            if index == SCULPT {
+                st.sculpt_view
+            } else {
+                st.reference_view
+            }
+        };
+        menu::note(ui, view_name(index));
+        for option in [
+            ViewOption::Perspective,
+            ViewOption::Mirror,
+            ViewOption::Silhouette,
+            ViewOption::Plumb,
+            ViewOption::Grid,
+        ] {
+            self.option_item(ui, option, index);
         }
         menu::submenu(ui, st.grid_divisions, |ui| {
             ui.set_min_width(80.0);
             for n in GRID_DIVISIONS {
-                let chosen = self.study.grid && self.study.grid_divisions == n;
+                let chosen = self.study.views[index].grid && self.study.grid_divisions == n;
                 if menu::item(ui, &n.to_string(), "", chosen).clicked() {
                     self.study.grid_divisions = n;
-                    self.study.grid = true;
+                    self.study.views[index].grid = true;
                 }
             }
         });
-        if menu::item(ui, st.measure, "E", self.study.measure.on).clicked() {
-            self.toggle_measure();
-        }
         menu::submenu(ui, st.lighting, |ui| {
             ui.set_min_width(120.0);
-            for (lighting, label) in [
-                (Lighting::Studio, st.studio),
-                (Lighting::Raking, st.raking),
-                (Lighting::Top, st.top_light),
-            ] {
-                if menu::item(ui, label, "B", self.study.lighting == lighting).clicked() {
-                    self.study.lighting = lighting;
+            for lighting in Lighting::ALL {
+                let label = lighting_name(st, lighting);
+                let on = self.study.views[index].lighting == lighting;
+                if menu::item(ui, label, "B", on).clicked() {
+                    self.study.views[index].lighting = lighting;
                 }
             }
         });
+        // The sculpt view's own.
+        if index != SCULPT {
+            ui.separator();
+            menu::note(ui, view_name(SCULPT));
+        }
+        for option in [
+            ViewOption::Ghost,
+            ViewOption::Wireframe,
+            ViewOption::Difference,
+        ] {
+            self.option_item(ui, option, SCULPT);
+        }
         ui.separator();
         menu::submenu(ui, st.pose_timer, |ui| {
             ui.set_min_width(140.0);
@@ -612,7 +665,7 @@ impl App {
         // Measuring takes a plain left drag in either view; with a
         // modifier the press still navigates.
         if self.study.measure.on && !(m.alt || m.ctrl || m.command) {
-            let at = to_heights(rect, self.view_pos(rect, screen));
+            let at = to_heights(rect, self.view_pos_in(index, rect, screen));
             let measure = &mut self.study.measure;
             measure.lines[index] = Some([at, at]);
             measure.drawing = Some(index);
@@ -624,7 +677,8 @@ impl App {
     /// `screen` is on the bob of view `index`'s plumb line, and the bob is
     /// free to take it: the clay is not under it.
     fn on_bob(&self, rect: Rect, index: usize, screen: Pos2) -> bool {
-        if !self.study.plumb || screen.distance(bob(rect, self.study.plumb_x[index])) > BOB_REACH {
+        let plumb = self.study.views[index].plumb;
+        if !plumb || screen.distance(bob(rect, self.study.plumb_x[index])) > BOB_REACH {
             return false;
         }
         let sculpting = index == SCULPT && self.playback.is_none();
@@ -647,10 +701,11 @@ impl App {
                 continue;
             }
             let painter = ui.painter().with_clip_rect(rect);
-            if self.study.grid {
+            let aids = self.study.views[index];
+            if aids.grid {
                 paint_grid(&painter, rect, self.study.grid_divisions);
             }
-            if !self.study.plumb {
+            if !aids.plumb {
                 continue;
             }
             let dragged = self.study.plumb_drag == Some(index);
@@ -684,7 +739,7 @@ impl App {
             let rect = rects[index];
             if held {
                 if let Some(pos) = pointer {
-                    let at = to_heights(rect, self.view_pos(rect, pos));
+                    let at = to_heights(rect, self.view_pos_in(index, rect, pos));
                     if let Some([_, end]) = &mut self.study.measure.lines[index] {
                         *end = at;
                     }
@@ -722,7 +777,7 @@ impl App {
                 );
                 continue;
             };
-            let [a, b] = ends.map(|at| self.view_pos(rect, from_heights(rect, at)));
+            let [a, b] = ends.map(|at| self.view_pos_in(index, rect, from_heights(rect, at)));
             painter.line_segment([a, b], line);
             // Ticks across both ends, as on a ruler.
             let across = (b - a).normalized().rot90() * 5.0;
@@ -864,7 +919,7 @@ impl App {
                 flat: true,
                 opacity: 1.0,
                 over: false,
-                lighting: self.study.lighting,
+                lighting: Lighting::default(),
             };
             self.draw_reference_sized(&mut pass, Slot::ReferenceView, &camera, size, &look);
         }
@@ -931,7 +986,7 @@ impl App {
         let painter = ui.painter().with_clip_rect(rect);
         let tint = self.study.matching.tint;
         if tint && fresh {
-            let uv = if self.study.mirror {
+            let uv = if self.study.views[SCULPT].mirror {
                 Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))
             } else {
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
@@ -984,9 +1039,11 @@ impl App {
             return;
         }
         let pressed = |key: Key| ui.input_mut(|i| i.consume_key(M::NONE, key));
+        // Each view's own aids switch in the view under the pointer.
+        let index = self.key_view(ui);
         // Before plain W, which would take Shift+W too.
         if ui.input_mut(|i| i.consume_key(M::SHIFT, Key::W)) {
-            self.study.wireframe = !self.study.wireframe;
+            self.apply(ViewOption::Wireframe, SCULPT);
         }
         if pressed(Key::W) {
             self.study.swapped = !self.study.swapped;
@@ -994,24 +1051,24 @@ impl App {
         if pressed(Key::L) {
             self.toggle_link();
         }
-        if pressed(Key::R) {
-            self.study.mirror = !self.study.mirror;
-        }
         // Before plain K, which would take Shift+K too.
         if ui.input_mut(|i| i.consume_key(M::SHIFT, Key::K)) {
-            self.study.matching.tint = !self.study.matching.tint;
-        }
-        if pressed(Key::K) {
-            self.study.silhouette = !self.study.silhouette;
+            self.apply(ViewOption::Difference, SCULPT);
         }
         if pressed(Key::O) {
-            self.study.ghost = !self.study.ghost;
+            self.apply(ViewOption::Ghost, SCULPT);
         }
-        if pressed(Key::V) {
-            self.study.plumb = !self.study.plumb;
-        }
-        if pressed(Key::G) {
-            self.study.grid = !self.study.grid;
+        for (key, option) in [
+            (Key::Num5, ViewOption::Perspective),
+            (Key::R, ViewOption::Mirror),
+            (Key::K, ViewOption::Silhouette),
+            (Key::V, ViewOption::Plumb),
+            (Key::G, ViewOption::Grid),
+            (Key::B, ViewOption::Lighting),
+        ] {
+            if pressed(key) {
+                self.apply(option, index);
+            }
         }
         if pressed(Key::E) {
             self.toggle_measure();
@@ -1025,9 +1082,6 @@ impl App {
             } else {
                 measure.on = false;
             }
-        }
-        if pressed(Key::B) {
-            self.study.lighting = self.study.lighting.next();
         }
     }
 }
@@ -1201,7 +1255,7 @@ mod tests {
             eprintln!("no GPU adapter; skipping app test");
             return;
         };
-        h.app.study.plumb = true;
+        h.app.study.views[SCULPT].plumb = true;
         h.frames(1);
         let rect = h.app.view_rects[SCULPT];
         let strokes = |h: &Harness| {
@@ -1472,7 +1526,209 @@ mod tests {
         let playback = h.app.playback.as_ref().expect("playing");
         assert_eq!(playback.replay.sculpt.mesh.quads.len(), quads);
         // Over the silhouette it stays off.
-        h.app.study.silhouette = true;
+        h.app.study.views[SCULPT].silhouette = true;
         h.frames(1);
+    }
+
+    impl Harness {
+        /// A key pressed and let go, with `shift` held.
+        fn key(&mut self, key: Key, shift: bool) {
+            let modifiers = |shift| {
+                crate::InputEvent::Modifiers(crate::input::Modifiers {
+                    shift,
+                    ..Default::default()
+                })
+            };
+            self.app.push_event(modifiers(shift));
+            for pressed in [true, false] {
+                self.app.push_event(crate::InputEvent::Key {
+                    key,
+                    pressed,
+                    repeat: false,
+                });
+            }
+            self.frames(1);
+            self.app.push_event(modifiers(false));
+        }
+    }
+
+    #[test]
+    fn keys_switch_the_aids_of_the_view_under_the_pointer() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let [sculpt, reference] = h.app.view_rects;
+        h.pointer(crate::PointerPhase::Move, reference.center());
+        for key in [Key::G, Key::V, Key::K, Key::R, Key::B, Key::Num5] {
+            h.key(key, false);
+        }
+        let aids = h.app.study.views;
+        assert!(aids[REFERENCE].grid && aids[REFERENCE].plumb);
+        assert!(aids[REFERENCE].silhouette && aids[REFERENCE].mirror);
+        assert_eq!(aids[REFERENCE].lighting, Lighting::Raking);
+        assert!(h.app.cameras[REFERENCE].ortho);
+        assert_eq!(
+            aids[SCULPT],
+            Aids::default(),
+            "the sculpt view keeps its own"
+        );
+        assert!(!h.app.cameras[SCULPT].ortho);
+        // The view menu switches those of the view the pointer was last
+        // over, though it is over the menu now.
+        h.pointer(crate::PointerPhase::Move, egui::pos2(5.0, 5.0));
+        assert_eq!(h.app.focused_view(), REFERENCE);
+
+        // Over the sculpt view: its own, and the sculpt-only ones.
+        h.pointer(crate::PointerPhase::Move, sculpt.center());
+        assert_eq!(h.app.focused_view(), SCULPT);
+        h.key(Key::G, false);
+        h.key(Key::Num5, false);
+        h.key(Key::K, true);
+        assert!(h.app.study.views[SCULPT].grid && h.app.cameras[SCULPT].ortho);
+        assert!(h.app.study.matching.tint);
+        assert!(!h.app.study.views[SCULPT].silhouette, "Shift+K is not K");
+        h.key(Key::Num5, false);
+        assert!(!h.app.cameras[SCULPT].ortho, "5 switches back");
+        assert!(h.app.cameras[REFERENCE].ortho);
+
+        // Shown alone, the reference view takes the keys wherever the
+        // pointer is.
+        h.app.study.layout = Layout::Reference;
+        h.frames(1);
+        h.pointer(crate::PointerPhase::Move, egui::pos2(5.0, 5.0));
+        h.key(Key::G, false);
+        assert!(!h.app.study.views[REFERENCE].grid);
+        assert!(h.app.study.views[SCULPT].grid);
+    }
+
+    #[test]
+    fn linked_cameras_share_their_projection() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.apply(ViewOption::Link, SCULPT);
+        h.app.apply(ViewOption::Perspective, REFERENCE);
+        assert!(h.app.cameras.iter().all(|c| c.ortho));
+        h.app.cameras[SCULPT].dolly(2.0);
+        h.app.apply(ViewOption::Reset, SCULPT);
+        assert!(h.app.cameras.iter().all(|c| c.ortho), "reset keeps it");
+        let start = OrbitCamera::default().distance;
+        assert!(h.app.cameras.iter().all(|c| c.distance == start));
+        h.app.apply(ViewOption::Link, SCULPT);
+        h.app.apply(ViewOption::Perspective, SCULPT);
+        assert!(!h.app.cameras[SCULPT].ortho && h.app.cameras[REFERENCE].ortho);
+    }
+
+    #[test]
+    fn the_toolbar_takes_its_clicks_and_never_sculpts() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        // Close up, the clay fills the view under the toolbar too.
+        h.app.cameras[SCULPT].distance = 1.3;
+        h.frames(1);
+        let rects = h.app.view_rects;
+        let areas = h.app.toolbar_areas(rects);
+        assert!(
+            areas[SCULPT].left() < rects[SCULPT].left() + 20.0,
+            "on the left"
+        );
+        assert!(areas[REFERENCE].right() > rects[REFERENCE].right() - 20.0);
+        let rect = rects[SCULPT];
+        assert!(h.app.pick(rect, areas[SCULPT].center()).is_some());
+        let bar = h.app.toolbar_layouts(rects)[SCULPT].clone().unwrap();
+        assert_eq!(bar.options[0], ViewOption::Perspective);
+        let button = bar.buttons[0].center();
+        h.drag(button, button);
+        assert!(h.app.cameras[SCULPT].ortho, "clicked");
+        // A drag from the toolbar across the clay is neither a stroke nor
+        // a turn.
+        let yaw = h.app.cameras[SCULPT].yaw;
+        h.drag(button, rect.center());
+        assert!(h.app.sculpt.log().is_empty());
+        assert_eq!(h.app.cameras[SCULPT].yaw, yaw);
+        // Swapped, it follows its view to the right edge.
+        h.app.study.swapped = true;
+        h.frames(1);
+        let rects = h.app.view_rects;
+        let areas = h.app.toolbar_areas(rects);
+        assert!(areas[SCULPT].right() > rects[SCULPT].right() - 20.0);
+        assert!(areas[REFERENCE].left() < rects[REFERENCE].left() + 20.0);
+    }
+
+    #[test]
+    fn an_orthographic_view_picks_the_point_it_shows() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let camera = &mut h.app.cameras[SCULPT];
+        (camera.yaw, camera.pitch, camera.ortho) = (0.0, 0.0, true);
+        h.frames(1);
+        let rect = h.app.view_rects[SCULPT];
+        let front = h.app.pick(rect, rect.center()).expect("the clay");
+        let radius = h.app.sculpt.mesh.positions[0].length();
+        assert!(
+            front.point.z > 0.9 * radius,
+            "the near side: {}",
+            front.point
+        );
+        assert!(front.point.truncate().length() < 0.05);
+        // Off centre, the point lands where it was picked.
+        let camera = h.app.cameras[SCULPT];
+        let to_clip = camera.projection(rect.aspect_ratio()) * camera.view();
+        for offset in [egui::vec2(60.0, -40.0), egui::vec2(-90.0, 75.0)] {
+            let pos = rect.center() + offset;
+            let hit = h.app.pick(rect, pos).expect("the clay");
+            let ndc = to_clip.project_point3(hit.point);
+            let seen = egui::pos2(
+                rect.left() + (ndc.x + 1.0) / 2.0 * rect.width(),
+                rect.top() + (1.0 - ndc.y) / 2.0 * rect.height(),
+            );
+            assert!((seen - pos).length() < 0.5, "{seen:?} vs {pos:?}");
+            assert!(hit.point.z > 0.0, "the side facing the camera");
+        }
+        // Zoomed in until the eye is inside the clay: still the near side.
+        h.app.cameras[SCULPT].distance = 0.3;
+        let hit = h.app.pick(rect, rect.center()).expect("the clay");
+        assert!(hit.point.z > 0.9 * radius, "{}", hit.point);
+    }
+
+    #[test]
+    fn each_views_aids_and_projection_come_back_from_an_autosave() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let c = h.app.view_rects[SCULPT].center();
+        h.drag(c, c + egui::vec2(30.0, 0.0));
+        let st = &mut h.app.study;
+        st.views[REFERENCE] = Aids {
+            mirror: true,
+            plumb: false,
+            grid: true,
+            silhouette: true,
+            lighting: Lighting::Top,
+        };
+        st.views[SCULPT].plumb = true;
+        st.wireframe = true;
+        h.app.cameras[REFERENCE].ortho = true;
+        let before = h.app.scene_revision();
+        h.app.apply(ViewOption::Perspective, SCULPT);
+        assert_ne!(h.app.scene_revision(), before, "the projection is saved");
+        h.app.apply(ViewOption::Perspective, SCULPT);
+        let views = h.app.study.views;
+        let saved = h.app.autosave_bytes().expect("worth keeping").scene;
+        h.app.new_scene();
+        h.app.study.views = Default::default();
+        h.app.study.wireframe = false;
+        h.app.cameras[REFERENCE].ortho = false;
+        assert!(h.app.restore_autosave(&saved, None));
+        assert_eq!(h.app.study.views, views);
+        assert!(h.app.study.wireframe);
+        assert!(h.app.cameras[REFERENCE].ortho && !h.app.cameras[SCULPT].ortho);
     }
 }

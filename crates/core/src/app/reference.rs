@@ -19,6 +19,7 @@ use super::study::ReferenceLook;
 use super::{App, REFERENCE, Request, SCULPT};
 use crate::camera::OrbitCamera;
 use crate::input::FilePurpose;
+use crate::reference::fit::{self, percentile_box};
 use crate::reference::load;
 use crate::reference::samples::Sample;
 use crate::reference::{Aabb, Alignment, Content, Credit, RefMesh, Reference, Source, UpAxis};
@@ -526,7 +527,7 @@ impl App {
             let fit = (rect.width() / size.x).min(rect.height() / size.y) * 0.95;
             let shown = Rect::from_center_size(rect.center() + view.offset, size * fit * view.zoom);
             // The mirror view shows the picture flipped left to right.
-            let uv = if self.study.mirror {
+            let uv = if self.study.views[REFERENCE].mirror {
                 Rect::from_min_max(Pos2::new(1.0, 0.0), Pos2::new(0.0, 1.0))
             } else {
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
@@ -545,7 +546,7 @@ impl App {
                 camera,
                 r.align.matrix(),
                 crop,
-                self.study.mirror,
+                self.study.views[REFERENCE].mirror,
             );
         }
         if let Some(covered) = paint_credit(&painter, rect, &r.credit) {
@@ -596,6 +597,36 @@ impl App {
     #[cfg(test)]
     pub(super) fn splats_drawn_into(&self, slot: Slot) -> bool {
         matches!(&self.reference.drawn, Some(Drawn::Splats(s)) if s.was_prepared(slot))
+    }
+
+    /// Fits the reference view to the reference, as the sculpt view frames
+    /// the clay: its kept part, without the floaters. A picture shows whole
+    /// again.
+    pub(super) fn frame_reference(&mut self) {
+        let Some(r) = &self.reference.current else {
+            return;
+        };
+        if let Content::Image(_) = r.content {
+            self.reference.image_view = ImageView::default();
+            return;
+        }
+        let kept: Vec<Vec3> = r
+            .points()
+            .iter()
+            .copied()
+            .filter(|&p| r.crop.is_none_or(|crop| crop.contains(p)))
+            .collect();
+        let Some(bounds) = percentile_box(&kept, fit::LOW, fit::HIGH) else {
+            return;
+        };
+        let world = transform_box(r.align.matrix(), bounds);
+        let radius = (world.max * 0.5 - world.min * 0.5).length();
+        let centre = world.centre();
+        if !(radius.is_finite() && centre.is_finite()) {
+            return;
+        }
+        self.cameras[REFERENCE].frame(centre, radius);
+        self.follow_camera(REFERENCE);
     }
 
     /// A reference is loaded.

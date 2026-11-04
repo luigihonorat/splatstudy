@@ -16,6 +16,9 @@
 //! - `LOG_`: every recorded call (see [`Entry`]).
 //! - `REF_`: the reference file, kept whole, with its placement and credit.
 //! - `VIEW`: the cameras, the divider and the study aids that were on.
+//!   Each view has its own aids and projection, after the aids as they
+//!   were when both views shared them: readers from before then turn on
+//!   what either view had, in both.
 //! - `REFH`: in autosaves only, the reference as in `REF_` but with its
 //!   file named by a [`BlobKey`] and stored apart, so the file is written
 //!   once rather than with every save. Readers from before it skip it and
@@ -128,14 +131,63 @@ pub struct StudyView {
     pub layout: u8,
     pub swapped: bool,
     pub link: bool,
-    pub mirror: bool,
-    pub plumb: bool,
+    /// Each view's own aids: the sculpt view's, then the reference view's.
+    pub views: [ViewAids; 2],
     /// Where each plumb line hangs, as a share of its view's width.
     pub plumb_x: [f32; 2],
-    pub grid: bool,
     pub grid_divisions: u32,
-    pub silhouette: bool,
+    /// The sculpt view's own: the reference over it, the wireframe and
+    /// the silhouette difference.
     pub ghost: bool,
+    pub wireframe: bool,
+    pub tint: bool,
+}
+
+/// The aids one view has of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ViewAids {
+    pub mirror: bool,
+    pub plumb: bool,
+    pub grid: bool,
+    pub silhouette: bool,
+    /// 0: studio, 1: raking, 2: top.
+    pub lighting: u8,
+}
+
+/// Booleans as bits, the first in bit 0.
+fn bits(flags: &[bool]) -> u8 {
+    flags
+        .iter()
+        .enumerate()
+        .fold(0u8, |bits, (i, &on)| bits | u8::from(on) << i)
+}
+
+impl StudyView {
+    /// The aids as the `VIEW` chunk keeps them, after the cameras and the
+    /// divider. `ortho` is each view's projection.
+    pub fn write(&self, w: &mut Writer, ortho: [bool; 2]) {
+        let [a, b] = self.views;
+        // As when both views shared their aids: on if on in either.
+        let flags = bits(&[
+            self.swapped,
+            self.link,
+            a.mirror || b.mirror,
+            a.plumb || b.plumb,
+            a.grid || b.grid,
+            a.silhouette || b.silhouette,
+            self.ghost,
+        ]);
+        w.u8(flags)
+            .u8(self.layout)
+            .f32(self.plumb_x[0])
+            .f32(self.plumb_x[1])
+            .u32(self.grid_divisions);
+        for (aids, ortho) in self.views.iter().zip(ortho) {
+            let flags = bits(&[aids.mirror, aids.plumb, aids.grid, aids.silhouette, ortho]);
+            w.u8(flags).u8(aids.lighting);
+        }
+        w.u8(bits(&[self.wireframe, self.tint]));
+    }
 }
 
 /// Writes a scene chunk by chunk.
@@ -316,23 +368,7 @@ impl SceneWriter {
         }
         w.f32(view.split);
         if let Some(study) = &view.study {
-            let flags = [
-                study.swapped,
-                study.link,
-                study.mirror,
-                study.plumb,
-                study.grid,
-                study.silhouette,
-                study.ghost,
-            ]
-            .iter()
-            .enumerate()
-            .fold(0u8, |bits, (i, &on)| bits | u8::from(on) << i);
-            w.u8(flags)
-                .u8(study.layout)
-                .f32(study.plumb_x[0])
-                .f32(study.plumb_x[1])
-                .u32(study.grid_divisions);
+            study.write(&mut w, view.cameras.map(|c| c.ortho));
         }
         self.chunk(VIEW, false, &w.finish())
     }
@@ -741,18 +777,44 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
         };
         let plumb_x = [share(r.f32()?), share(r.f32()?)];
         let grid_divisions = r.u32()?.clamp(1, 64);
-        Some(StudyView {
+        // From before each view had its own: both had these.
+        let shared = ViewAids {
+            mirror: on(2),
+            plumb: on(3),
+            grid: on(4),
+            silhouette: on(5),
+            lighting: 0,
+        };
+        let mut study = StudyView {
             layout: if layout <= 2 { layout } else { 0 },
             swapped: on(0),
             link: on(1),
-            mirror: on(2),
-            plumb: on(3),
+            views: [shared; 2],
             plumb_x,
-            grid: on(4),
             grid_divisions,
-            silhouette: on(5),
             ghost: on(6),
-        })
+            wireframe: false,
+            tint: false,
+        };
+        if !r.is_empty() {
+            for (aids, camera) in study.views.iter_mut().zip(&mut cameras) {
+                let flags = r.u8()?;
+                let on = |i: u32| flags & (1 << i) != 0;
+                let lighting = r.u8()?;
+                *aids = ViewAids {
+                    mirror: on(0),
+                    plumb: on(1),
+                    grid: on(2),
+                    silhouette: on(3),
+                    lighting: if lighting <= 2 { lighting } else { 0 },
+                };
+                camera.ortho = on(4);
+            }
+            let flags = r.u8()?;
+            study.wireframe = flags & 1 != 0;
+            study.tint = flags & 2 != 0;
+        }
+        Some(study)
     };
     Ok(View {
         cameras,
@@ -817,19 +879,39 @@ mod tests {
         turned.orbit(40.0, -10.0);
         turned.dolly(0.8);
         View {
-            cameras: [turned, OrbitCamera::default()],
+            cameras: [
+                turned,
+                OrbitCamera {
+                    ortho: true,
+                    ..OrbitCamera::default()
+                },
+            ],
             split: 0.4,
             study: Some(StudyView {
                 layout: 2,
                 swapped: true,
                 link: false,
-                mirror: true,
-                plumb: true,
+                views: [
+                    ViewAids {
+                        mirror: true,
+                        plumb: true,
+                        grid: false,
+                        silhouette: true,
+                        lighting: 1,
+                    },
+                    ViewAids {
+                        mirror: false,
+                        plumb: true,
+                        grid: true,
+                        silhouette: false,
+                        lighting: 2,
+                    },
+                ],
                 plumb_x: [0.25, 0.75],
-                grid: false,
                 grid_divisions: 6,
-                silhouette: true,
                 ghost: false,
+                wireframe: true,
+                tint: true,
             }),
         }
     }
@@ -1206,9 +1288,76 @@ mod tests {
     fn a_view_without_study_aids_still_reads() {
         let mut v = view();
         v.study = None;
+        // The projection is kept with the aids.
+        v.cameras[REFERENCE_VIEW].ortho = false;
         let mut w = SceneWriter::new();
         w.mesh(&Mesh::icosphere(1)).view(&v);
         assert_eq!(Scene::read(&w.finish()).unwrap().view, Some(v));
+    }
+
+    const REFERENCE_VIEW: usize = 1;
+
+    /// A `VIEW` chunk from before each view had its own aids: what was on
+    /// is on in both views, both in perspective.
+    #[test]
+    fn a_view_from_when_both_views_shared_their_aids_opens_in_both() {
+        let mut w = Writer::new();
+        for camera in [OrbitCamera::default(); 2] {
+            w.vec3(camera.target)
+                .f32(camera.yaw)
+                .f32(camera.pitch)
+                .f32(camera.distance)
+                .f32(camera.fov_y);
+        }
+        // Swapped, mirror, grid and ghost on; the reference alone.
+        let flags = 1 | 1 << 2 | 1 << 4 | 1 << 6;
+        w.f32(0.4).u8(flags).u8(2).f32(0.3).f32(0.6).u32(3);
+        let mut scene = SceneWriter::new();
+        scene
+            .mesh(&Mesh::icosphere(1))
+            .chunk(VIEW, false, &w.finish());
+        let view = Scene::read(&scene.finish()).unwrap().view.unwrap();
+        assert!(view.cameras.iter().all(|c| !c.ortho));
+        let study = view.study.unwrap();
+        let both = ViewAids {
+            mirror: true,
+            plumb: false,
+            grid: true,
+            silhouette: false,
+            lighting: 0,
+        };
+        assert_eq!(study.views, [both; 2]);
+        assert!(study.swapped && study.ghost && !study.link);
+        assert_eq!((study.layout, study.grid_divisions), (2, 3));
+        assert!(!study.wireframe && !study.tint);
+    }
+
+    /// Readers from before each view had its own aids read the shared
+    /// flags, which have what either view had on.
+    #[test]
+    fn older_readers_see_what_either_view_had_on() {
+        let v = view();
+        let mut w = SceneWriter::new();
+        w.mesh(&Mesh::icosphere(1)).view(&v);
+        let data = w.finish();
+        let chunk = chunks(&data)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.tag == VIEW)
+            .unwrap();
+        // Two cameras of 7 floats, the divider, then the shared flags.
+        let flags = chunk.payload[2 * 28 + 4];
+        let study = v.study.unwrap();
+        let [a, b] = study.views;
+        for (bit, on) in [
+            (2, a.mirror || b.mirror),
+            (3, a.plumb || b.plumb),
+            (4, a.grid || b.grid),
+            (5, a.silhouette || b.silhouette),
+        ] {
+            assert_eq!(flags & 1 << bit != 0, on, "bit {bit}");
+        }
+        assert!(flags & 1 << 4 != 0, "the grid was on in the reference view");
     }
 
     #[test]

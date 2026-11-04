@@ -91,8 +91,15 @@ impl App {
         }
     }
 
-    pub(super) fn reset_view(&mut self) {
-        self.cameras = [OrbitCamera::default(); 2];
+    /// Puts view `index`'s camera back where it starts, in the projection
+    /// it has.
+    pub(super) fn reset_view(&mut self, index: usize) {
+        let ortho = self.cameras[index].ortho;
+        self.cameras[index] = OrbitCamera {
+            ortho,
+            ..OrbitCamera::default()
+        };
+        self.follow_camera(index);
     }
 
     /// Fits the sculpt view to the clay's bounding sphere.
@@ -148,20 +155,30 @@ impl App {
         }
 
         self.view_rects = rects;
+        // The view the pointer is over: the view menu switches its aids.
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        if let Some(index) = [SCULPT, REFERENCE]
+            .into_iter()
+            .find(|&i| shown(rects[i]) && hover.is_some_and(|p| rects[i].contains(p)))
+        {
+            self.study.focus = index;
+        }
+        let toolbars = self.toolbar_areas(rects);
+        let on_toolbar = |index: usize| hover.is_some_and(|p| toolbars[index].contains(p));
         for index in [SCULPT, REFERENCE] {
             if shown(rects[index]) {
-                self.view_input(ui, rects[index], index);
+                self.view_input(ui, rects[index], index, on_toolbar(index));
             }
         }
 
         let painter = ui.painter();
         // The mirror view flips the images; what is drawn over them is not.
-        let uv = if self.study.mirror {
-            Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
-        } else {
-            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
-        };
-        for (view, rect) in self.views.iter().zip(rects) {
+        for (index, (view, rect)) in self.views.iter().zip(rects).enumerate() {
+            let uv = if self.study.views[index].mirror {
+                Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
+            } else {
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+            };
             if let Some(id) = view.egui_id
                 && shown(rect)
             {
@@ -208,10 +225,15 @@ impl App {
             );
         }
         self.timer_ui(ui, area, rects);
+        self.toolbars(ui, rects);
 
         let left = rects[SCULPT];
         if shown(left) {
-            self.tool_cursor(ui, left);
+            // The toolbar hides the brush beneath it, but not that of a
+            // stroke passing over it.
+            if !on_toolbar(SCULPT) || self.drags[SCULPT].is_some() {
+                self.tool_cursor(ui, left);
+            }
             if self.debug {
                 self.debug_hud(ui, left);
             }
@@ -219,18 +241,25 @@ impl App {
         self.tool_pie_ui(ui);
     }
 
-    /// The point of the rendered view under `pos`, a point of the screen in
-    /// the view's `rect`. The mirror view shows the image flipped, so there
-    /// x reflects about the view's centre.
+    /// The point of the rendered sculpt view under `pos`, a point of the
+    /// screen in the view's `rect`.
     pub(super) fn view_pos(&self, rect: Rect, pos: Pos2) -> Pos2 {
-        mirror_x(rect, pos, self.study.mirror)
+        self.view_pos_in(SCULPT, rect, pos)
+    }
+
+    /// The point of view `index`'s rendered image under `pos`, a point of
+    /// the screen in the view's `rect`. The mirror view shows the image
+    /// flipped, so there x reflects about the view's centre.
+    pub(super) fn view_pos_in(&self, index: usize, rect: Rect, pos: Pos2) -> Pos2 {
+        mirror_x(rect, pos, self.study.views[index].mirror)
     }
 
     /// Pointer input in one view: the navigation preset decides what each
     /// press starts; in the sculpt view a left press on the clay that the
     /// preset leaves free sculpts. The reference view has nothing to sculpt,
-    /// so a free left drag turns it.
-    fn view_input(&mut self, ui: &egui::Ui, rect: Rect, index: usize) {
+    /// so a free left drag turns it. Over its toolbar a view takes no press
+    /// and no scroll.
+    fn view_input(&mut self, ui: &egui::Ui, rect: Rect, index: usize, on_toolbar: bool) {
         let response = ui.interact(
             rect,
             ui.scope_id().with(("view", index)),
@@ -248,18 +277,18 @@ impl App {
         // into the rendered view, and sideways drags turn the other way so
         // the clay still follows the hand. The guides stay on the screen.
         let screen = pointer;
-        let pointer = pointer.map(|pos| self.view_pos(rect, pos));
+        let pointer = pointer.map(|pos| self.view_pos_in(index, rect, pos));
         // Zooming goes by the hand on the screen, mirrored or not.
         let zoom = self.nav.zoom(delta.x, delta.y);
-        let delta = if self.study.mirror {
+        let delta = if self.study.views[index].mirror {
             egui::vec2(-delta.x, delta.y)
         } else {
             delta
         };
         let camera_before = self.cameras[index];
 
-        // An open pie menu takes every press.
-        if self.drags[index].is_none() && response.hovered() && !self.pie_open() {
+        // An open pie menu takes every press; the toolbar takes its own.
+        if self.drags[index].is_none() && response.hovered() && !self.pie_open() && !on_toolbar {
             for (button, ours) in [
                 (PointerButton::Primary, Button::Primary),
                 (PointerButton::Middle, Button::Middle),
@@ -352,7 +381,7 @@ impl App {
                             && s.pressure > 0.0
                     })
                     .map(|s| {
-                        let pos = self.view_pos(rect, egui::pos2(s.pos[0], s.pos[1]));
+                        let pos = self.view_pos_in(index, rect, egui::pos2(s.pos[0], s.pos[1]));
                         (pos, s.pressure)
                     })
                     .collect();
@@ -378,7 +407,7 @@ impl App {
             None => {}
         }
 
-        if response.hovered() && scroll != 0.0 {
+        if response.hovered() && !on_toolbar && scroll != 0.0 {
             self.cameras[index].dolly((-scroll * DOLLY_WHEEL).exp());
         }
         if self.cameras[index] != camera_before {

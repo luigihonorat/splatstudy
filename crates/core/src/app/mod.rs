@@ -11,6 +11,7 @@
 //! - `playback`: watching the timelapse
 //! - `reference`: the reference and its panel
 //! - `study`: comparison aids (camera link, silhouette, ghost, guides, timer)
+//! - `toolbar`: each view's toolbar of view options
 //! - `files`: scenes, opening and importing
 //! - `export`: exporting the timelapse
 //! - `help`: getting started and preferences
@@ -26,6 +27,7 @@ mod reference;
 mod sculpting;
 mod shortcuts;
 mod study;
+mod toolbar;
 mod views;
 
 use egui::{CursorIcon, Frame, Key, Margin, PointerButton, Pos2, Rect};
