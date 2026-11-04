@@ -33,6 +33,10 @@
 //!   [diagonal codes](crate::sculpt::mesh::diagonals). Readers from before
 //!   it open the clay as triangles. Codes that don't fit their clay are
 //!   dropped, and the clay opens as triangles.
+//! - `LAYR`: the clay's mask and chalk, and those of the checkpoints that
+//!   kept some (see [`Layers::write`]). Readers from before it open the
+//!   clay without them; they can't read a log with the mask tool or
+//!   layer edits either, so they open it without its timelapse.
 //!
 //! A copy saved without its timelapse has no `CKPT` or `LOG_`, and its
 //! `LEVL` and `QUAD` hold only the clay's: it opens as the clay is, and a
@@ -53,7 +57,7 @@ use crate::camera::OrbitCamera;
 use crate::io::{ReadError, Reader, Writer};
 use crate::reference::Reference;
 use crate::sculpt::record::{read_checkpoints, read_log, write_checkpoints, write_log};
-use crate::sculpt::{Checkpoint, Entry, Levels, Mesh, Sculpt};
+use crate::sculpt::{Checkpoint, Entry, Layers, Levels, Mesh, Sculpt};
 
 pub use blob::BlobKey;
 pub use reference::SavedReference;
@@ -74,8 +78,9 @@ pub const VIEW: u32 = tag(b"VIEW");
 pub const REFERENCE_BY_KEY: u32 = tag(b"REFH");
 pub const LEVELS: u32 = tag(b"LEVL");
 pub const QUADS: u32 = tag(b"QUAD");
+pub const LAYERS: u32 = tag(b"LAYR");
 /// The chunks this version reads; others are skipped without inflating.
-const KNOWN: [u32; 8] = [
+const KNOWN: [u32; 9] = [
     MESH,
     CHECKPOINTS,
     LOG,
@@ -84,6 +89,7 @@ const KNOWN: [u32; 8] = [
     REFERENCE_BY_KEY,
     LEVELS,
     QUADS,
+    LAYERS,
 ];
 
 const DEFLATED: u32 = 1;
@@ -367,6 +373,41 @@ impl SceneWriter {
         self.chunk(QUADS, self.pack, &w.finish())
     }
 
+    /// The mask and chalk of the clay and of its checkpoints; no chunk at
+    /// all when there are none.
+    pub fn layers(&mut self, sculpt: &Sculpt) -> &mut Self {
+        self.layers_of(sculpt, true)
+    }
+
+    /// The clay's own mask and chalk, for a scene saved without its
+    /// checkpoints.
+    pub fn layers_now(&mut self, sculpt: &Sculpt) -> &mut Self {
+        self.layers_of(sculpt, false)
+    }
+
+    fn layers_of(&mut self, sculpt: &Sculpt, history: bool) -> &mut Self {
+        let kept: Vec<(usize, &Checkpoint, &Layers)> = sculpt
+            .checkpoints()
+            .iter()
+            .enumerate()
+            .filter(|_| history)
+            .filter_map(|(i, c)| Some((i, c, c.layers.as_deref()?)))
+            .collect();
+        let live = &sculpt.mesh.layers;
+        if live.is_empty() && kept.is_empty() {
+            return self;
+        }
+        let size = live.bytes() + kept.iter().map(|(_, _, l)| l.bytes()).sum::<usize>() + 16;
+        self.chunk_with(LAYERS, size, |w| {
+            live.write(w, sculpt.mesh.positions.len());
+            w.len(kept.len());
+            for (i, checkpoint, layers) in kept {
+                w.u32(i as u32);
+                layers.write(w, checkpoint.positions.len());
+            }
+        })
+    }
+
     /// The reference file is stored as it came: most formats are packed
     /// already, and big ones would take long to deflate.
     pub fn reference(&mut self, reference: &Reference) -> &mut Self {
@@ -561,6 +602,7 @@ impl Scene {
         let mut view = None;
         let mut levels = None;
         let mut quads = None;
+        let mut layers = None;
         let mut history_damaged = false;
         let mut reference_damaged = false;
         // A damaged part is logged and left out; only damaged clay (or
@@ -601,6 +643,7 @@ impl Scene {
                 VIEW => view = Some(read_view(&mut r)?),
                 LEVELS => levels = Some(chunk.payload),
                 QUADS => quads = Some(chunk.payload),
+                LAYERS => layers = Some(chunk.payload),
                 _ => {}
             }
         }
@@ -613,6 +656,14 @@ impl Scene {
         {
             // Only the quads are lost: the clay and its history are whole.
             damaged("quads", err);
+        }
+        if let Some(payload) = layers
+            && let Err(err) = read_layers(&payload, &mut mesh, &mut checkpoints)
+        {
+            // The clay opens without its mask and chalk; a history that
+            // painted them can't be replayed without those it started from.
+            damaged("layers", err);
+            history_damaged = true;
         }
         let levels = match levels {
             Some(payload) => match read_levels(&payload, &mesh, &mut checkpoints) {
@@ -712,6 +763,34 @@ fn read_quads(
     }
     for (i, codes) in kept {
         checkpoints[i].diagonals = Some(codes.into());
+    }
+    Ok(())
+}
+
+/// Reads a `LAYR` chunk into the clay and its checkpoints; nothing is put
+/// in place unless the whole chunk fits.
+fn read_layers(
+    payload: &[u8],
+    mesh: &mut Mesh,
+    checkpoints: &mut [Checkpoint],
+) -> Result<(), ReadError> {
+    let mut r = Reader::new(payload);
+    let live = Layers::read(&mut r, mesh.positions.len())?;
+    let count = r.len(5)?;
+    let mut kept = Vec::with_capacity(count.min(checkpoints.len()));
+    for _ in 0..count {
+        let i = r.u32()? as usize;
+        let n = checkpoints
+            .get(i)
+            .filter(|c| c.has_mesh())
+            .ok_or_else(|| r.invalid("layers for a checkpoint that has no mesh"))?
+            .positions
+            .len();
+        kept.push((i, Layers::read(&mut r, n)?));
+    }
+    mesh.layers = live;
+    for (i, layers) in kept {
+        checkpoints[i].layers = Some(Arc::new(layers));
     }
     Ok(())
 }
@@ -896,6 +975,7 @@ mod tests {
             .log(s.log())
             .levels(s)
             .quads(s)
+            .layers(s)
             .view(view);
         w.finish()
     }
@@ -1308,6 +1388,114 @@ mod tests {
                 s.subdivide();
             }
         }
+    }
+
+    /// Chalk, a mask painted, strokes over both, then a new mesh (whose
+    /// checkpoint keeps the layers it was given) and more of the same.
+    fn layered_session() -> Sculpt {
+        let mut s = session();
+        let stroke = |s: &mut Sculpt, brush: Brush, x: f32| {
+            s.begin_stroke();
+            for i in 0..4 {
+                s.dab(Dab {
+                    brush,
+                    centre: Vec3::new(x, 0.1 * i as f32, 0.95).normalize(),
+                    radius: 0.25,
+                    strength: 0.7,
+                    invert: false,
+                    symmetry: false,
+                    direction: Vec3::Y,
+                });
+                s.refresh();
+            }
+            s.end_stroke();
+        };
+        s.set_clock(20.0);
+        s.edit_layer(crate::sculpt::LayerOp::AddChalk);
+        stroke(&mut s, Brush::Mask, 0.2);
+        stroke(&mut s, Brush::Clay, 0.1);
+        s.set_clock(30.0);
+        let mut other = Mesh::icosphere(2);
+        other.layers = s.layers_for(&other);
+        s.replace_mesh(other);
+        stroke(&mut s, Brush::Mask, -0.3);
+        stroke(&mut s, Brush::Inflate, -0.2);
+        s
+    }
+
+    #[test]
+    fn the_mask_and_chalk_come_back_in_a_scene_and_replay() {
+        let live = layered_session();
+        assert!(!live.mesh.layers.mask.is_empty() && !live.mesh.layers.chalk.is_empty());
+        let kept = live.checkpoints().iter().filter(|c| c.layers.is_some());
+        assert_eq!(kept.count(), 1, "the new mesh's checkpoint");
+        for writer in [SceneWriter::new(), SceneWriter::stored()] {
+            let mut w = writer;
+            w.mesh(&live.mesh)
+                .history(&live, &mut HistoryCache::default())
+                .layers(&live)
+                .view(&view());
+            let data = w.finish();
+            let scene = Scene::read(&data).unwrap();
+            assert_eq!(scene.mesh.layers, live.mesh.layers);
+            assert_eq!(scene.checkpoints, live.checkpoints());
+            let mut replay = Replay::new(scene.checkpoints.clone(), scene.log.clone());
+            assert!(replay.seek(f64::INFINITY, usize::MAX));
+            assert_eq!(replay.sculpt.mesh.layers, live.mesh.layers);
+            assert_eq!(
+                position_bits(&replay.sculpt.mesh.positions),
+                position_bits(&live.mesh.positions)
+            );
+        }
+        // Reopened and saved untouched: the same bytes.
+        let data = save(&live, &view());
+        let scene = Scene::read(&data).unwrap();
+        let resumed = Sculpt::with_history(scene.mesh, scene.levels, scene.log, scene.checkpoints);
+        assert_eq!(save(&resumed, &view()), data);
+    }
+
+    #[test]
+    fn a_scene_without_layers_opens_without_them_and_damaged_ones_drop_the_history() {
+        // As a reader from before them, or a file from before them: the
+        // clay opens, unmasked and unchalked.
+        let live = layered_session();
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh)
+            .checkpoints(live.checkpoints())
+            .log(live.log());
+        let scene = Scene::read(&w.finish()).expect("the clay opens");
+        assert!(scene.mesh.layers.is_empty());
+        assert_eq!(scene.mesh.positions, live.mesh.positions);
+        // Damaged: the clay opens without them, and without a history
+        // that can't be replayed.
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh)
+            .checkpoints(live.checkpoints())
+            .log(live.log())
+            .chunk(LAYERS, true, &[1, 0, 0]);
+        let scene = Scene::read(&w.finish()).expect("the clay opens");
+        assert!(scene.mesh.layers.is_empty() && scene.history_damaged);
+        assert!(scene.log.is_empty());
+        // Layers for a checkpoint without a mesh, or of the wrong size:
+        // refused the same way.
+        let mut w = Writer::new();
+        live.mesh.layers.write(&mut w, live.mesh.positions.len());
+        w.len(1).u32(99).u8(0);
+        let mut s = SceneWriter::new();
+        s.mesh(&live.mesh)
+            .checkpoints(live.checkpoints())
+            .log(live.log())
+            .chunk(LAYERS, false, &w.finish());
+        let scene = Scene::read(&s.finish()).expect("the clay opens");
+        assert!(scene.history_damaged && scene.mesh.layers.is_empty());
+        let mut w = Writer::new();
+        live.mesh
+            .layers
+            .write(&mut w, live.mesh.positions.len() - 1);
+        w.len(0);
+        let mut s = SceneWriter::new();
+        s.mesh(&live.mesh).chunk(LAYERS, false, &w.finish());
+        assert!(Scene::read(&s.finish()).unwrap().mesh.layers.is_empty());
     }
 
     #[test]

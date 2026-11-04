@@ -249,15 +249,18 @@ impl App {
 
     /// The scene, with the reference file inside, or named by `key` and
     /// left out. Without its `history`, it is the clay as it is, with its
-    /// levels and quads, and no timelapse.
+    /// levels, quads, mask and chalk, and no timelapse.
     fn write_scene(&mut self, mut w: SceneWriter, key: Option<BlobKey>, history: bool) -> Vec<u8> {
         w.mesh(&self.sculpt.mesh);
         if history {
             w.history(&self.sculpt, &mut self.files.history)
                 .levels(&self.sculpt)
-                .quads(&self.sculpt);
+                .quads(&self.sculpt)
+                .layers(&self.sculpt);
         } else {
-            w.levels_now(&self.sculpt).quads_now(&self.sculpt);
+            w.levels_now(&self.sculpt)
+                .quads_now(&self.sculpt)
+                .layers_now(&self.sculpt);
         }
         match (self.scene_reference(), key) {
             (Some(reference), Some(key)) => w.reference_by_key(reference, key),
