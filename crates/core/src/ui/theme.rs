@@ -41,6 +41,13 @@ pub const WIRE: Color32 = hex(0x262626);
 pub const WIRE_OPACITY: f32 = 0.6;
 /// How strongly the ghost of the reference shows over the sculpt.
 pub const GHOST_OPACITY: f32 = 0.35;
+/// The toolbars over the views: a dark strip, all but opaque, that reads
+/// over the black view and the clay alike, a lighter square under the
+/// button pointed at, and the icons: bright when on, dim when off.
+pub const TOOLBAR_BG: Color32 = Color32::from_rgba_premultiplied(19, 19, 19, 242);
+pub const TOOL_HOVER: Color32 = hex(0x2A2A2A);
+pub const TOOL_ON: Color32 = VIEW_INK;
+pub const TOOL_OFF: Color32 = hex(0x7A7A7A);
 
 /// The site's CSS custom properties, one set per mode.
 #[derive(Clone, Copy, Debug)]
