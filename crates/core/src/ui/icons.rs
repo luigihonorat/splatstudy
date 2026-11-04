@@ -349,6 +349,27 @@ pub fn pinch_tool(painter: &Painter, rect: Rect, colour: Color32) {
     head(&pen, (11.0, 8.5), (-1.0, 0.0), 2.5);
 }
 
+/// Mask: a round of clay, half of it hatched, held still.
+pub fn mask_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    let (c, r) = ((8.0, 8.0), 6.5);
+    pen.circle(c, r);
+    pen.line((8.0, c.1 - r), (8.0, c.1 + r));
+    // Diagonals across the left half, each from the circle to the middle
+    // line or the circle again.
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    for k in [-6.0f32, -3.0, 0.0, 3.0] {
+        let reach = (r * r - k * k).max(0.0).sqrt();
+        // Along (1, -1) from the point `k` along (1, 1) off the centre.
+        let to = reach.min(-k);
+        if to <= -reach {
+            continue;
+        }
+        let at = |t: f32| (c.0 + (k + t) * s, c.1 + (k - t) * s);
+        pen.line(at(-reach), at(to));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

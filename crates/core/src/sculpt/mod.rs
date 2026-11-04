@@ -6,6 +6,7 @@
 //! samples into world-space dabs (`dab`) or grabs (`grab`, `drag`).
 
 pub mod bvh;
+pub mod layers;
 pub mod levels;
 pub mod mesh;
 pub mod record;
@@ -18,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use glam::Vec3;
 
 pub use bvh::{Bvh, Hit};
+pub use layers::{Layer, LayerOp, Layers};
 pub use levels::Levels;
 pub use mesh::{Mesh, Stamp, Vertex};
 pub use record::{Checkpoint, Entry, Event, Replay};
@@ -30,7 +32,7 @@ pub use sphere::{START_LEVEL, cube_sphere};
 pub const OLD_START_LEVEL: u32 = 7;
 
 /// The most vertices and triangles the clay may have, from any source
-/// (import, remesh, subdivision, a saved scene): its GPU buffers (28 and
+/// (import, remesh, subdivision, a saved scene): its GPU buffers (32 and
 /// 12 bytes each) stay well under wgpu's 256 MiB default buffer limit.
 pub const MAX_VERTICES: usize = 4_000_000;
 pub const MAX_TRIANGLES: usize = 8_000_000;
@@ -65,11 +67,14 @@ pub enum Brush {
     Crease,
     /// Draws the surface together towards the brush centre, sharpening edges.
     Pinch,
+    /// Paints the mask, which holds the clay still under every other
+    /// brush; the opposite action takes it off.
+    Mask,
 }
 
 impl Brush {
     /// Every brush, in the order the tool panel lists them.
-    pub const ALL: [Brush; 7] = [
+    pub const ALL: [Brush; 8] = [
         Brush::Move,
         Brush::Clay,
         Brush::Flatten,
@@ -77,6 +82,7 @@ impl Brush {
         Brush::Inflate,
         Brush::Crease,
         Brush::Pinch,
+        Brush::Mask,
     ];
 }
 
@@ -123,7 +129,7 @@ pub struct Dab {
     /// 0..1, already including pressure.
     pub strength: f32,
     /// The opposite action: clay digs, flatten fills, inflate deflates,
-    /// crease raises a ridge, pinch spreads.
+    /// crease raises a ridge, pinch spreads, mask unmasks.
     pub invert: bool,
     /// Also apply mirrored across the X = 0 plane.
     pub symmetry: bool,
@@ -131,11 +137,15 @@ pub struct Dab {
     pub direction: Vec3,
 }
 
-/// One undoable change: the vertices a stroke moved, before and after.
+/// One undoable change: the vertices a stroke touched, before and after.
 struct Edit {
     indices: Vec<u32>,
+    /// Their positions; empty if the stroke only painted the mask.
     before: Vec<Vec3>,
     after: Vec<Vec3>,
+    /// Their mask and chalk; empty if neither changed.
+    layers_before: Vec<[f32; 2]>,
+    layers_after: Vec<[f32; 2]>,
 }
 
 impl Step {
@@ -143,9 +153,14 @@ impl Step {
     fn bytes(&self) -> usize {
         match self {
             Step::Move(edit) => {
-                edit.indices.len() * 4 + (edit.before.len() + edit.after.len()) * 12
+                edit.indices.len() * 4
+                    + (edit.before.len() + edit.after.len()) * 12
+                    + (edit.layers_before.len() + edit.layers_after.len()) * 8
             }
-            Step::Topology(old) => old.0.positions.len() * 12 + old.0.triangles.len() * 12,
+            Step::Layer(_, layer) => layer.bytes(),
+            Step::Topology(old) => {
+                old.0.positions.len() * 12 + old.0.triangles.len() * 12 + old.0.layers.bytes()
+            }
             Step::Levels(Some(levels)) => levels.memory(),
             _ => 0,
         }
@@ -167,6 +182,9 @@ enum Step {
     Subdivide,
     /// Levels were deleted: the levels before, to swap back.
     Levels(Option<Box<Levels>>),
+    /// A whole layer was replaced (see `Sculpt::edit_layer`): the layer
+    /// before, to swap back.
+    Layer(layers::Kind, Layer),
 }
 
 pub struct Sculpt {
@@ -186,9 +204,14 @@ pub struct Sculpt {
     touched: Stamp,
     stroke_indices: Vec<u32>,
     stroke_before: Vec<Vec3>,
+    /// The mask and chalk of each vertex in `stroke_indices`, when the
+    /// stroke first touched it.
+    stroke_layers_before: Vec<[f32; 2]>,
     /// Move brush: grabbed vertices, their start positions, weights, and
     /// whether they belong to the mirrored side.
     grabbed: Vec<(u32, Vec3, f32, bool)>,
+    /// Move brush: the grabbed surface has moved, and lost its chalk.
+    grab_wiped: bool,
     undo: Vec<Step>,
     redo: Vec<Step>,
     /// Every call that changed the clay, for replay.
@@ -277,7 +300,9 @@ impl Sculpt {
             touched: Stamp::new(n),
             stroke_indices: Vec::new(),
             stroke_before: Vec::new(),
+            stroke_layers_before: Vec::new(),
             grabbed: Vec::new(),
+            grab_wiped: false,
             undo: Vec::new(),
             redo: Vec::new(),
             log: Vec::new(),
@@ -426,6 +451,7 @@ impl Sculpt {
         self.grabbed.clear();
         self.stroke_indices.clear();
         self.stroke_before.clear();
+        self.stroke_layers_before.clear();
         self.topology_changed = true;
         std::mem::replace(&mut self.mesh, mesh)
     }
@@ -545,6 +571,7 @@ impl Sculpt {
         self.touched.next();
         self.stroke_indices.clear();
         self.stroke_before.clear();
+        self.stroke_layers_before.clear();
         self.grabbed.clear();
     }
 
@@ -562,7 +589,8 @@ impl Sculpt {
         }
         let indices = std::mem::take(&mut self.stroke_indices);
         let before = std::mem::take(&mut self.stroke_before);
-        self.push_edit(indices, before);
+        let layers_before = std::mem::take(&mut self.stroke_layers_before);
+        self.push_edit(indices, before, layers_before);
         if self.recording && self.clock - self.last_checkpoint >= CHECKPOINT_EVERY {
             // The replay recomputes the normals when it snaps: so does this.
             self.mesh.recompute_normals();
@@ -571,17 +599,34 @@ impl Sculpt {
         }
     }
 
-    /// Makes the move of `indices` from `before` to where they are now one
-    /// undo step.
-    fn push_edit(&mut self, indices: Vec<u32>, before: Vec<Vec3>) {
-        let after = indices
+    /// Makes the change of `indices` from `before` (positions) and
+    /// `layers_before` (mask and chalk) to what they are now one undo
+    /// step. What didn't change isn't kept, except the positions of a
+    /// stroke that changed nothing at all.
+    fn push_edit(
+        &mut self,
+        indices: Vec<u32>,
+        mut before: Vec<Vec3>,
+        mut layers_before: Vec<[f32; 2]>,
+    ) {
+        let mut after: Vec<Vec3> = indices
             .iter()
             .map(|&v| self.mesh.positions[v as usize])
             .collect();
+        let mut layers_after: Vec<[f32; 2]> = indices.iter().map(|&v| self.layers_at(v)).collect();
+        if layers_after == layers_before {
+            layers_after.clear();
+            layers_before.clear();
+        } else if after == before {
+            after.clear();
+            before.clear();
+        }
         self.undo.push(Step::Move(Edit {
             indices,
             before,
             after,
+            layers_before,
+            layers_after,
         }));
         self.redo.clear();
         self.forget_oldest_steps(UNDO_BUDGET);
@@ -612,8 +657,13 @@ impl Sculpt {
         match self.undo.pop() {
             Some(Step::Move(edit)) => {
                 self.record(Event::Undo);
-                self.apply_positions(&edit.indices, &edit.before);
+                self.apply_edit(&edit, false);
                 self.redo.push(Step::Move(edit));
+            }
+            Some(Step::Layer(kind, layer)) => {
+                self.record(Event::Undo);
+                let other = self.swap_layer(kind, layer);
+                self.redo.push(Step::Layer(kind, other));
             }
             Some(Step::Topology(old)) => {
                 // Logged as a checkpoint of the mesh it brings back.
@@ -642,8 +692,13 @@ impl Sculpt {
         match self.redo.pop() {
             Some(Step::Move(edit)) => {
                 self.record(Event::Redo);
-                self.apply_positions(&edit.indices, &edit.after);
+                self.apply_edit(&edit, true);
                 self.undo.push(Step::Move(edit));
+            }
+            Some(Step::Layer(kind, layer)) => {
+                self.record(Event::Redo);
+                let other = self.swap_layer(kind, layer);
+                self.undo.push(Step::Layer(kind, other));
             }
             Some(Step::Topology(new)) => {
                 let current = self.swap_topology(*new);
@@ -661,6 +716,26 @@ impl Sculpt {
         }
     }
 
+    /// Puts the vertices of a stroke back as they were before it, or
+    /// (`after`) as it left them.
+    fn apply_edit(&mut self, edit: &Edit, after: bool) {
+        let (positions, layers) = if after {
+            (&edit.after, &edit.layers_after)
+        } else {
+            (&edit.before, &edit.layers_before)
+        };
+        if !positions.is_empty() {
+            self.apply_positions(&edit.indices, positions);
+        }
+        let n = self.mesh.positions.len();
+        for (&v, &[mask, chalk]) in edit.indices.iter().zip(layers) {
+            let at = v as usize;
+            self.mesh.layers.mask.set(at, mask, n);
+            self.mesh.layers.chalk.set(at, chalk, n);
+            self.dirty_pages[at / PAGE] = true;
+        }
+    }
+
     fn apply_positions(&mut self, indices: &[u32], positions: &[Vec3]) {
         for (&v, &p) in indices.iter().zip(positions) {
             self.mesh.positions[v as usize] = p;
@@ -670,19 +745,88 @@ impl Sculpt {
         self.after_move();
     }
 
-    /// Remembers where a vertex was before this stroke first moved it.
+    /// Remembers where a vertex was, and its mask and chalk, before this
+    /// stroke first changed it.
     fn touch(&mut self, v: u32) {
         if self.stroke_open && self.touched.mark(v) {
             self.stroke_indices.push(v);
             self.stroke_before.push(self.mesh.positions[v as usize]);
+            self.stroke_layers_before.push(self.layers_at(v));
         }
     }
 
-    /// Moves vertex `v` to `p`, remembering where it was for undo.
+    /// The mask and chalk at vertex `v`.
+    fn layers_at(&self, v: u32) -> [f32; 2] {
+        let layers = &self.mesh.layers;
+        [layers.mask.get(v as usize), layers.chalk.get(v as usize)]
+    }
+
+    /// How free vertex `v` is to move: 1 unmasked, 0 frozen.
+    fn free(&self, v: u32) -> f32 {
+        1.0 - self.mesh.layers.mask.get(v as usize)
+    }
+
+    /// Moves vertex `v` towards `p`, as far as the mask lets it,
+    /// remembering where it was for undo. A frozen vertex stays.
     fn place(&mut self, v: u32, p: Vec3) {
+        let free = self.free(v);
+        if free <= 0.0 {
+            return;
+        }
+        let p = if free < 1.0 {
+            let start = self.mesh.positions[v as usize];
+            start + (p - start) * free
+        } else {
+            p
+        };
         self.touch(v);
         self.mesh.positions[v as usize] = p;
         self.moved.push(v);
+    }
+
+    /// Takes chalk off the vertices moved since `moved[from]`, as much as
+    /// the dab weighs on each: its falloff times its strength, held back
+    /// by the mask as the move was. A stroke wipes the chalk off where
+    /// the brush went.
+    fn wipe_chalk(&mut self, from: usize, dab: Dab) {
+        if self.mesh.layers.chalk.is_empty() {
+            return;
+        }
+        let n = self.mesh.positions.len();
+        for i in from..self.moved.len() {
+            let v = self.moved[i];
+            let p = self.mesh.positions[v as usize];
+            let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength * self.free(v);
+            let chalk = &mut self.mesh.layers.chalk;
+            let left = (chalk.get(v as usize) - w).max(0.0);
+            chalk.set(v as usize, left, n);
+        }
+    }
+
+    /// Replaces a whole layer; returns the one it replaced.
+    fn swap_layer(&mut self, kind: layers::Kind, layer: Layer) -> Layer {
+        self.dirty_pages.fill(true);
+        std::mem::replace(self.mesh.layers.get_mut(kind), layer)
+    }
+
+    /// Changes a whole layer: clears or inverts the mask, adds or removes
+    /// the chalk. One undo step; false, with nothing done or logged, if
+    /// it would change nothing.
+    pub fn edit_layer(&mut self, op: LayerOp) -> bool {
+        if self.stroke_open {
+            self.end_stroke();
+        }
+        let n = self.mesh.positions.len();
+        let layer = op.apply(self.mesh.layers.get(op.kind()), n);
+        if layer == *self.mesh.layers.get(op.kind()) {
+            return false;
+        }
+        self.record(Event::Layer(op));
+        let before = self.swap_layer(op.kind(), layer);
+        self.undo.push(Step::Layer(op.kind(), before));
+        self.redo.clear();
+        self.forget_oldest_steps(UNDO_BUDGET);
+        true
     }
 
     /// Normals, upload pages and the hierarchy after `self.moved` changed.
@@ -727,6 +871,7 @@ impl Sculpt {
             &mut found,
         );
         if !found.is_empty() {
+            let from = self.moved.len();
             match dab.brush {
                 Brush::Clay => self.clay(&found, dab),
                 Brush::Flatten => self.flatten(&found, dab),
@@ -734,8 +879,10 @@ impl Sculpt {
                 Brush::Inflate => self.inflate(&found, dab),
                 Brush::Crease => self.crease(&found, dab),
                 Brush::Pinch => self.pinch(&found, dab),
+                Brush::Mask => self.mask(&found, dab),
                 Brush::Move => {}
             }
+            self.wipe_chalk(from, dab);
         }
         self.found = found;
     }
@@ -875,6 +1022,31 @@ impl Sculpt {
         }
     }
 
+    /// Raises the mask under the brush, or lowers it (`invert`), by the
+    /// dab's weight on each vertex. Only the side facing the brush, as
+    /// for the brushes that shape the clay.
+    fn mask(&mut self, found: &[u32], dab: Dab) {
+        let Some((n, _)) = self.area_plane(found, dab) else {
+            return;
+        };
+        let sign = if dab.invert { -1.0 } else { 1.0 };
+        let count = self.mesh.positions.len();
+        for &v in found {
+            if !self.faces(v, n) {
+                continue;
+            }
+            let p = self.mesh.positions[v as usize];
+            let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength;
+            let old = self.mesh.layers.mask.get(v as usize);
+            let new = (old + sign * w).clamp(0.0, 1.0);
+            if new != old {
+                self.touch(v);
+                self.mesh.layers.mask.set(v as usize, new, count);
+                self.dirty_pages[v as usize / PAGE] = true;
+            }
+        }
+    }
+
     /// Move brush, at the start of a stroke: takes hold of the surface
     /// around `centre` (and its mirror image).
     pub fn grab(&mut self, centre: Vec3, radius: f32, symmetry: bool) {
@@ -885,6 +1057,7 @@ impl Sculpt {
             symmetry,
         });
         self.grabbed.clear();
+        self.grab_wiped = false;
         self.unique.next();
         let mut sides = vec![(centre, false)];
         if symmetry && mirror(centre).distance(centre) > radius * 0.05 {
@@ -896,10 +1069,13 @@ impl Sculpt {
             self.bvh
                 .vertices_in_sphere(&self.mesh, c, radius, &mut self.stamp, &mut found);
             for &v in &found {
-                if self.unique.mark(v) {
+                // Held back by the mask; a frozen vertex isn't grabbed.
+                let free = self.free(v);
+                if free > 0.0 && self.unique.mark(v) {
                     let p = self.mesh.positions[v as usize];
-                    self.grabbed
-                        .push((v, p, self.falloff.weight(p.distance(c), radius), mirrored));
+                    let w = self.falloff.weight(p.distance(c), radius);
+                    let w = if free < 1.0 { w * free } else { w };
+                    self.grabbed.push((v, p, w, mirrored));
                 }
             }
         }
@@ -913,6 +1089,19 @@ impl Sculpt {
     /// grabbed (mirrored on the other side).
     pub fn drag(&mut self, offset: Vec3) {
         self.record(Event::Drag(offset));
+        // The first time it moves, the grabbed surface loses its chalk,
+        // as much as each vertex is grabbed.
+        if !self.grab_wiped && offset != Vec3::ZERO {
+            self.grab_wiped = true;
+            if !self.mesh.layers.chalk.is_empty() {
+                let n = self.mesh.positions.len();
+                for &(v, _, weight, _) in &self.grabbed {
+                    let chalk = &mut self.mesh.layers.chalk;
+                    let left = (chalk.get(v as usize) - weight).max(0.0);
+                    chalk.set(v as usize, left, n);
+                }
+            }
+        }
         self.moved.clear();
         for &(v, start, weight, mirrored) in &self.grabbed {
             let o = if mirrored { mirror(offset) } else { offset };
@@ -965,7 +1154,16 @@ impl Sculpt {
                 .filter(|(offset, _)| offset.abs() <= reach)
                 .min_by(|a, b| a.0.abs().total_cmp(&b.0.abs()));
             if let Some((_, q)) = nearest {
-                let target = mirror(q);
+                // Held back by the mask, as under the brushes.
+                let free = self.free(v as u32);
+                if free <= 0.0 {
+                    continue;
+                }
+                let target = if free < 1.0 {
+                    p + (mirror(q) - p) * free
+                } else {
+                    mirror(q)
+                };
                 if target != p {
                     indices.push(v as u32);
                     targets.push(target);
@@ -979,8 +1177,9 @@ impl Sculpt {
             .iter()
             .map(|&v| self.mesh.positions[v as usize])
             .collect();
+        let layers = indices.iter().map(|&v| self.layers_at(v)).collect();
         self.apply_positions(&indices, &targets);
-        self.push_edit(indices, before);
+        self.push_edit(indices, before, layers);
     }
 }
 
@@ -1063,7 +1262,7 @@ mod tests {
 
     #[test]
     fn every_brush_stays_symmetric_and_undoes() {
-        for brush in Brush::ALL.into_iter().filter(|&b| b != Brush::Move) {
+        for brush in shaping().filter(|&b| b != Brush::Move) {
             let mut s = sculpt();
             let original = s.mesh.positions.clone();
             s.begin_stroke();
@@ -1378,5 +1577,198 @@ mod tests {
             .count();
         assert_eq!(topology, 3);
         assert_eq!(s.checkpoints().len(), 4);
+    }
+
+    /// One stroke of `brush` across the top, as a user would make it:
+    /// dabs, or a grab and drags for Move.
+    fn any_stroke(s: &mut Sculpt, brush: Brush, symmetry: bool) {
+        let at = Vec3::new(0.15, 0.1, 1.0).normalize();
+        s.begin_stroke();
+        if brush == Brush::Move {
+            s.grab(at, 0.4, symmetry);
+            s.drag(Vec3::new(0.1, 0.05, 0.2));
+            s.drag(Vec3::new(0.1, 0.1, 0.3));
+        } else {
+            for i in 0..5 {
+                s.dab(Dab {
+                    symmetry,
+                    direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
+                    ..dab(brush, (at + Vec3::Y * (0.03 * i as f32)).normalize())
+                });
+                s.refresh();
+            }
+        }
+        s.end_stroke();
+        s.refresh();
+    }
+
+    /// Every brush but the mask itself.
+    fn shaping() -> impl Iterator<Item = Brush> {
+        Brush::ALL.into_iter().filter(|&b| b != Brush::Mask)
+    }
+
+    #[test]
+    fn a_full_mask_freezes_the_clay_under_every_brush() {
+        for brush in shaping() {
+            let mut s = sculpt();
+            assert!(s.edit_layer(LayerOp::InvertMask), "all masked");
+            let original = s.mesh.positions.clone();
+            any_stroke(&mut s, brush, true);
+            assert_eq!(s.mesh.positions, original, "{brush:?} moved masked clay");
+        }
+    }
+
+    #[test]
+    fn half_a_mask_holds_its_half_still_even_with_symmetry() {
+        for brush in shaping() {
+            let mut s = sculpt();
+            let n = s.mesh.positions.len();
+            for v in 0..n {
+                if s.mesh.positions[v].x > 0.0 {
+                    s.mesh.layers.mask.set(v, 1.0, n);
+                }
+            }
+            let original = s.mesh.positions.clone();
+            any_stroke(&mut s, brush, true);
+            let mut free_moved = false;
+            for (v, (now, was)) in s.mesh.positions.iter().zip(&original).enumerate() {
+                if was.x > 0.0 {
+                    assert_eq!(now, was, "{brush:?} moved masked vertex {v}");
+                } else if now != was {
+                    free_moved = true;
+                }
+            }
+            assert!(free_moved, "{brush:?}: the mirrored side, unmasked, moves");
+            s.undo();
+            assert_eq!(s.mesh.positions, original);
+        }
+    }
+
+    #[test]
+    fn a_partial_mask_lets_the_clay_move_that_much_less() {
+        let mut free = sculpt();
+        let mut half = sculpt();
+        let n = half.mesh.positions.len();
+        for v in 0..n {
+            half.mesh.layers.mask.set(v, 0.75, n);
+        }
+        let original = free.mesh.positions.clone();
+        free.dab(dab(Brush::Inflate, Vec3::Z));
+        half.dab(dab(Brush::Inflate, Vec3::Z));
+        let top = nearest(&original, Vec3::Z);
+        let moved = |s: &Sculpt| s.mesh.positions[top].distance(original[top]);
+        assert!(moved(&free) > 0.01);
+        assert!((moved(&half) - moved(&free) * 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_mask_tool_paints_and_its_opposite_takes_off_and_both_undo() {
+        let mut s = sculpt();
+        let original = s.mesh.positions.clone();
+        let top = nearest(&original, Vec3::Z);
+        let far = nearest(&original, -Vec3::Z);
+        stroke(&mut s, Brush::Mask, Vec3::new(-0.1, 0.0, 1.0), 3);
+        assert_eq!(s.mesh.positions, original, "masking moves nothing");
+        assert_eq!(s.mesh.layers.mask.get(top), 1.0);
+        assert_eq!(s.mesh.layers.mask.get(far), 0.0);
+        let masked = s.mesh.layers.clone();
+        // The opposite action lowers it.
+        s.begin_stroke();
+        s.dab(Dab {
+            invert: true,
+            strength: 0.4,
+            ..dab(Brush::Mask, Vec3::Z)
+        });
+        s.end_stroke();
+        let w = Falloff::Smooth.weight(original[top].distance(Vec3::Z), 0.3);
+        assert!((s.mesh.layers.mask.get(top) - (1.0 - 0.4 * w)).abs() < 1e-6);
+        s.undo();
+        assert_eq!(s.mesh.layers, masked);
+        s.undo();
+        assert_eq!(s.mesh.layers, Layers::default());
+        assert!(!s.can_undo());
+        s.redo();
+        assert_eq!(s.mesh.layers, masked);
+        assert_eq!(s.mesh.positions, original);
+        // The undo step keeps the mask alone, not the positions.
+        let Some(Step::Move(edit)) = s.undo.last() else {
+            panic!("a stroke step");
+        };
+        assert!(edit.before.is_empty() && !edit.layers_before.is_empty());
+    }
+
+    #[test]
+    fn invert_and_clear_mask_undo_and_redo() {
+        let mut s = sculpt();
+        let n = s.mesh.positions.len();
+        s.mesh.layers.mask.set(3, 0.25, n);
+        assert!(!s.edit_layer(LayerOp::RemoveChalk), "no chalk to remove");
+        assert!(s.edit_layer(LayerOp::InvertMask));
+        assert_eq!(s.mesh.layers.mask.get(3), 0.75);
+        assert_eq!(s.mesh.layers.mask.get(4), 1.0);
+        assert!(s.edit_layer(LayerOp::ClearMask));
+        assert!(s.mesh.layers.mask.is_empty());
+        assert!(!s.edit_layer(LayerOp::ClearMask), "nothing left to clear");
+        s.undo();
+        assert_eq!(s.mesh.layers.mask.get(4), 1.0);
+        s.undo();
+        assert_eq!(s.mesh.layers.mask.get(3), 0.25);
+        assert_eq!(s.mesh.layers.mask.get(4), 0.0);
+        s.redo();
+        s.redo();
+        assert!(s.mesh.layers.mask.is_empty());
+        assert_eq!(s.take_dirty(), vec![0..n]);
+    }
+
+    #[test]
+    fn strokes_wipe_the_chalk_where_they_pass_and_undo_brings_it_back() {
+        for brush in shaping() {
+            let mut s = sculpt();
+            assert!(s.edit_layer(LayerOp::AddChalk));
+            let original = s.mesh.positions.clone();
+            let chalked = s.mesh.layers.clone();
+            assert_eq!(chalked.chalk.get(0), 1.0);
+            any_stroke(&mut s, brush, false);
+            let chalk = |v: usize| s.mesh.layers.chalk.get(v);
+            let under = nearest(&original, Vec3::new(0.15, 0.15, 1.0).normalize());
+            let far = nearest(&original, -Vec3::Z);
+            assert!(chalk(under) < 0.5, "{brush:?} left {} chalk", chalk(under));
+            assert_eq!(chalk(far), 1.0, "{brush:?} wiped far away");
+            // Only where the clay moved.
+            for (v, was) in original.iter().enumerate() {
+                if s.mesh.positions[v] == *was {
+                    assert!(chalk(v) > 0.999, "{brush:?}: vertex {v} didn't move");
+                }
+            }
+            s.undo();
+            assert_eq!(s.mesh.positions, original);
+            assert_eq!(s.mesh.layers, chalked, "{brush:?}: the chalk is back");
+            s.redo();
+            assert!(s.mesh.layers.chalk.get(under) < 0.5);
+            s.undo();
+            s.undo();
+            assert!(s.mesh.layers.chalk.is_empty(), "chalk removed by undo");
+        }
+    }
+
+    #[test]
+    fn the_mask_tool_leaves_the_chalk_and_masked_clay_keeps_it() {
+        let mut s = sculpt();
+        s.edit_layer(LayerOp::AddChalk);
+        stroke(&mut s, Brush::Mask, Vec3::new(0.0, 0.0, 1.0), 2);
+        assert!(s.mesh.layers.chalk.values().iter().all(|&c| c == 1.0));
+        let chalked = s.mesh.layers.chalk.clone();
+        let original = s.mesh.positions.clone();
+        // Well inside the masked patch.
+        s.begin_stroke();
+        for _ in 0..3 {
+            s.dab(Dab {
+                radius: 0.1,
+                ..dab(Brush::Clay, Vec3::new(0.02, 0.0, 1.0).normalize())
+            });
+        }
+        s.end_stroke();
+        assert_eq!(s.mesh.positions, original, "masked: nothing moves");
+        assert_eq!(s.mesh.layers.chalk, chalked, "masked: no chalk wiped");
     }
 }

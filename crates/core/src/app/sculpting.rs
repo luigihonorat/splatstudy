@@ -39,8 +39,9 @@ const TICK: f32 = 0.3;
 const MAX_STABILISER: f32 = 120.0;
 
 /// Each brush with its shortcut and starting strength, in `Brush::ALL` order.
-/// (F frames the sculpt, so flatten takes T, for trim.)
-pub(super) const BRUSHES: [(Brush, Key, f32); 7] = [
+/// (F frames the sculpt, so flatten takes T, for trim; M is move, so the
+/// mask takes A.)
+pub(super) const BRUSHES: [(Brush, Key, f32); 8] = [
     (Brush::Move, Key::M, 1.0),
     (Brush::Clay, Key::C, 0.5),
     (Brush::Flatten, Key::T, 0.5),
@@ -48,6 +49,7 @@ pub(super) const BRUSHES: [(Brush, Key, f32); 7] = [
     (Brush::Inflate, Key::I, 0.5),
     (Brush::Crease, Key::X, 0.5),
     (Brush::Pinch, Key::P, 0.5),
+    (Brush::Mask, Key::A, 1.0),
 ];
 
 pub(super) fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
@@ -59,6 +61,7 @@ pub(super) fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
         Brush::Inflate => tr.inflate,
         Brush::Crease => tr.crease,
         Brush::Pinch => tr.pinch,
+        Brush::Mask => tr.mesh.mask,
     }
 }
 
@@ -73,6 +76,7 @@ pub(super) fn brush_icon(brush: Brush) -> fn(&egui::Painter, Rect, egui::Color32
         Brush::Inflate => icons::inflate_tool,
         Brush::Crease => icons::crease_tool,
         Brush::Pinch => icons::pinch_tool,
+        Brush::Mask => icons::mask_tool,
     }
 }
 
@@ -124,9 +128,9 @@ pub(super) struct ToolSettings {
     /// Radius on screen, in points.
     pub(super) radius: f32,
     /// Strength per tool at full pen pressure, 0..1, in `Brush::ALL` order.
-    pub(super) strength: [f32; 7],
+    pub(super) strength: [f32; 8],
     /// How each tool fades towards its rim, in `Brush::ALL` order.
-    pub(super) falloff: [Falloff; 7],
+    pub(super) falloff: [Falloff; 8],
     pub(super) symmetry: bool,
     /// Stroke stabiliser: how far the brush trails the pointer, in
     /// points; 0 is off.
@@ -166,7 +170,7 @@ impl Default for ToolSettings {
             tool: Brush::Clay,
             radius: 48.0,
             strength: BRUSHES.map(|(_, _, strength)| strength),
-            falloff: [Falloff::Smooth; 7],
+            falloff: [Falloff::Smooth; 8],
             // A study from a reference is rarely symmetric: mirroring is
             // asked for, not assumed.
             symmetry: false,

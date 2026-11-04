@@ -49,6 +49,9 @@ struct Uniforms {
     pull: [f32; 4],
     /// The wireframe's colour, linear RGB, and its opacity.
     wire: [f32; 4],
+    /// The chalk's colour, linear RGB, and how much light fully masked
+    /// clay keeps.
+    layers: [f32; 4],
 }
 
 /// How a mesh is shaded.
@@ -454,6 +457,7 @@ impl ClayPass {
                             0 => Float32x3,
                             1 => Float32x3,
                             2 => Unorm8x4,
+                            3 => Unorm8x4,
                         ],
                     })],
                 },
@@ -632,6 +636,10 @@ impl ClayPass {
             wire: {
                 let [r, g, b, _] = super::linear(theme::WIRE);
                 [r, g, b, theme::WIRE_OPACITY]
+            },
+            layers: {
+                let [r, g, b, _] = super::linear(theme::CHALK);
+                [r, g, b, theme::MASK_SHADE]
             },
         };
         let (buffer, _) = &self.slots[slot.index()][layer as usize];

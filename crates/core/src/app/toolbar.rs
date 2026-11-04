@@ -628,7 +628,7 @@ mod tests {
         assert!(h.app.flyout_open(ViewOption::Tool, SCULPT));
         h.frames(1);
         let open = h.app.flyout.clone().expect("open");
-        assert_eq!(open.rows.len(), 7);
+        assert_eq!(open.rows.len(), 8);
         // Beside the toolbar, towards the view's middle, and over the clay.
         assert!(open.panel.left() > button.right());
         let pinch = open.rows[6].center();

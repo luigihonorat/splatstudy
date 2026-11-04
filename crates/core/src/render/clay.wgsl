@@ -4,7 +4,8 @@
 // above and a faint rim, so planes and edges read the way they do on a
 // modelling stand. The lighting (studio window, raking or skylight) sets the
 // key light's direction and wrap and how strong each part is. Lighting is in
-// view space so the light stays put while the sculpt turns.
+// view space so the light stays put while the sculpt turns. The clay's chalk
+// tints it blue and its mask darkens it; a silhouette shows neither.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -23,6 +24,9 @@ struct Uniforms {
     pull: vec4<f32>,
     // The wireframe's colour, linear RGB, and its opacity.
     wire: vec4<f32>,
+    // The chalk's colour, linear RGB; w: how much of its light fully
+    // masked clay keeps.
+    layers: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -32,6 +36,8 @@ struct VsIn {
     @location(1) normal: vec3<f32>,
     // sRGB.
     @location(2) color: vec4<f32>,
+    // x: mask, y: chalk, 0..1.
+    @location(3) layers: vec4<f32>,
 };
 
 struct VsOut {
@@ -42,6 +48,8 @@ struct VsOut {
     @location(1) position: vec3<f32>,
     // Linear.
     @location(2) color: vec3<f32>,
+    // x: mask, y: chalk.
+    @location(3) layers: vec2<f32>,
 };
 
 fn to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -57,6 +65,7 @@ fn vs(v: VsIn) -> VsOut {
     out.normal = (u.view * vec4<f32>(v.normal, 0.0)).xyz;
     out.position = (u.view * vec4<f32>(v.position, 1.0)).xyz;
     out.color = select(vec3<f32>(1.0), to_linear(v.color.rgb), u.params.z > 0.5);
+    out.layers = v.layers.xy;
     return out;
 }
 
@@ -68,11 +77,13 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let base = u.base.rgb * in.color;
+    var base = u.base.rgb * in.color;
     let opacity = u.params.y;
     if u.params.x > 0.5 {
         return vec4<f32>(to_srgb(base) * opacity, opacity);
     }
+    base = mix(base, u.layers.rgb, in.layers.y);
+    base *= mix(1.0, u.layers.w, in.layers.x);
     var n = normalize(in.normal);
     if !front {
         n = -n;
@@ -119,7 +130,7 @@ fn fs_blank() -> @location(0) vec4<f32> {
 // read from the mesh's buffers by its place in the index buffer, so it
 // knows which of its triangle's three corners it is.
 
-// The vertices as words: position (3), normal (3), colour (1).
+// The vertices as words: position (3), normal (3), colour (1), layers (1).
 @group(1) @binding(0) var<storage, read> vertices: array<f32>;
 @group(1) @binding(1) var<storage, read> indices: array<u32>;
 // Two bits per triangle, sixteen to a word: the corner opposite the edge
@@ -134,7 +145,7 @@ struct WireOut {
 
 @vertex
 fn vs_wire(@builtin(vertex_index) i: u32) -> WireOut {
-    let v = indices[i] * 7u;
+    let v = indices[i] * 8u;
     let p = vec3<f32>(vertices[v], vertices[v + 1u], vertices[v + 2u]);
     let corner = i % 3u;
     let triangle = i / 3u;

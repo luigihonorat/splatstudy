@@ -35,6 +35,12 @@ pub const CROP_LINE: Color32 = hex(0xEE8A2A);
 /// the form still reads through them.
 pub const CLAY_OVER: Color32 = hex(0xB0694A);
 pub const CLAY_UNDER: Color32 = hex(0x5B84A8);
+/// The chalk on the clay (see `sculpt/layers.rs`): a light, greyed blue,
+/// like a carpenter's chalk line, that still lets the form read.
+pub const CHALK: Color32 = hex(0xA9C6E2);
+/// How much of its light fully masked clay keeps: masked clay reads as a
+/// dark grey, as in ZBrush.
+pub const MASK_SHADE: f32 = 0.35;
 /// The wireframe over the clay: a dark grey line, blended so the shading
 /// still reads through it.
 pub const WIRE: Color32 = hex(0x262626);

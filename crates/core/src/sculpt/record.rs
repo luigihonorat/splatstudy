@@ -15,8 +15,8 @@ use glam::Vec3;
 
 use super::subdivide::parents;
 use super::{
-    Brush, Bvh, Dab, Falloff, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, OLD_START_LEVEL, Resume,
-    Sculpt,
+    Brush, Bvh, Dab, Falloff, LayerOp, Layers, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh,
+    OLD_START_LEVEL, Resume, Sculpt,
 };
 use crate::io::{ReadError, Reader, Writer};
 
@@ -63,6 +63,9 @@ pub enum Event {
     DeleteLevels {
         higher: bool,
     },
+    /// A whole layer changed: the mask cleared or inverted, the chalk
+    /// added or removed (see `Sculpt::edit_layer`).
+    Layer(LayerOp),
 }
 
 impl Event {
@@ -103,6 +106,9 @@ pub struct Checkpoint {
     /// export and the wireframe show them during the timelapse. Saved
     /// apart, like the levels; they don't change a replay's clay.
     pub diagonals: Option<Arc<[u8]>>,
+    /// With the triangles, the clay's mask and chalk, if it had any.
+    /// Saved apart too.
+    pub layers: Option<Arc<Layers>>,
 }
 
 impl Checkpoint {
@@ -120,6 +126,7 @@ impl Checkpoint {
             triangles: topology.then(|| mesh.triangles.as_slice().into()),
             levels: levels.filter(|_| topology),
             diagonals: topology.then(|| mesh.diagonals()).flatten().map(Into::into),
+            layers: (topology && !mesh.layers.is_empty()).then(|| Arc::new(mesh.layers.clone())),
         }
     }
 
@@ -145,7 +152,16 @@ impl Checkpoint {
         {
             log::warn!("checkpoint quads that don't fit its triangles, left out");
         }
+        mesh.layers = self.layers_or_none();
         Some((mesh, self.levels.as_deref().cloned()))
+    }
+
+    /// Its mask and chalk, or none if they don't fit its positions.
+    fn layers_or_none(&self) -> Layers {
+        match &self.layers {
+            Some(layers) if layers.fits(self.positions.len()) => (**layers).clone(),
+            _ => Layers::default(),
+        }
     }
 
     pub fn write(&self, w: &mut Writer) {
@@ -205,6 +221,7 @@ impl Checkpoint {
             triangles,
             levels: None,
             diagonals: None,
+            layers: None,
         })
     }
 }
@@ -226,6 +243,7 @@ mod tag {
     pub const SUBDIVIDE: u8 = 12;
     pub const LEVEL: u8 = 13;
     pub const DELETE_LEVELS: u8 = 14;
+    pub const LAYER: u8 = 15;
 }
 
 impl Entry {
@@ -291,6 +309,9 @@ impl Entry {
             Event::DeleteLevels { higher } => {
                 w.u8(tag::DELETE_LEVELS).u8(u8::from(higher));
             }
+            Event::Layer(op) => {
+                w.u8(tag::LAYER).u8(op as u8);
+            }
         }
     }
 
@@ -345,6 +366,11 @@ impl Entry {
             tag::SUBDIVIDE => Event::Subdivide,
             tag::LEVEL => Event::Level { up: flag(r)? },
             tag::DELETE_LEVELS => Event::DeleteLevels { higher: flag(r)? },
+            tag::LAYER => Event::Layer(
+                *LayerOp::ALL
+                    .get(r.u8()? as usize)
+                    .ok_or_else(|| r.invalid("unknown layer edit"))?,
+            ),
             _ => return Err(r.invalid("unknown log event")),
         };
         Ok(Entry { time, event })
@@ -456,15 +482,16 @@ impl Sculpt {
         }
     }
 
-    /// Back to `positions` on the same triangles: the state
+    /// Back to `positions` and `layers` on the same triangles: the state
     /// [`Sculpt::replaying`] would make of the checkpoint this sculpt was
     /// built from, without building it again. Unless `reshaped`, the
     /// hierarchy's shape came from those same positions, so a refit gives
     /// the boxes a new build would; after an [`Event::Rebuild`] it came from
     /// others, so it is built again. The GPU buffers keep their layout:
     /// every page is just dirty.
-    fn rewind(&mut self, positions: &[Vec3], reshaped: bool) {
+    fn rewind(&mut self, positions: &[Vec3], layers: Layers, reshaped: bool) {
         self.mesh.positions.copy_from_slice(positions);
+        self.mesh.layers = layers;
         self.mesh.recompute_normals();
         if reshaped {
             self.bvh = Bvh::build(&self.mesh);
@@ -476,6 +503,7 @@ impl Sculpt {
         self.stroke_open = false;
         self.stroke_indices.clear();
         self.stroke_before.clear();
+        self.stroke_layers_before.clear();
         self.grabbed.clear();
         self.undo.clear();
         self.redo.clear();
@@ -515,6 +543,9 @@ impl Sculpt {
             Event::DeleteLevels { higher } => {
                 self.delete_levels(higher);
             }
+            Event::Layer(op) => {
+                self.edit_layer(op);
+            }
         }
     }
 
@@ -529,6 +560,7 @@ impl Sculpt {
         self.stroke_open = false;
         self.stroke_indices.clear();
         self.stroke_before.clear();
+        self.stroke_layers_before.clear();
         self.grabbed.clear();
         self.undo.clear();
         self.redo.clear();
@@ -610,7 +642,9 @@ impl Replay {
         if index == self.built_from && !self.sculpt.releveled {
             // Scrubbing back within the same mesh and levels: no new
             // adjacency, hierarchy or GPU buffers.
-            self.sculpt.rewind(&checkpoint.positions, self.reshaped);
+            let layers = checkpoint.layers_or_none();
+            self.sculpt
+                .rewind(&checkpoint.positions, layers, self.reshaped);
         } else {
             let mesh = checkpoint.mesh().expect("starts have triangles");
             self.sculpt = Sculpt::replaying(mesh);
@@ -742,6 +776,14 @@ mod tests {
         clock
     }
 
+    /// The clay as a scene saves and reopens it: in its order, with its
+    /// mask and chalk.
+    fn saved(s: &Sculpt) -> Mesh {
+        let mut mesh = Mesh::from_ordered(s.mesh.positions.clone(), s.mesh.triangles.clone());
+        mesh.layers = s.mesh.layers.clone();
+        mesh
+    }
+
     fn session(s: &mut Sculpt) {
         session_at(s, 0.0, 0.0);
     }
@@ -750,6 +792,95 @@ mod tests {
         assert_eq!(replay.sculpt.mesh.triangles, live.mesh.triangles);
         assert_eq!(replay.sculpt.mesh.positions, live.mesh.positions);
         assert_eq!(replay.sculpt.mesh.normals, live.mesh.normals);
+        assert_same_layers(&replay.sculpt.mesh.layers, &live.mesh.layers);
+    }
+
+    /// The same mask and chalk, bit for bit.
+    fn assert_same_layers(a: &Layers, b: &Layers) {
+        let bits = |l: &crate::sculpt::Layer, n: usize| -> Vec<u32> {
+            (0..n).map(|v| l.get(v).to_bits()).collect()
+        };
+        let n = a.mask.values().len().max(b.mask.values().len());
+        assert_eq!(bits(&a.mask, n), bits(&b.mask, n), "mask");
+        let n = a.chalk.values().len().max(b.chalk.values().len());
+        assert_eq!(bits(&a.chalk, n), bits(&b.chalk, n), "chalk");
+    }
+
+    /// Chalk added, a mask painted and taken off in part, every brush
+    /// over both, the mask inverted, cleared and brought back, the chalk
+    /// removed and brought back.
+    fn layered_session(s: &mut Sculpt, start: f64) -> f64 {
+        let mut clock = start + 1.0;
+        s.set_clock(clock);
+        assert!(s.edit_layer(LayerOp::AddChalk));
+        for (k, invert) in [false, false, true].into_iter().enumerate() {
+            clock += 1.0;
+            s.set_clock(clock);
+            s.begin_stroke();
+            for i in 0..6 {
+                s.dab(Dab {
+                    brush: Brush::Mask,
+                    centre: Vec3::new(0.25 - 0.1 * k as f32, 0.05 * i as f32, 0.95).normalize(),
+                    radius: 0.2,
+                    strength: 0.6,
+                    invert,
+                    symmetry: k == 1,
+                    direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
+                });
+                if i % 2 == 0 {
+                    s.refresh();
+                }
+            }
+            s.end_stroke();
+        }
+        clock = session_at(s, clock, 0.05);
+        s.set_clock(clock + 1.0);
+        assert!(s.edit_layer(LayerOp::InvertMask));
+        clock = session_at(s, clock + 2.0, -0.05);
+        s.set_clock(clock + 1.0);
+        assert!(s.edit_layer(LayerOp::ClearMask));
+        s.undo();
+        s.redo();
+        s.undo();
+        assert!(s.edit_layer(LayerOp::RemoveChalk));
+        s.undo();
+        clock + 2.0
+    }
+
+    #[test]
+    fn replay_with_mask_and_chalk_equals_the_live_sculpt_bit_for_bit() {
+        let mut live = Sculpt::new(Mesh::icosphere(4));
+        let clock = layered_session(&mut live, 0.0);
+        assert!(!live.mesh.layers.mask.is_empty() && !live.mesh.layers.chalk.is_empty());
+        // Then a remesh, which takes the layers along in its checkpoint,
+        // and more of the same on it.
+        live.set_clock(clock);
+        let mut remeshed = voxel::remesh(&live.mesh, 40).expect("remesh");
+        remeshed.layers = live.layers_for(&remeshed);
+        assert!(!remeshed.layers.chalk.is_empty());
+        live.replace_mesh(remeshed);
+        layered_session(&mut live, clock + 1.0);
+        let mut replay = Replay::of(&live);
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_same(&replay, &live);
+
+        // Seeking back to the start of each mesh, and forward in small
+        // steps, gives what a fresh replay gives at every point.
+        let steps = 9;
+        for k in (0..=steps).rev() {
+            let time = replay.duration() * k as f64 / steps as f64;
+            let mut fresh = Replay::of(&live);
+            assert!(fresh.seek(time, usize::MAX));
+            assert!(replay.seek(time, usize::MAX));
+            assert_same(&replay, &fresh.sculpt);
+        }
+        while !replay.seek(f64::INFINITY, 30) {}
+        assert_same(&replay, &live);
+
+        // The log, layer edits and all, saves and reads back.
+        let mut w = Writer::new();
+        write_log(&mut w, live.log());
+        assert_eq!(read_log(&mut Reader::new(&w.finish())).unwrap(), live.log());
     }
 
     #[test]
@@ -871,13 +1002,18 @@ mod tests {
         let bytes = w.finish();
         let mut r = Reader::new(&bytes);
         let log = read_log(&mut r).unwrap();
-        let checkpoints = read_checkpoints(&mut r).unwrap();
+        let mut checkpoints = read_checkpoints(&mut r).unwrap();
         assert!(r.is_empty());
         assert_eq!(log, live.log());
+        // The mask and chalk are saved apart (see `scene`).
+        assert!(live.checkpoints().iter().any(|c| c.layers.is_some()));
+        for (read, kept) in checkpoints.iter_mut().zip(live.checkpoints()) {
+            read.layers.clone_from(&kept.layers);
+        }
         assert_eq!(checkpoints, live.checkpoints());
 
         // A scene reopened: the current mesh in its order, and its history.
-        let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
+        let current = saved(&live);
         let reopened = Sculpt::with_history(current, None, log, checkpoints);
         let mut replay = Replay::of(&reopened);
         assert!(replay.seek(f64::INFINITY, usize::MAX));
@@ -892,7 +1028,7 @@ mod tests {
         // A camera drag ending: no stroke is open.
         live.end_stroke();
         assert_eq!(live.log(), &log[..]);
-        let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
+        let current = saved(&live);
         let mut reopened = Sculpt::with_history(current, None, log.clone(), checkpoints.clone());
         reopened.end_stroke();
         assert_eq!(reopened.log(), &log[..], "no stray End");
@@ -915,7 +1051,7 @@ mod tests {
         let bytes = w.finish();
         let mut r = Reader::new(&bytes);
         let (log, checkpoints) = (read_log(&mut r).unwrap(), read_checkpoints(&mut r).unwrap());
-        let current = Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
+        let current = saved(&live);
         let mut reopened = Sculpt::with_history(current, None, log, checkpoints);
         // Untouched, it saves what it read.
         assert_eq!(reopened.log(), live.log());
@@ -924,10 +1060,7 @@ mod tests {
         reopened.set_falloff(Falloff::Sharp);
         let clock = session_at(&mut reopened, clock + 5.0, 0.05);
         // Twice: a reopened scene reopened again.
-        let current = Mesh::from_ordered(
-            reopened.mesh.positions.clone(),
-            reopened.mesh.triangles.clone(),
-        );
+        let current = saved(&reopened);
         let mut again = Sculpt::with_history(
             current,
             None,

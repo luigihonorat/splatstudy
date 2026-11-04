@@ -231,6 +231,7 @@ fn place_mesh(device: &wgpu::Device, r: &Reference) -> Drawn {
             position: p.to_array(),
             normal: n.normalize_or(Vec3::Y).to_array(),
             color: colors.and_then(|c| c.get(i)).copied().unwrap_or([255; 4]),
+            layers: [0; 4],
         })
         .collect();
     let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

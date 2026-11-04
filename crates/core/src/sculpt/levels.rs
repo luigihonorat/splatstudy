@@ -548,8 +548,10 @@ impl Sculpt {
         self.settle_resume();
     }
 
-    /// Puts the clay of another level in place.
-    fn show_level(&mut self, mesh: Mesh) {
+    /// Puts the clay of another level in place, with the mask and chalk
+    /// carried onto it.
+    fn show_level(&mut self, mut mesh: Mesh) {
+        mesh.layers = self.mesh.layers.carried(self.mesh.positions.len(), &mesh);
         self.swap_mesh(mesh);
         self.releveled = true;
     }
@@ -685,7 +687,7 @@ impl Sculpt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sculpt::{Brush, Dab, Replay};
+    use crate::sculpt::{Brush, Dab, LayerOp, Replay};
 
     fn dab(brush: Brush, centre: Vec3, radius: f32) -> Dab {
         Dab {
@@ -934,6 +936,8 @@ mod tests {
         };
         tick(&mut s);
         s.subdivide();
+        s.edit_layer(LayerOp::AddChalk);
+        stroke(&mut s, Brush::Mask, Vec3::new(-0.3, 0.2, 0.9), 0.3);
         stroke(&mut s, Brush::Clay, Vec3::new(0.2, 0.3, 0.9), 0.3);
         tick(&mut s);
         s.subdivide();
@@ -978,7 +982,46 @@ mod tests {
         assert_eq!(a.mesh.triangles, b.mesh.triangles);
         assert_eq!(a.mesh.positions, b.mesh.positions);
         assert_eq!(a.mesh.normals, b.mesh.normals);
+        assert_eq!(a.mesh.layers, b.mesh.layers);
         assert_eq!(a.levels, b.levels);
+    }
+
+    #[test]
+    fn the_mask_and_chalk_go_up_and_down_the_levels_and_undo() {
+        let mut s = Sculpt::new(Mesh::icosphere(2));
+        let n = s.mesh.positions.len();
+        stroke(&mut s, Brush::Mask, Vec3::new(0.2, 0.3, 0.9), 0.4);
+        s.edit_layer(LayerOp::AddChalk);
+        let base = s.mesh.layers.clone();
+        assert!(!base.mask.is_empty());
+        assert!(s.subdivide());
+        let fine = s.mesh.layers.clone();
+        assert!(fine.fits(s.mesh.positions.len()));
+        for v in 0..n {
+            assert_eq!(fine.mask.get(v), base.mask.get(v));
+        }
+        assert!(fine.chalk.values().iter().all(|&c| c == 1.0));
+        // A new vertex between a masked and a free one is half masked.
+        let between =
+            (n..s.mesh.positions.len()).any(|v| fine.mask.get(v) > 0.0 && fine.mask.get(v) < 1.0);
+        assert!(between);
+        // Painted at the top, the mask comes down to the base's vertices.
+        stroke(&mut s, Brush::Mask, Vec3::new(-0.4, -0.2, 0.9), 0.3);
+        let painted = s.mesh.layers.clone();
+        assert!(s.change_level(false));
+        assert_eq!(s.mesh.positions.len(), n);
+        for v in 0..n {
+            assert_eq!(s.mesh.layers.mask.get(v), painted.mask.get(v));
+        }
+        assert!(s.mesh.layers.fits(n));
+        // Back up, the vertices from below keep theirs; those between take
+        // the average again.
+        s.undo();
+        assert_eq!(s.mesh.positions.len(), painted.mask.values().len());
+        for v in 0..n {
+            assert_eq!(s.mesh.layers.mask.get(v), painted.mask.get(v));
+        }
+        assert!(!s.can_undo(), "a level change starts the undo afresh");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Strings for mesh operations: export, import, remesh (voxel and quad)
-//! and mirror.
+//! Strings for mesh operations: export, import, remesh (voxel and quad),
+//! mirror, the mask and the chalk.
 
 pub struct MeshTr {
     /// Heading of the remesh controls in the sculpt panel.
@@ -74,6 +74,16 @@ pub struct MeshTr {
     pub tool_settings: &'static str,
     pub subdivision: &'static str,
     pub remeshing: &'static str,
+    /// The mask tool: masked clay is held still by every other tool.
+    pub mask: &'static str,
+    /// Edit menu: the masked clay freed and the free clay masked.
+    pub invert_mask: &'static str,
+    /// Edit menu: no clay masked any more.
+    pub clear_mask: &'static str,
+    /// Edit menu: the clay covered in a blue tint, like a carpenter's
+    /// chalk line, which sculpting wipes off; and that tint taken off.
+    pub add_chalk: &'static str,
+    pub remove_chalk: &'static str,
 }
 
 pub const JA: MeshTr = MeshTr {
@@ -114,6 +124,11 @@ pub const JA: MeshTr = MeshTr {
     tool_settings: "ツール設定",
     subdivision: "サブディビジョン",
     remeshing: "リメッシュ",
+    mask: "マスク",
+    invert_mask: "マスクを反転",
+    clear_mask: "マスクを消す",
+    add_chalk: "チョークを塗る",
+    remove_chalk: "チョークを消す",
 };
 
 pub const EN: MeshTr = MeshTr {
@@ -154,6 +169,11 @@ pub const EN: MeshTr = MeshTr {
     tool_settings: "tool settings",
     subdivision: "subdivision",
     remeshing: "remeshing",
+    mask: "mask",
+    invert_mask: "invert mask",
+    clear_mask: "clear mask",
+    add_chalk: "add chalk",
+    remove_chalk: "remove chalk",
 };
 
 pub const FR: MeshTr = MeshTr {
@@ -194,4 +214,9 @@ pub const FR: MeshTr = MeshTr {
     tool_settings: "réglages de l'outil",
     subdivision: "subdivision",
     remeshing: "remaillage",
+    mask: "masque",
+    invert_mask: "inverser le masque",
+    clear_mask: "effacer le masque",
+    add_chalk: "ajouter la craie",
+    remove_chalk: "enlever la craie",
 };
