@@ -245,6 +245,7 @@ fn render_splat(
         scales: vec![glam::Vec3::splat(sigma)],
         rotations: vec![glam::Quat::IDENTITY],
         colors: vec![RED],
+        ..Default::default()
     };
     let target = ViewTarget::new(device, [SPLAT_SIZE, SPLAT_SIZE]);
     let pass = SplatPass::sorting_on(device, &splats, SortOn::Cpu).expect("splats");

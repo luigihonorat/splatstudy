@@ -138,6 +138,7 @@ impl Splats {
         self.rotations.retain(|_| *k.next().unwrap_or(&false));
         let mut k = keep.iter();
         self.colors.retain(|_| *k.next().unwrap_or(&false));
+        self.harmonics.retain(&keep);
         self
     }
 }
@@ -182,6 +183,7 @@ pub(crate) fn point_cloud(positions: Vec<Vec3>, colors: Vec<[u8; 4]>) -> Result<
         scales: vec![Vec3::splat(sigma); n],
         rotations: vec![Quat::IDENTITY; n],
         colors,
+        harmonics: Default::default(),
     }
     .keep_finite())
 }
@@ -189,8 +191,13 @@ pub(crate) fn point_cloud(positions: Vec<Vec3>, colors: Vec<[u8; 4]>) -> Result<
 /// The base colour of a 3DGS splat from its first spherical harmonic
 /// coefficient, as stored display values.
 pub(crate) fn sh0_to_u8(dc: f32) -> u8 {
-    const SH_C0: f32 = 0.282_094_8;
-    unit_to_u8(0.5 + SH_C0 * dc)
+    unit_to_u8(sh0(dc))
+}
+
+/// The base colour from the first spherical harmonic coefficient, before
+/// it is rounded and clamped to a byte.
+pub(crate) fn sh0(dc: f32) -> f32 {
+    0.5 + crate::reference::harmonics::SH_C0 * dc
 }
 
 /// 0..1 to 0..255, rounded; out-of-range values are clamped.

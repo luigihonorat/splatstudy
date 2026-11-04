@@ -914,6 +914,7 @@ mod tests {
             scales: vec![Vec3::splat(0.2); 2],
             rotations: vec![glam::Quat::IDENTITY; 2],
             colors: vec![[200, 100, 50, 255]; 2],
+            ..Default::default()
         };
         let ghost = SplatLook {
             opacity: 0.5,

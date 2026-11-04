@@ -158,6 +158,7 @@ mod tests {
             scales: vec![Vec3::splat(0.1); n],
             rotations: vec![glam::Quat::IDENTITY; n],
             colors: vec![[255; 4]; n],
+            ..Default::default()
         };
         let source = Source {
             name: "grid".into(),
@@ -194,6 +195,7 @@ mod tests {
             scales: vec![Vec3::splat(0.1); n],
             rotations: vec![glam::Quat::IDENTITY; n],
             colors: vec![[255; 4]; n],
+            ..Default::default()
         };
         let source = Source {
             name: "far".into(),

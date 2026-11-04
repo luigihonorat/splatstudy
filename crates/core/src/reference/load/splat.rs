@@ -25,6 +25,7 @@ pub fn load_splat(bytes: &[u8]) -> Result<Splats, LoadError> {
         scales: Vec::with_capacity(n),
         rotations: Vec::with_capacity(n),
         colors: Vec::with_capacity(n),
+        harmonics: Default::default(),
     };
     let mut r = Reader::new(bytes);
     let byte_to_unit = |b: u8| (f32::from(b) - 128.0) / 128.0;

@@ -4,18 +4,23 @@
 //! kinds of content:
 //!
 //! - Gaussian splats as 3DGS writes them: `f_dc_*` colour, `opacity`
-//!   before the sigmoid, `scale_*` as logarithms, `rot_*` as w, x, y, z.
+//!   before the sigmoid, `scale_*` as logarithms, `rot_*` as w, x, y, z,
+//!   and the view-dependent colour's `f_rest_*`, 9, 24 or 45 of them for
+//!   degree 1, 2 or 3: all of red's coefficients, then green's, then
+//!   blue's.
 //! - A mesh, when there are faces, with vertex colours if present.
 //! - Otherwise a point cloud, shown as small round splats.
 //!
-//! Only the properties shown are kept, so a 3DGS file's dozens of
-//! view-dependent colour terms cost reading time but no memory.
+//! Only the properties shown are kept, and the view-dependent colour is
+//! packed as it is read (see [`Harmonics`]).
 
 use glam::Vec3;
 
-use super::{LoadError, finite_vertices, point_cloud, sh0_to_u8, sigmoid, unit_quat, unit_to_u8};
+use super::{
+    LoadError, finite_vertices, point_cloud, sh0, sh0_to_u8, sigmoid, unit_quat, unit_to_u8,
+};
 use crate::io::Reader;
-use crate::reference::{Content, RefMesh, Splats};
+use crate::reference::{Content, Harmonics, RefMesh, Splats};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scalar {
@@ -242,6 +247,8 @@ struct Vertices {
     /// The colour columns are floats in 0..1, not bytes.
     float_colour: bool,
     count: usize,
+    /// The view-dependent colour, packed row by row.
+    harmonics: Harmonics,
 }
 
 impl Vertices {
@@ -327,6 +334,42 @@ pub fn load_ply(bytes: &[u8]) -> Result<Content, LoadError> {
     build(vertices, triangles)
 }
 
+/// The degree of the view-dependent colour, and which property holds each
+/// `f_rest_*` in turn, when the vertices have a whole set of them and the
+/// base colour they add to.
+fn rest_properties(element: &Element) -> Option<(u8, Vec<usize>)> {
+    let mut rest: Vec<(usize, usize)> = Vec::new();
+    for (at, p) in element.properties.iter().enumerate() {
+        if let Some(k) = p.name.strip_prefix("f_rest_") {
+            if !matches!(p.kind, Kind::Scalar(_)) {
+                return None;
+            }
+            rest.push((k.parse().ok()?, at));
+        }
+    }
+    let degree = Harmonics::degree_of_rest(rest.len())?;
+    rest.sort_unstable();
+    if rest.iter().enumerate().any(|(i, &(k, _))| i != k) {
+        return None;
+    }
+    let dc = (0..3).all(|c| {
+        element
+            .properties
+            .iter()
+            .any(|p| p.name == KEPT[DC + c] && matches!(p.kind, Kind::Scalar(_)))
+    });
+    dc.then(|| (degree, rest.into_iter().map(|(_, at)| at).collect()))
+}
+
+/// Packs one splat's view-dependent colour, its base colour already read:
+/// `value(k)` is `f_rest_k`, with all of red's first.
+fn push_harmonics(out: &mut Vertices, i: usize, value: impl Fn(usize) -> f32) {
+    let m = Harmonics::coefficients(out.harmonics.degree);
+    let base: [f32; 3] = std::array::from_fn(|c| sh0(out.columns[DC + c][i]));
+    out.harmonics
+        .push(base, base.map(unit_to_u8), |j, c| value(c * m + j));
+}
+
 fn read_vertices(body: &mut Body, element: &Element, out: &mut Vertices) -> Result<(), LoadError> {
     let n = element.count;
     out.count = n;
@@ -335,6 +378,13 @@ fn read_vertices(body: &mut Body, element: &Element, out: &mut Vertices) -> Resu
         .iter()
         .map(|p| KEPT.iter().position(|&k| k == p.name))
         .collect();
+    let rest = rest_properties(element);
+    if let Some((degree, _)) = &rest {
+        out.harmonics = Harmonics::new(*degree);
+        out.harmonics
+            .words
+            .reserve_exact(n.saturating_mul(Harmonics::words_per_splat(*degree)));
+    }
     for (p, slot) in element.properties.iter().zip(&slots) {
         if let (Some(slot), Kind::Scalar(s)) = (slot, p.kind) {
             out.columns[*slot].reserve_exact(n);
@@ -367,15 +417,43 @@ fn read_vertices(body: &mut Body, element: &Element, out: &mut Vertices) -> Resu
             }
             offset += s.size();
         }
+        if let Some((_, at)) = &rest {
+            let offsets: Vec<usize> = types
+                .iter()
+                .scan(0, |o, s| {
+                    let here = *o;
+                    *o += s.size();
+                    Some(here)
+                })
+                .collect();
+            let fields: Vec<(usize, Scalar)> = at.iter().map(|&a| (offsets[a], types[a])).collect();
+            for (i, row) in block.chunks_exact(stride.max(1)).enumerate() {
+                push_harmonics(out, i, |k| {
+                    let (o, s) = fields[k];
+                    s.decode(&row[o..o + s.size()], *big) as f32
+                });
+            }
+        }
         return Ok(());
     }
-    for _ in 0..n {
-        for (p, slot) in element.properties.iter().zip(&slots) {
+    // Where each property's value goes among the row's f_rest_*.
+    let rest_of: Vec<Option<usize>> = (0..element.properties.len())
+        .map(|a| {
+            rest.as_ref()
+                .and_then(|(_, at)| at.iter().position(|&x| x == a))
+        })
+        .collect();
+    let mut row_rest = vec![0.0f32; rest.as_ref().map_or(0, |(_, at)| at.len())];
+    for i in 0..n {
+        for ((p, slot), rest_slot) in element.properties.iter().zip(&slots).zip(&rest_of) {
             match p.kind {
                 Kind::Scalar(s) => {
                     let v = body.value(s)?;
                     if let Some(slot) = slot {
                         out.columns[*slot].push(v as f32);
+                    }
+                    if let Some(k) = rest_slot {
+                        row_rest[*k] = v as f32;
                     }
                 }
                 Kind::List { count, item } => {
@@ -384,6 +462,9 @@ fn read_vertices(body: &mut Body, element: &Element, out: &mut Vertices) -> Resu
                     }
                 }
             }
+        }
+        if rest.is_some() {
+            push_harmonics(out, i, |k| row_rest[k]);
         }
     }
     Ok(())
@@ -474,6 +555,7 @@ fn build(v: Vertices, triangles: Vec<[u32; 3]>) -> Result<Content, LoadError> {
                 scales,
                 rotations,
                 colors,
+                harmonics: v.harmonics,
             }
             .keep_finite(),
         ));

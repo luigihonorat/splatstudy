@@ -9,16 +9,19 @@
 //! - scales: 3 bytes, logarithms as `byte / 16 - 10`
 //! - rotations: version 2 keeps x, y, z as bytes and w ≥ 0; version 3
 //!   keeps the three smallest components in 32 bits
-//! - higher spherical harmonics, which are skipped
+//! - the view-dependent colour's spherical harmonics of degree 1 to
+//!   `sh_degree`: 3, 8 or 15 coefficients a splat, each as red, green and
+//!   blue bytes in turn, as `(byte - 128) / 128` (the writer keeps 5 bits
+//!   of degree 1 and 4 of the rest, in whole bytes)
 //!
 //! Coordinates are already Y up. The gzip wrapper is read here; the deflate
 //! data goes to miniz_oxide.
 
 use glam::{Quat, Vec3};
 
-use super::{LoadError, MAX_SPLATS, sh0_to_u8, unit_quat};
+use super::{LoadError, MAX_SPLATS, sh0, sh0_to_u8, unit_quat};
 use crate::io::Reader;
-use crate::reference::Splats;
+use crate::reference::{Harmonics, Splats};
 
 const MAGIC: u32 = 0x5053_474E; // "NGSP"
 /// The bytes before the splats.
@@ -94,9 +97,9 @@ pub fn load_spz(bytes: &[u8]) -> Result<Splats, LoadError> {
         ));
     }
     let rotation_size = if version == 2 { 3 } else { 4 };
-    let per_splat = 9 + 1 + 3 + 3 + rotation_size;
-    // Only the splats' own fields; the higher harmonics after them stay
-    // compressed.
+    let sh_size = 3 * Harmonics::coefficients(sh_degree);
+    let per_splat = 9 + 1 + 3 + 3 + rotation_size + sh_size;
+    // Only what the header declares; anything after it stays compressed.
     let data = inflate(deflated, HEADER + n * per_splat)?;
     let mut r = Reader::new(&data[HEADER.min(data.len())..]);
     if n * per_splat > r.remaining() {
@@ -107,7 +110,7 @@ pub fn load_spz(bytes: &[u8]) -> Result<Splats, LoadError> {
     let colours = r.take(n * 3)?;
     let scales = r.take(n * 3)?;
     let rotations = r.take(n * rotation_size)?;
-    // Spherical harmonics beyond the base colour follow; not used.
+    let higher = r.take(n * sh_size)?;
 
     let unit = 1.0 / (1u32 << fractional_bits) as f32;
     let fixed = |b: &[u8]| {
@@ -115,7 +118,26 @@ pub fn load_spz(bytes: &[u8]) -> Result<Splats, LoadError> {
         // Sign-extend from 24 bits.
         ((v << 8) >> 8) as f32 * unit
     };
-    let colour = |b: u8| sh0_to_u8((f32::from(b) / 255.0 - 0.5) / 0.15);
+    let dc = |b: u8| (f32::from(b) / 255.0 - 0.5) / 0.15;
+    let colour = |b: u8| sh0_to_u8(dc(b));
+    let mut harmonics = Harmonics::new(sh_degree);
+    if sh_size > 0 {
+        harmonics
+            .words
+            .reserve_exact(n * Harmonics::words_per_splat(sh_degree));
+        for (c, sh) in colours
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(higher.chunks_exact(sh_size))
+        {
+            let base = c.map(|b| sh0(dc(b)));
+            let stored = c.map(colour);
+            harmonics.push(base, stored, |j, ch| {
+                (f32::from(sh[3 * j + ch]) - 128.0) / 128.0
+            });
+        }
+    }
     let scale = |b: u8| (f32::from(b) / 16.0 - 10.0).exp();
     Ok(Splats {
         positions: positions
@@ -147,6 +169,7 @@ pub fn load_spz(bytes: &[u8]) -> Result<Splats, LoadError> {
             .zip(alphas)
             .map(|(c, &a)| [colour(c[0]), colour(c[1]), colour(c[2]), a])
             .collect(),
+        harmonics,
     }
     .keep_finite())
 }
@@ -279,6 +302,18 @@ pub(crate) mod tests {
         }
         assert!(load_spz(&gzip(b"NGSP")).is_err());
         assert!(load_spz(b"\x1F\x8B\x08\x00garbage garbage").is_err());
+        let splat = Gaussian {
+            position: Vec3::ONE,
+            log_scale: Vec3::splat(-3.0),
+            rotation: Quat::IDENTITY,
+            opacity: 1.0,
+            dc: [0.1, 0.2, 0.3],
+        };
+        let with_harmonics = canonical(&[splat], 3, 3);
+        assert_eq!(load_spz(&with_harmonics).unwrap().harmonics.degree, 3);
+        for end in 0..with_harmonics.len() - 8 {
+            assert!(load_spz(&with_harmonics[..end]).is_err(), "cut at {end}");
+        }
         let mut wrong_version = three_splats(3);
         wrong_version[0] = 0;
         assert!(load_spz(&wrong_version).is_err());
@@ -354,14 +389,20 @@ pub(crate) mod tests {
             2 => 8,
             _ => 15,
         };
-        // Arbitrary higher harmonics, which must be skipped whole.
-        d.extend((0..splats.len() * higher * 3).map(|i| (i * 37 % 251) as u8));
+        // Arbitrary higher harmonics: for each splat, each coefficient's
+        // red, green and blue.
+        d.extend((0..splats.len() * higher * 3).map(sh_byte));
 
         let mut gz = vec![0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 3];
         gz.extend(miniz_oxide::deflate::compress_to_vec(&d, 9));
         gz.extend_from_slice(&crc32(&d).to_le_bytes());
         gz.extend_from_slice(&(d.len() as u32).to_le_bytes());
         gz
+    }
+
+    /// The `canonical` file's `i`-th byte of higher harmonics.
+    fn sh_byte(i: usize) -> u8 {
+        (i * 37 % 251) as u8
     }
 
     #[test]
@@ -414,6 +455,22 @@ pub(crate) mod tests {
                 }
                 let alpha = 255.0 / (1.0 + (-g.opacity).exp());
                 assert!((f32::from(a) - alpha).abs() <= 1.0, "{at}: {a} vs {alpha}");
+                // The higher harmonics, as (byte - 128) / 128, to within
+                // a step of the packing.
+                let m = Harmonics::coefficients(sh_degree);
+                assert_eq!(s.harmonics.degree, sh_degree, "{at}");
+                if sh_degree == 0 {
+                    assert!(s.harmonics.words.is_empty());
+                    continue;
+                }
+                let (_, coefficients) = s.harmonics.unpack(i);
+                assert_eq!(coefficients.len(), m);
+                for (j, k) in coefficients.iter().enumerate() {
+                    for (c, got) in k.iter().enumerate() {
+                        let want = (f32::from(sh_byte((i * m + j) * 3 + c)) - 128.0) / 128.0;
+                        assert!((got - want).abs() < 0.01, "{at}, {j}, {c}: {got} vs {want}");
+                    }
+                }
             }
         }
         // As the format says, already Y up.

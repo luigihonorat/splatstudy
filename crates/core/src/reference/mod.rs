@@ -10,12 +10,15 @@
 //! with the clay, and clay made from the reference comes out the right size.
 
 pub mod fit;
+pub mod harmonics;
 pub mod load;
 pub mod samples;
 
 use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
+
+pub use harmonics::Harmonics;
 
 /// A loaded reference.
 pub struct Reference {
@@ -41,16 +44,18 @@ pub enum Content {
 }
 
 /// Gaussian splats (and point clouds, as small round ones), one entry per
-/// splat in every list. Only the base colour is kept (no view-dependent
-/// colour).
+/// splat in every list, and the view-dependent colour when the file has it.
 #[derive(Clone, Default)]
 pub struct Splats {
     pub positions: Vec<Vec3>,
     /// Standard deviation along each local axis, in file units.
     pub scales: Vec<Vec3>,
     pub rotations: Vec<Quat>,
-    /// sRGB colour, opacity in alpha.
+    /// sRGB colour, opacity in alpha: the base colour, seen from any side.
     pub colors: Vec<[u8; 4]>,
+    /// How the colour changes with the side it is seen from; degree 0 (and
+    /// empty) when the file has nothing of it.
+    pub harmonics: Harmonics,
 }
 
 /// A scanned or modelled mesh.
@@ -250,6 +255,7 @@ mod tests {
             scales: vec![Vec3::new(0.1, 0.2, 0.1); 2],
             rotations: vec![Quat::IDENTITY; 2],
             colors: vec![[255, 255, 255, 255], [255, 255, 255, 51]],
+            ..Default::default()
         };
         let mut reference = Reference::new(source(), Content::Splats(splats));
         reference.align.scale = 2.0;

@@ -24,6 +24,7 @@ fn splats(list: &[(Vec3, f32, [u8; 4])]) -> Splats {
         scales: list.iter().map(|s| Vec3::splat(s.1)).collect(),
         rotations: vec![Quat::IDENTITY; list.len()],
         colors: list.iter().map(|s| s.2).collect(),
+        ..Default::default()
     }
 }
 
@@ -258,6 +259,7 @@ fn a_long_splat_is_drawn_along_its_axis() {
         scales: vec![Vec3::new(0.6, 0.03, 0.03)],
         rotations: vec![Quat::IDENTITY],
         colors: vec![RED],
+        ..Default::default()
     };
     let c = SIZE / 2;
     let data = render(&device, &queue, &Scene::new(&s));
