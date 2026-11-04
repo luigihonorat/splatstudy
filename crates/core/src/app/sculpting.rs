@@ -738,7 +738,7 @@ impl App {
         self.sculpt.begin_stroke();
         let camera = &self.cameras[SCULPT];
         let scale = camera.world_per_point(hit.point, rect.height());
-        if self.tool.tool == Brush::Move {
+        if self.held_tool() == Brush::Move {
             let (right, up) = camera.right_up();
             self.sculpt
                 .set_falloff(self.tool.falloff[tool_index(Brush::Move)]);
@@ -805,10 +805,23 @@ impl App {
         });
     }
 
+    /// The tool a stroke uses with the keys held now: in ZBrush style Ctrl
+    /// masks, whatever the tool (and Ctrl + Alt unmasks); Shift smooths.
+    fn held_tool(&self) -> Brush {
+        let (m, shift) = self.ctx.input(|i| (i.modifiers.into(), i.modifiers.shift));
+        if self.nav.masks(m) {
+            Brush::Mask
+        } else if shift {
+            Brush::Smooth
+        } else {
+            self.tool.tool
+        }
+    }
+
     /// One dab: pen pressure scales the tool's strength.
     fn dab_at(&mut self, rect: Rect, pressure: f32, hit: Hit, direction: Vec3) {
-        let (m, shift) = self.ctx.input(|i| (i.modifiers.into(), i.modifiers.shift));
-        let tool = if shift { Brush::Smooth } else { self.tool.tool };
+        let m = self.ctx.input(|i| i.modifiers.into());
+        let tool = self.held_tool();
         let pressure = pressure.clamp(0.0, 1.0);
         let strength = self.tool.strength[tool_index(tool)] * pressure;
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
@@ -1046,6 +1059,64 @@ mod tests {
         // A point off the clay: what the ray meets is too far from it.
         let off = Vec3::new(0.5, 0.0, 1.6);
         assert!(mirrored_hit(&sculpt, camera.eye(), off, radius).is_none());
+    }
+
+    #[test]
+    fn ctrl_masks_with_any_tool_and_ctrl_on_the_background_inverts_or_clears() {
+        use super::super::study::tests::Harness;
+        use crate::input::Modifiers;
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.frames(1);
+        let held = |h: &mut Harness, ctrl: bool, alt: bool| {
+            h.app.push_event(crate::InputEvent::Modifiers(Modifiers {
+                ctrl: ctrl && !cfg!(target_os = "macos"),
+                command: ctrl,
+                alt,
+                ..Default::default()
+            }));
+        };
+        let masked = |h: &Harness| {
+            let mask = &h.app.sculpt.mesh.layers.mask;
+            mask.values().iter().filter(|&&m| m > 0.0).count()
+        };
+        let rect = h.app.view_rects[SCULPT];
+        let tool = h.app.tool.tool;
+        assert_ne!(tool, Brush::Mask);
+        let before = h.app.sculpt.mesh.positions.clone();
+
+        // Ctrl + a stroke on the clay paints the mask and moves nothing.
+        held(&mut h, true, false);
+        h.drag(rect.center(), rect.center() + egui::vec2(60.0, 0.0));
+        let painted = masked(&h);
+        assert!(painted > 0);
+        assert_eq!(h.app.sculpt.mesh.positions, before);
+        assert_eq!(h.app.tool.tool, tool, "the tool in hand stays");
+        // Ctrl + Alt takes it away.
+        held(&mut h, true, true);
+        h.drag(rect.center(), rect.center() + egui::vec2(60.0, 0.0));
+        assert!(masked(&h) < painted);
+
+        // Ctrl + a tap on the background inverts it, without turning.
+        held(&mut h, true, false);
+        let yaw = h.app.cameras[SCULPT].yaw;
+        let corner = rect.left_bottom() + egui::vec2(60.0, -60.0);
+        assert!(h.app.pick(rect, corner).is_none(), "off the clay");
+        h.drag(corner, corner);
+        let n = h.app.sculpt.mesh.positions.len();
+        assert!(masked(&h) > n / 2);
+        assert_eq!(h.app.cameras[SCULPT].yaw, yaw);
+        // Ctrl + a drag on the background clears it.
+        h.drag(corner, corner + egui::vec2(80.0, -40.0));
+        assert!(h.app.sculpt.mesh.layers.mask.is_empty());
+        assert_eq!(h.app.cameras[SCULPT].yaw, yaw);
+
+        // Without Ctrl, the tool sculpts as before.
+        held(&mut h, false, false);
+        h.drag(rect.center(), rect.center() + egui::vec2(60.0, 0.0));
+        assert_ne!(h.app.sculpt.mesh.positions, before);
     }
 
     #[test]

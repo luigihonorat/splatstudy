@@ -39,6 +39,8 @@ impl NavStyle {
     pub fn action(self, button: Button, m: Modifiers, on_clay: bool) -> Option<NavAction> {
         use NavAction::*;
         match (self, button) {
+            // Ctrl on the background edits the mask instead.
+            (NavStyle::ZBrush, Button::Primary) if !on_clay && self.masks(m) => None,
             (NavStyle::ZBrush, Button::Primary) if !on_clay => {
                 Some(if m.alt { Pan } else { Orbit })
             }
@@ -100,6 +102,12 @@ impl NavStyle {
             NavStyle::ZBrush => "Alt",
             NavStyle::Blender | NavStyle::Maya => "Ctrl",
         }
+    }
+
+    /// Whether a stroke paints the mask whatever the tool: Ctrl held in
+    /// ZBrush style (Cmd on a Mac, where Ctrl + click is a right click).
+    pub fn masks(self, m: Modifiers) -> bool {
+        self == NavStyle::ZBrush && m.command
     }
 
     /// Whether the brush does its opposite action with the modifiers `m`.
@@ -255,6 +263,20 @@ mod tests {
         assert_eq!(NavStyle::ZBrush.invert_key(), "Alt");
         assert!(NavStyle::ZBrush.inverts(ALT));
         assert!(!NavStyle::ZBrush.inverts(ctrl), "Ctrl is masking in ZBrush");
+        let command = Modifiers {
+            ctrl: true,
+            command: true,
+            ..NONE
+        };
+        assert!(NavStyle::ZBrush.masks(command));
+        assert_eq!(
+            NavStyle::ZBrush.action(Button::Primary, command, false),
+            None,
+            "Ctrl on the background masks rather than turns"
+        );
+        for style in [NavStyle::Blender, NavStyle::Maya] {
+            assert!(!style.masks(command), "{style:?}");
+        }
         for style in [NavStyle::Blender, NavStyle::Maya] {
             assert_eq!(style.invert_key(), "Ctrl");
             assert!(style.inverts(ctrl), "{style:?}");

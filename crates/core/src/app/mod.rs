@@ -125,6 +125,9 @@ enum Drag {
         up: Vec3,
         scale: f32,
     },
+    /// Ctrl pressed on the background, in ZBrush style: let go where it
+    /// started to invert the mask, or after a drag to clear it.
+    MaskTap { start: Pos2 },
     /// Turning, panning or zooming the view while `button` is held.
     /// `free` is the yaw and pitch the turn has reached, which the camera
     /// shows rounded while it snaps to the nearest side.

@@ -11,11 +11,15 @@ use super::{App, Drag, REFERENCE, SCULPT};
 use crate::camera::OrbitCamera;
 use crate::input::{Button, Modifiers, PointerKind, PointerPhase};
 use crate::navigation::{NavAction, snap_view};
+use crate::sculpt::LayerOp;
 use crate::ui::{fonts, i18n::Tr, theme};
 
 /// Navigation speeds: dolly per point dragged, and per point scrolled.
 const DOLLY_DRAG: f32 = 0.005;
 const DOLLY_WHEEL: f32 = 0.0015;
+/// How far, in points, a Ctrl press on the background may move and still
+/// be a tap that inverts the mask.
+const MASK_TAP: f32 = 4.0;
 
 /// Preset viewpoints: label, key, yaw and pitch. Right and left are the
 /// viewer's, as seen in the front view.
@@ -331,6 +335,16 @@ impl App {
                         })
                     }
                     (None, Some((pos, hit))) => self.start_stroke(rect, pos, hit),
+                    (None, None)
+                        if index == SCULPT
+                            && ours == Button::Primary
+                            && self.playback.is_none()
+                            && self.nav.masks(m) =>
+                    {
+                        if let Some(start) = pointer {
+                            self.drags[index] = Some(Drag::MaskTap { start });
+                        }
+                    }
                     (None, None) if index == REFERENCE && ours == Button::Primary => {
                         self.drags[index] = Some(Drag::Navigate {
                             action: NavAction::Orbit,
@@ -408,6 +422,17 @@ impl App {
                     let d = pos - start;
                     self.sculpt.drag((right * d.x - up * d.y) * scale);
                 }
+            }
+            Some(Drag::MaskTap { .. }) if ui.input(|i| i.pointer.primary_down()) => {}
+            Some(Drag::MaskTap { start }) => {
+                let moved = pointer.is_some_and(|pos| pos.distance(start) > MASK_TAP);
+                let op = if moved {
+                    LayerOp::ClearMask
+                } else {
+                    LayerOp::InvertMask
+                };
+                self.sculpt.edit_layer(op);
+                self.drags[index] = None;
             }
             Some(_) => {
                 self.sculpt.end_stroke();
