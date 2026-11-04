@@ -1507,13 +1507,18 @@ pub(super) mod tests {
     impl Harness {
         /// A key pressed and let go, with `shift` held.
         pub(in crate::app) fn key(&mut self, key: Key, shift: bool) {
-            let modifiers = |shift| {
-                crate::InputEvent::Modifiers(crate::input::Modifiers {
+            self.chord(
+                key,
+                crate::input::Modifiers {
                     shift,
                     ..Default::default()
-                })
-            };
-            self.app.push_event(modifiers(shift));
+                },
+            );
+        }
+
+        /// Presses and lets go of `key` with `modifiers` held, for a frame.
+        pub(in crate::app) fn chord(&mut self, key: Key, modifiers: crate::input::Modifiers) {
+            self.app.push_event(crate::InputEvent::Modifiers(modifiers));
             for pressed in [true, false] {
                 self.app.push_event(crate::InputEvent::Key {
                     key,
@@ -1522,7 +1527,8 @@ pub(super) mod tests {
                 });
             }
             self.frames(1);
-            self.app.push_event(modifiers(false));
+            self.app
+                .push_event(crate::InputEvent::Modifiers(Default::default()));
         }
     }
 

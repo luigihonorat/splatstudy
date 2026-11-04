@@ -20,8 +20,8 @@ use crate::render::clay::GpuMesh;
 pub(super) use tool_pie::TOOL_PIE_KEY;
 
 use crate::sculpt::{
-    Brush, Dab, Falloff, Hit, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, START_LEVEL, Sculpt,
-    cube_sphere,
+    Brush, Dab, Falloff, Hit, LayerOp, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, START_LEVEL,
+    Sculpt, cube_sphere,
 };
 use crate::ui::{self, i18n::Tr, icons, menu, theme};
 use crate::voxel;
@@ -298,6 +298,13 @@ impl App {
             } else if pressed(M::COMMAND, Key::Z) {
                 self.sculpt.undo();
             }
+            // Before the tools: plain M would take Alt+M too.
+            if pressed(M::COMMAND, Key::I) {
+                self.sculpt.edit_layer(LayerOp::InvertMask);
+            }
+            if pressed(M::ALT, Key::M) {
+                self.sculpt.edit_layer(LayerOp::ClearMask);
+            }
             for (brush, key, _) in BRUSHES {
                 if pressed(M::NONE, key) {
                     self.tool.tool = brush;
@@ -444,11 +451,13 @@ impl App {
         }
     }
 
-    /// Rebuilds the clay as an even mesh at the chosen resolution.
+    /// Rebuilds the clay as an even mesh at the chosen resolution, with
+    /// its mask and chalk.
     pub(super) fn remesh(&mut self) {
         let tr = self.lang.tr();
         match voxel::remesh(&self.sculpt.mesh, self.tool.resolution.round() as u32) {
-            Some(mesh) => {
+            Some(mut mesh) => {
+                mesh.layers = self.sculpt.layers_for(&mesh);
                 let count = mesh.positions.len();
                 if self.replace_clay(mesh) {
                     let m = tr.mesh;
@@ -465,12 +474,14 @@ impl App {
     }
 
     /// Rebuilds the clay as even quads following its shape (see
-    /// [`quad::remesh`]); leaves it as it is, with a notice, if that fails.
+    /// [`quad::remesh`]), with its mask and chalk; leaves it as it is,
+    /// with a notice, if that fails.
     pub(super) fn quad_remesh(&mut self) {
         let m = self.lang.tr().mesh;
         let quads = self.tool.quads.round() as u32;
         match quad::remesh(&self.sculpt.mesh, quads) {
-            Some(mesh) => {
+            Some(mut mesh) => {
+                mesh.layers = self.sculpt.layers_for(&mesh);
                 let count = mesh.positions.len();
                 if self.replace_clay(mesh) {
                     self.notify(format!("{} ({count} {})", m.quad_remeshed, m.vertices));
@@ -528,7 +539,7 @@ impl App {
         }
     }
 
-    /// Whole-mesh edits in the edit menu.
+    /// Whole-mesh edits in the object menu.
     pub(super) fn mesh_edit_items(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         let live = self.playback.is_none();
@@ -555,6 +566,20 @@ impl App {
         }
         if menu::action(ui, live, tr.mesh.mirror_to_positive, "") {
             self.sculpt.mirror(false);
+        }
+        ui.separator();
+        let layers = &self.sculpt.mesh.layers;
+        let (masked, chalked) = (!layers.mask.is_empty(), !layers.chalk.is_empty());
+        let m = tr.mesh;
+        for (op, label, keys, enabled) in [
+            (LayerOp::InvertMask, m.invert_mask, self.keys("I"), true),
+            (LayerOp::ClearMask, m.clear_mask, "Alt+M".to_owned(), masked),
+            (LayerOp::AddChalk, m.add_chalk, String::new(), true),
+            (LayerOp::RemoveChalk, m.remove_chalk, String::new(), chalked),
+        ] {
+            if menu::action(ui, live && enabled, label, &keys) {
+                self.sculpt.edit_layer(op);
+            }
         }
     }
 
@@ -1021,6 +1046,51 @@ mod tests {
         // A point off the clay: what the ray meets is too far from it.
         let off = Vec3::new(0.5, 0.0, 1.6);
         assert!(mirrored_hit(&sculpt, camera.eye(), off, radius).is_none());
+    }
+
+    #[test]
+    fn the_mask_keys_pick_the_tool_invert_and_clear_and_the_menu_adds_chalk() {
+        use super::super::study::tests::Harness;
+        use crate::input::Modifiers;
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.frames(1);
+        h.key(Key::A, false);
+        assert_eq!(h.app.tool.tool, Brush::Mask);
+        let command = Modifiers {
+            command: true,
+            ctrl: !cfg!(target_os = "macos"),
+            ..Default::default()
+        };
+        h.chord(Key::I, command);
+        let n = h.app.sculpt.mesh.positions.len();
+        assert_eq!(h.app.sculpt.mesh.layers.mask.values().len(), n);
+        assert!(
+            h.app
+                .sculpt
+                .mesh
+                .layers
+                .mask
+                .values()
+                .iter()
+                .all(|&m| m == 1.0)
+        );
+        assert_eq!(h.app.tool.tool, Brush::Mask, "Ctrl+I isn't inflate");
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        h.chord(Key::M, alt);
+        assert!(h.app.sculpt.mesh.layers.mask.is_empty());
+        assert_eq!(h.app.tool.tool, Brush::Mask, "Alt+M isn't move");
+        // Undo brings the mask back, as one step each.
+        h.chord(Key::Z, command);
+        assert!(!h.app.sculpt.mesh.layers.mask.is_empty());
+        assert!(h.app.sculpt.edit_layer(LayerOp::AddChalk));
+        h.frames(1);
+        assert_eq!(h.app.sculpt.mesh.vertex(0).layers[..2], [255, 255]);
     }
 
     #[test]

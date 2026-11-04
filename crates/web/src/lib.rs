@@ -340,7 +340,11 @@ fn listen(
             // The IME owns these; its committed text arrives from `ime`.
             let name = e.key();
             if !ime::is_ime_key(&e) {
-                if let Some(key) = Key::from_name(&name) {
+                // On a Mac, Option with a letter types another character
+                // (Option+M is µ): the key is the letter under it.
+                let key = Key::from_name(&name)
+                    .or_else(|| e.alt_key().then(|| Key::from_name(&e.code())).flatten());
+                if let Some(key) = key {
                     events.push(InputEvent::Key {
                         key,
                         pressed,
@@ -356,10 +360,11 @@ fn listen(
                 }
                 // Keep the browser from acting on keys the app uses.
                 // Cmd/Ctrl+S, +Shift+S, +O and +P are the app's save, save
-                // as, open and screenshot, not the browser's.
+                // as, open and screenshot, not the browser's; +I inverts the
+                // mask.
                 let command = if is_mac() { e.meta_key() } else { e.ctrl_key() };
                 let file_key =
-                    command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o" | "p");
+                    command && matches!(name.to_ascii_lowercase().as_str(), "s" | "o" | "p" | "i");
                 // Space holds the tool pie: the page mustn't scroll or
                 // press a focused button with it, but a text field in the
                 // page keeps it for typing.

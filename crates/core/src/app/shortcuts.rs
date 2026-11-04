@@ -126,6 +126,8 @@ impl App {
                     rows.push((label, key.to_owned()));
                 }
                 rows.push((tr.video.screenshot, self.keys("P")));
+                rows.push((tr.mesh.invert_mask, self.keys("I")));
+                rows.push((tr.mesh.clear_mask, "Alt+M".to_owned()));
                 rows.push((tr.open_scene, self.keys("O")));
                 rows.push((tr.save_scene, self.keys("S")));
                 if !WEB {

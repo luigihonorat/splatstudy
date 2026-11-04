@@ -76,11 +76,11 @@ pub struct MeshTr {
     pub remeshing: &'static str,
     /// The mask tool: masked clay is held still by every other tool.
     pub mask: &'static str,
-    /// Edit menu: the masked clay freed and the free clay masked.
+    /// Object menu: the masked clay freed and the free clay masked.
     pub invert_mask: &'static str,
-    /// Edit menu: no clay masked any more.
+    /// Object menu: no clay masked any more.
     pub clear_mask: &'static str,
-    /// Edit menu: the clay covered in a blue tint, like a carpenter's
+    /// Object menu: the clay covered in a blue tint, like a carpenter's
     /// chalk line, which sculpting wipes off; and that tint taken off.
     pub add_chalk: &'static str,
     pub remove_chalk: &'static str,
