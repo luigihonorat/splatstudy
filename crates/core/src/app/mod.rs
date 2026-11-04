@@ -145,6 +145,8 @@ pub struct App {
     renderer: egui_wgpu::Renderer,
     input: InputState,
     events: Vec<egui::Event>,
+    /// Numpad digits pressed since the last frame, for the viewpoints.
+    numpad: Vec<u8>,
     focused: bool,
     lang: Lang,
     theme: ThemeMode,
@@ -225,6 +227,7 @@ impl App {
             renderer,
             input: InputState::default(),
             events: Vec::new(),
+            numpad: Vec::new(),
             focused: true,
             lang,
             theme,
@@ -279,6 +282,12 @@ impl App {
             } => return self.on_file(purpose, &name, bytes),
             InputEvent::Folder { path } => return self.on_folder(path),
             InputEvent::WriteFailed { message } => return self.on_write_failed(&message),
+            InputEvent::Numpad {
+                digit,
+                pressed: true,
+                repeat: false,
+            } => return self.numpad.push(digit),
+            InputEvent::Numpad { .. } => return,
             _ => {}
         }
         if let InputEvent::Focus(focused) = event {

@@ -3,9 +3,7 @@
 //! The menu bar. Each part of the editor fills its own items through a hook
 //! in its file, so this one keeps only the order of the menus.
 
-use egui::Key;
-
-use super::views::viewpoints;
+use super::views::{numpad_name, viewpoints};
 use super::{App, ISSUES_URL, LICENCES_URL, WEB};
 use crate::navigation::NavStyle;
 use crate::ui::{self, i18n::Lang, menu};
@@ -102,7 +100,8 @@ impl App {
         menu::submenu(ui, tr.viewpoints, |ui| {
             ui.set_min_width(160.0);
             for (label, key, yaw, pitch) in viewpoints(tr) {
-                if menu::action(ui, true, label, key.map_or("", Key::name)) {
+                let key = key.map(numpad_name).unwrap_or_default();
+                if menu::action(ui, true, label, &key) {
                     self.view_from(yaw, pitch);
                 }
             }

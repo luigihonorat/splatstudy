@@ -40,6 +40,8 @@ pub struct StudyTr {
     pub wireframe: &'static str,
     /// The perspective, on; off, the view is orthographic.
     pub perspective: &'static str,
+    /// The viewpoint from below, beside front, back and top (in `Tr`).
+    pub bottom: &'static str,
     /// Fits the reference view to the reference.
     pub frame_reference: &'static str,
     /// In the view menu, over the items that switch one view's own aids.
@@ -81,6 +83,7 @@ pub const JA: StudyTr = StudyTr {
     top_light: "天窓",
     wireframe: "ワイヤーフレーム",
     perspective: "パース表示",
+    bottom: "下",
     frame_reference: "モチーフに合わせる",
     sculpt_view: "塑像のビュー",
     reference_view: "モチーフのビュー",
@@ -115,6 +118,7 @@ pub const EN: StudyTr = StudyTr {
     top_light: "top",
     wireframe: "wireframe",
     perspective: "perspective",
+    bottom: "bottom",
     frame_reference: "frame reference",
     sculpt_view: "sculpt view",
     reference_view: "reference view",
@@ -149,6 +153,7 @@ pub const FR: StudyTr = StudyTr {
     top_light: "zénithal",
     wireframe: "fil de fer",
     perspective: "perspective",
+    bottom: "dessous",
     frame_reference: "cadrer le modèle",
     sculpt_view: "vue sculpture",
     reference_view: "vue modèle",

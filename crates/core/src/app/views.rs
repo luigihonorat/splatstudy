@@ -3,7 +3,7 @@
 //! The two views side by side: layout, the divider, pointer input,
 //! navigation and viewpoints.
 
-use egui::{Align2, Color32, CursorIcon, Key, PointerButton, Pos2, Rect, Sense, Stroke};
+use egui::{Align2, Color32, CursorIcon, PointerButton, Pos2, Rect, Sense, Stroke};
 use glam::Vec3;
 
 use super::study::Layout;
@@ -21,18 +21,36 @@ const DOLLY_WHEEL: f32 = 0.0015;
 /// be a tap that inverts the mask.
 const MASK_TAP: f32 = 4.0;
 
-/// Preset viewpoints: label, key, yaw and pitch. Right and left are the
-/// viewer's, as seen in the front view.
-pub(super) fn viewpoints(tr: &Tr) -> [(&'static str, Option<Key>, f32, f32); 6] {
+/// Preset viewpoints: label, numpad digit, yaw and pitch. Right and left
+/// are the viewer's, as seen in the front view. Front and back share 5:
+/// the key turns from one to the other.
+pub(super) fn viewpoints(tr: &Tr) -> [(&'static str, Option<u8>, f32, f32); 7] {
     use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
     [
-        (tr.front, Some(Key::Num1), 0.0, 0.0),
-        (tr.back, None, PI, 0.0),
-        (tr.left, None, -FRAC_PI_2, 0.0),
-        (tr.right, Some(Key::Num3), FRAC_PI_2, 0.0),
-        (tr.top, Some(Key::Num7), 0.0, FRAC_PI_2),
+        (tr.front, Some(5), 0.0, 0.0),
+        (tr.back, Some(5), PI, 0.0),
+        (tr.left, Some(4), -FRAC_PI_2, 0.0),
+        (tr.right, Some(6), FRAC_PI_2, 0.0),
+        (tr.top, Some(8), 0.0, FRAC_PI_2),
+        (tr.study.bottom, Some(2), 0.0, -FRAC_PI_2),
         (tr.three_quarter, None, FRAC_PI_4, 0.3),
     ]
+}
+
+/// A numpad key as the menus and the shortcuts window show it.
+pub(super) fn numpad_name(digit: u8) -> String {
+    format!("Numpad {digit}")
+}
+
+/// Whether `camera` already looks from `yaw` and `pitch`, give or take a
+/// hair, however many turns its yaw has made.
+fn looks_from(camera: &OrbitCamera, yaw: f32, pitch: f32) -> bool {
+    use std::f32::consts::{PI, TAU};
+    const CLOSE: f32 = 0.01;
+    let mut there = *camera;
+    there.look_from(yaw, pitch);
+    let turn = (there.yaw - camera.yaw + PI).rem_euclid(TAU) - PI;
+    turn.abs() < CLOSE && (there.pitch - camera.pitch).abs() < CLOSE
 }
 
 /// Where the sculpt and reference views sit in `area` (indexed by `SCULPT`
@@ -92,6 +110,26 @@ impl App {
     pub(super) fn view_from(&mut self, yaw: f32, pitch: f32) {
         for camera in &mut self.cameras {
             camera.look_from(yaw, pitch);
+        }
+    }
+
+    /// The viewpoint on numpad `digit`, for both views. Where several
+    /// share the key, each press turns to the next, as the sculpt view
+    /// sees it: from the front, 5 turns to the back, from anywhere else to
+    /// the front.
+    pub(super) fn numpad_view(&mut self, digit: u8) {
+        let views: Vec<(f32, f32)> = viewpoints(self.lang.tr())
+            .into_iter()
+            .filter(|&(_, key, _, _)| key == Some(digit))
+            .map(|(_, _, yaw, pitch)| (yaw, pitch))
+            .collect();
+        let camera = &self.cameras[SCULPT];
+        let next = views
+            .iter()
+            .position(|&(yaw, pitch)| looks_from(camera, yaw, pitch))
+            .map_or(0, |k| (k + 1) % views.len());
+        if let Some(&(yaw, pitch)) = views.get(next) {
+            self.view_from(yaw, pitch);
         }
     }
 

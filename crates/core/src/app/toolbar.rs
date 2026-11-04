@@ -59,13 +59,13 @@ pub(super) enum RefKind {
 }
 
 impl ViewOption {
-    /// The key, as menus and tooltips show it.
+    /// The key, as menus and tooltips show it; empty for none.
     pub(super) fn keys(self) -> &'static str {
         use ViewOption::*;
         match self {
             // Each tool has its own key: see `brush_keys`.
             Tool => "",
-            Perspective => "5",
+            Perspective => "",
             Wireframe => "Shift+W",
             Lighting => "B",
             Grid => "G",
@@ -579,7 +579,10 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 18.0;
                         ui.label(RichText::new(label).font(fonts::regular(13.0)));
-                        ui.label(RichText::new(keys).font(fonts::regular(13.0)).color(muted));
+                        // The perspective has no key.
+                        if !keys.is_empty() {
+                            ui.label(RichText::new(keys).font(fonts::regular(13.0)).color(muted));
+                        }
                     });
                     let hint = if option == ViewOption::Tool {
                         Some(tr.mesh.tool_pie_hint)

@@ -7,7 +7,7 @@ use egui::{Align2, Key, RichText};
 
 use super::sculpting::{BRUSHES, TOOL_PIE_KEY, brush_keys, brush_name};
 use super::toolbar::ViewOption;
-use super::views::viewpoints;
+use super::views::{numpad_name, viewpoints};
 use super::{App, REPO_URL, SITE_URL, WEB};
 use crate::navigation::NavStyle;
 use crate::ui;
@@ -16,15 +16,14 @@ impl App {
     pub(super) fn shortcuts(&mut self, ui: &egui::Ui) {
         use egui::Modifiers as M;
         let pressed = |m: M, key: Key| ui.input_mut(|i| i.consume_key(m, key));
+        let numpad = std::mem::take(&mut self.numpad);
         // Typing in a text field (a credit, a title): its letters, Ctrl+Z
         // and Home belong to the field, not to the tools and views.
         if !ui.ctx().text_edit_focused() {
             self.flyout_keys(ui);
             self.sculpt_shortcuts(ui);
-            for (_, key, yaw, pitch) in viewpoints(self.lang.tr()) {
-                if key.is_some_and(|key| pressed(M::NONE, key)) {
-                    self.view_from(yaw, pitch);
-                }
+            for digit in numpad {
+                self.numpad_view(digit);
             }
             // In the view under the pointer.
             if pressed(M::NONE, Key::F) {
@@ -97,7 +96,7 @@ impl App {
                 ]);
                 for (label, key, _, _) in viewpoints(tr) {
                     if let Some(key) = key {
-                        rows.push((label, key.name().to_owned()));
+                        rows.push((label, numpad_name(key)));
                     }
                 }
                 rows.push((tr.study.hide_panels, "Tab".to_owned()));
@@ -105,7 +104,6 @@ impl App {
                 rows.push((tr.frame_sculpt, "F".to_owned()));
                 rows.push((tr.reset_view, "Home".to_owned()));
                 for (label, key) in [
-                    (tr.study.perspective, "5"),
                     (tr.link_cameras, "L"),
                     (tr.study.swap_sides, "W"),
                     (tr.mirror_view, "R"),
@@ -180,5 +178,62 @@ impl App {
         self.help_windows(ui);
         self.export_window(ui);
         self.screenshot_step(ui);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::f32::consts::{FRAC_PI_2, PI};
+
+    use super::super::study::tests::Harness;
+    use super::super::{REFERENCE, SCULPT};
+
+    #[test]
+    fn the_numpad_turns_both_views_and_picks_no_tool() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let tool = h.app.tool.tool;
+        let looks = |h: &Harness| {
+            let camera = h.app.cameras[SCULPT];
+            assert_eq!(
+                (camera.yaw, camera.pitch),
+                (h.app.cameras[REFERENCE].yaw, h.app.cameras[REFERENCE].pitch),
+                "both views turn"
+            );
+            (camera.yaw, camera.pitch)
+        };
+        h.numpad(8);
+        let (yaw, pitch) = looks(&h);
+        assert!(yaw == 0.0 && pitch > 1.5, "top");
+        h.numpad(2);
+        let (yaw, pitch) = looks(&h);
+        assert!(yaw == 0.0 && pitch < -1.5, "bottom");
+        h.numpad(4);
+        assert_eq!(looks(&h), (-FRAC_PI_2, 0.0), "left");
+        h.numpad(6);
+        assert_eq!(looks(&h), (FRAC_PI_2, 0.0), "right");
+        // 5 turns to the front, then from there to the back and back.
+        h.numpad(5);
+        assert_eq!(looks(&h), (0.0, 0.0), "front");
+        h.numpad(5);
+        assert_eq!(looks(&h), (PI, 0.0), "back");
+        h.numpad(5);
+        assert_eq!(looks(&h), (0.0, 0.0), "front again");
+        // A front reached by turning a full circle is still the front.
+        h.app.cameras[SCULPT].yaw = std::f32::consts::TAU + 0.001;
+        h.numpad(5);
+        assert_eq!(looks(&h), (PI, 0.0));
+        // Nearly the front is not the front.
+        h.app.cameras[SCULPT].yaw = 0.2;
+        h.numpad(5);
+        assert_eq!(looks(&h), (0.0, 0.0));
+        // Digits without a view do nothing; none picks a tool.
+        for digit in [0, 1, 3, 7, 9] {
+            h.numpad(digit);
+            assert_eq!(looks(&h), (0.0, 0.0));
+        }
+        assert_eq!(h.app.tool.tool, tool);
     }
 }

@@ -68,6 +68,15 @@ pub enum InputEvent {
         repeat: bool,
     },
     Text(String),
+    /// A key of the numpad, `0`..=`9`, whatever NumLock makes of it. It
+    /// is its own input, not a [`Key`](Self::Key): the digit row picks
+    /// tools, the numpad turns the views. With NumLock on, the shell also
+    /// sends its digit as [`Text`](Self::Text) for the text fields.
+    Numpad {
+        digit: u8,
+        pressed: bool,
+        repeat: bool,
+    },
     Modifiers(Modifiers),
     Focus(bool),
     /// A file the user dropped, picked or the shell fetched, with its name
@@ -199,8 +208,9 @@ impl InputState {
                 out.push(egui::Event::ModifiersChanged(m.into()));
             }
             InputEvent::Focus(focused) => out.push(egui::Event::WindowFocused(focused)),
-            // The app opens these itself; egui never sees them.
-            InputEvent::File { .. }
+            // The app handles these itself; egui never sees them.
+            InputEvent::Numpad { .. }
+            | InputEvent::File { .. }
             | InputEvent::Folder { .. }
             | InputEvent::WriteFailed { .. } => {}
         }

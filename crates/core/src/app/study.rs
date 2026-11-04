@@ -1047,7 +1047,6 @@ impl App {
             self.apply(ViewOption::Ghost, SCULPT);
         }
         for (key, option) in [
-            (Key::Num5, ViewOption::Perspective),
             (Key::R, ViewOption::Mirror),
             (Key::K, ViewOption::Silhouette),
             (Key::V, ViewOption::Plumb),
@@ -1516,6 +1515,18 @@ pub(super) mod tests {
             );
         }
 
+        /// Numpad `digit` pressed and let go, for a frame.
+        pub(in crate::app) fn numpad(&mut self, digit: u8) {
+            for pressed in [true, false] {
+                self.app.push_event(crate::InputEvent::Numpad {
+                    digit,
+                    pressed,
+                    repeat: false,
+                });
+            }
+            self.frames(1);
+        }
+
         /// Presses and lets go of `key` with `modifiers` held, for a frame.
         pub(in crate::app) fn chord(&mut self, key: Key, modifiers: crate::input::Modifiers) {
             self.app.push_event(crate::InputEvent::Modifiers(modifiers));
@@ -1540,20 +1551,18 @@ pub(super) mod tests {
         };
         let [sculpt, reference] = h.app.view_rects;
         h.pointer(crate::PointerPhase::Move, reference.center());
-        for key in [Key::G, Key::V, Key::K, Key::R, Key::B, Key::Num5] {
+        for key in [Key::G, Key::V, Key::K, Key::R, Key::B] {
             h.key(key, false);
         }
         let aids = h.app.study.views;
         assert!(aids[REFERENCE].grid && aids[REFERENCE].plumb);
         assert!(aids[REFERENCE].silhouette && aids[REFERENCE].mirror);
         assert_eq!(aids[REFERENCE].lighting, Lighting::Raking);
-        assert!(h.app.cameras[REFERENCE].ortho);
         assert_eq!(
             aids[SCULPT],
             Aids::default(),
             "the sculpt view keeps its own"
         );
-        assert!(!h.app.cameras[SCULPT].ortho);
         // The view menu switches those of the view the pointer was last
         // over, though it is over the menu now.
         h.pointer(crate::PointerPhase::Move, egui::pos2(5.0, 5.0));
@@ -1563,14 +1572,10 @@ pub(super) mod tests {
         h.pointer(crate::PointerPhase::Move, sculpt.center());
         assert_eq!(h.app.focused_view(), SCULPT);
         h.key(Key::G, false);
-        h.key(Key::Num5, false);
         h.key(Key::K, true);
-        assert!(h.app.study.views[SCULPT].grid && h.app.cameras[SCULPT].ortho);
+        assert!(h.app.study.views[SCULPT].grid);
         assert!(h.app.study.matching.tint);
         assert!(!h.app.study.views[SCULPT].silhouette, "Shift+K is not K");
-        h.key(Key::Num5, false);
-        assert!(!h.app.cameras[SCULPT].ortho, "5 switches back");
-        assert!(h.app.cameras[REFERENCE].ortho);
 
         // Shown alone, the reference view takes the keys wherever the
         // pointer is.
