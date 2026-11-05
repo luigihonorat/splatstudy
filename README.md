@@ -1,4 +1,9 @@
-# SplatStudy
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="web/logo/splatstudy-wordmark-white.svg">
+    <img src="web/logo/splatstudy-wordmark-black.svg" alt="SplatStudy" width="200">
+  </picture>
+</h1>
 
 3D の参照を横に置いて塑像する、デジタル彫刻ツール。
 
