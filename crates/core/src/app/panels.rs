@@ -229,7 +229,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// The window menu: each panel's groups, underlined while they show.
+    /// The window menu: each panel's groups, ticked while they show. It
+    /// stays open, so several can be turned on or off in a row.
     pub(super) fn window_menu(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         ui.set_min_width(menu::MIN_WIDTH);
@@ -241,7 +242,7 @@ impl App {
                 ui.separator();
             }
             for &group in groups {
-                if menu::item(ui, group.title(tr), "", self.panels.holds(group)).clicked() {
+                if menu::check(ui, group.title(tr), "", self.panels.holds(group)).clicked() {
                     self.panels.toggle_group(group);
                     self.dirty = true;
                 }
@@ -425,6 +426,70 @@ mod tests {
         h.app
             .apply_preferences(&saved.replace("hide=tools,subdivision", "hide="));
         assert_eq!(h.app.panels.removed_names(), "");
+    }
+
+    #[test]
+    fn the_window_menu_stays_open_while_groups_are_ticked() {
+        use super::super::study::tests::Harness;
+        use crate::PointerPhase::{Down, Move, Up};
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        // What can be clicked in layers of `order`, top to bottom, then
+        // left to right.
+        let clickable = |h: &Harness, order: egui::Order| {
+            let mut rects: Vec<egui::Rect> = h.app.ctx.viewport(|v| {
+                v.this_pass
+                    .widgets
+                    .layers()
+                    .filter(|(layer, _)| layer.order == order)
+                    .flat_map(|(_, widgets)| widgets.iter())
+                    .filter(|w| w.sense.senses_click())
+                    .map(|w| w.rect)
+                    .collect()
+            });
+            rects.sort_by(|a, b| {
+                (a.top(), a.left())
+                    .partial_cmp(&(b.top(), b.left()))
+                    .unwrap()
+            });
+            rects
+        };
+        let click = |h: &mut Harness, at: egui::Pos2| {
+            h.pointer(Move, at);
+            h.pointer(Down, at);
+            h.pointer(Up, at);
+            h.frames(1);
+        };
+        // file, edit, object, view, timelapse, navigation, language,
+        // window, help.
+        let bar: Vec<_> = clickable(&h, egui::Order::Background)
+            .into_iter()
+            .filter(|r| r.bottom() < 30.0)
+            .collect();
+        assert_eq!(bar.len(), 9, "{bar:?}");
+        click(&mut h, bar[7].center());
+        // The rows, without the menu's own area.
+        let rows: Vec<_> = clickable(&h, egui::Order::Foreground)
+            .into_iter()
+            .filter(|r| r.height() < 40.0)
+            .collect();
+        assert_eq!(rows.len(), Group::ALL.len(), "{rows:?}");
+
+        click(&mut h, rows[5].center());
+        assert!(!h.app.panels.holds(Group::Crop));
+        assert!(egui::Popup::is_any_open(&h.app.ctx), "still open");
+        click(&mut h, rows[0].center());
+        assert!(!h.app.panels.holds(Group::ToolSettings));
+        assert_eq!(h.app.panels.removed_names(), "tools,crop");
+
+        let away = h.app.view_rects[super::super::SCULPT].center();
+        click(&mut h, away);
+        assert!(
+            !egui::Popup::is_any_open(&h.app.ctx),
+            "a click outside closes it"
+        );
     }
 
     fn tab(pressed: bool, modifiers: egui::Modifiers) -> Event {
