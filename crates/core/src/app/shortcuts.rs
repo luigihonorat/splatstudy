@@ -164,6 +164,7 @@ impl App {
                     ))
                     .color(muted),
                 );
+                ui.label(RichText::new(tr.trademarks).color(muted).small());
                 for (text, url) in [
                     ("splatstudy.com", SITE_URL),
                     ("github.com/luigihonorat/splatstudy", REPO_URL),
