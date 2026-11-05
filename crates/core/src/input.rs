@@ -21,6 +21,19 @@ pub struct PointerEvent {
     pub eraser: bool,
 }
 
+impl PointerEvent {
+    /// The pressure a brush takes: the pen's own. A mouse or a finger
+    /// can't tell how hard it presses (browsers report 0.5 for a touch),
+    /// so it counts as full.
+    pub fn brush_pressure(&self) -> f32 {
+        if self.kind == PointerKind::Pen {
+            self.pressure
+        } else {
+            1.0
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointerKind {
     Mouse,

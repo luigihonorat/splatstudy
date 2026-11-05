@@ -114,11 +114,13 @@ const PANEL_WIDTH: f32 = 196.0;
 #[derive(Clone, Copy)]
 enum Drag {
     /// Clay or smooth: dabs along the path. `carry` is the distance travelled
-    /// since the last dab.
+    /// since the last dab. A strip waits for the stroke to head somewhere
+    /// before its first dab; `dabbed` is false until then.
     Stroke {
         last: Pos2,
         pressure: f32,
         carry: f32,
+        dabbed: bool,
     },
     /// Move: the surface follows the pointer within the view plane.
     Grab {

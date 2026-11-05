@@ -728,6 +728,8 @@ mod tests {
             invert: false,
             symmetry: false,
             direction: Vec3::ZERO,
+            shape: Default::default(),
+            buildup: Default::default(),
         });
         changed(revision(0, &sculpt, None, &study, [false; 2]), "mid-stroke");
         sculpt.end_stroke();
@@ -860,6 +862,8 @@ mod tests {
                 invert: false,
                 symmetry: true,
                 direction: Vec3::ZERO,
+                shape: Default::default(),
+                buildup: Default::default(),
             });
             app.sculpt.end_stroke();
             app.sculpt.refresh();
@@ -947,6 +951,8 @@ mod tests {
             invert: false,
             symmetry: false,
             direction: Vec3::ZERO,
+            shape: Default::default(),
+            buildup: Default::default(),
         });
         b.sculpt.end_stroke();
         b.sculpt.refresh();
