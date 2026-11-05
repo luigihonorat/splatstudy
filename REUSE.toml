@@ -18,6 +18,7 @@ path = [
     "about.toml",
     "about.hbs",
     "web/**",
+    "crates/native/assets/**",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 The SplatStudy contributors"

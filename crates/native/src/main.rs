@@ -39,6 +39,32 @@ fn main() {
     }
 }
 
+/// The app icon in the title bar, and in the Dock on macOS. Windows takes
+/// it from the .exe instead (build.rs), with heavier small sizes.
+#[cfg(not(windows))]
+fn set_icon(window: &mut Window) {
+    let decoded = (|| {
+        let bytes = std::io::Cursor::new(include_bytes!("../assets/icon.png"));
+        let mut reader = png::Decoder::new(bytes).read_info().ok()?;
+        let mut pixels = vec![0; reader.output_buffer_size()?];
+        let info = reader.next_frame(&mut pixels).ok()?;
+        let rgba =
+            info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight;
+        rgba.then_some((pixels, info.width, info.height))
+    })();
+    let Some((mut pixels, width, height)) = decoded else {
+        log::warn!("app icon: not an 8-bit RGBA PNG");
+        return;
+    };
+    let format = sdl3::pixels::PixelFormat::RGBA32;
+    match sdl3::surface::Surface::from_data(&mut pixels, width, height, width * 4, format) {
+        Ok(icon) => {
+            window.set_icon(icon);
+        }
+        Err(err) => log::warn!("app icon: {err}"),
+    }
+}
+
 fn run() -> Result<(), String> {
     // A pen should arrive only as pen events, not also as mouse or touch.
     sdl3::hint::set("SDL_PEN_MOUSE_EVENTS", "0");
@@ -46,7 +72,8 @@ fn run() -> Result<(), String> {
 
     let sdl = sdl3::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
-    let window = video
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut window = video
         .window("SplatStudy", 1440, 900)
         .position_centered()
         .resizable()
@@ -54,6 +81,8 @@ fn run() -> Result<(), String> {
         .metal_view()
         .build()
         .map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    set_icon(&mut window);
 
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
