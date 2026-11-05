@@ -143,7 +143,7 @@ fn falloff_curve(ui: &mut egui::Ui, falloff: Falloff) {
 fn falloff_name(tr: &Tr, falloff: Falloff) -> &'static str {
     match falloff {
         Falloff::Smooth => tr.mesh.falloff_smooth,
-        Falloff::Linear => tr.mesh.falloff_linear,
+        Falloff::Flat => tr.mesh.falloff_flat,
         Falloff::Sharp => tr.mesh.falloff_sharp,
     }
 }
@@ -710,9 +710,18 @@ impl App {
         });
         falloff_curve(ui, self.tool.falloff[tool_index(self.tool.tool)]);
         ui.add_space(10.0);
-        if ui::choice(ui, tr.symmetry, self.tool.symmetry).clicked() {
-            self.tool.symmetry = !self.tool.symmetry;
-        }
+        // On / off, then what it switches.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            let symmetry = &mut self.tool.symmetry;
+            for (text, on) in [(tr.mesh.switch_on, true), (tr.mesh.switch_off, false)] {
+                if ui::choice(ui, text, *symmetry == on).clicked() {
+                    *symmetry = on;
+                }
+            }
+            let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+            ui.label(egui::RichText::new(tr.mesh.symmetry_x).color(muted));
+        });
     }
 
     /// The voxel remesh and the mesh from the reference, which share its

@@ -92,15 +92,16 @@ pub enum Falloff {
     /// A soft dome: full at the centre, flat at both ends.
     #[default]
     Smooth,
-    /// A cone: fades evenly to the rim.
-    Linear,
+    /// A plateau, like a clay tube: full over the inner half, then a soft
+    /// shoulder down to the rim.
+    Flat,
     /// A narrow peak: most of the effect near the centre.
     Sharp,
 }
 
 impl Falloff {
     /// Every falloff, in the order the panel lists them.
-    pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Linear, Falloff::Sharp];
+    pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Flat, Falloff::Sharp];
 
     /// The weight at `distance` from the centre of a brush of `radius`:
     /// 1 at the centre, 0 at the rim and beyond.
@@ -111,7 +112,10 @@ impl Falloff {
                 let s = 1.0 - t * t;
                 s * s
             }
-            Falloff::Linear => 1.0 - t,
+            Falloff::Flat => {
+                let s = ((1.0 - t) * 2.0).min(1.0);
+                s * s * (3.0 - 2.0 * s)
+            }
             Falloff::Sharp => {
                 let s = 1.0 - t;
                 s * s * s
@@ -1227,6 +1231,20 @@ mod tests {
             s.refresh();
         }
         s.end_stroke();
+    }
+
+    #[test]
+    fn falloffs_run_from_full_at_the_centre_to_nothing_at_the_rim() {
+        for falloff in Falloff::ALL {
+            assert_eq!(falloff.weight(0.0, 1.0), 1.0);
+            assert_eq!(falloff.weight(1.0, 1.0), 0.0);
+            assert_eq!(falloff.weight(2.0, 1.0), 0.0);
+        }
+        // Flat holds its full weight over the inner half; sharp drops first.
+        assert_eq!(Falloff::Flat.weight(0.5, 1.0), 1.0);
+        let at = |f: Falloff| f.weight(0.4, 1.0);
+        assert!(at(Falloff::Flat) > at(Falloff::Smooth));
+        assert!(at(Falloff::Smooth) > at(Falloff::Sharp));
     }
 
     #[test]
