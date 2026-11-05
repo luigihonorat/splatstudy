@@ -12,7 +12,8 @@
 //! - `reference`: the reference and its panel
 //! - `study`: comparison aids (camera link, silhouette, ghost, guides, timer)
 //! - `toolbar`: each view's toolbar of view options
-//! - `panels`: hiding the side panels (Tab, Shift+Tab)
+//! - `panels`: hiding the side panels (Tab, Shift+Tab) and choosing their
+//!   groups (the window menu)
 //! - `files`: scenes, opening and importing
 //! - `export`: exporting the timelapse
 //! - `screenshot`: a picture of the views
@@ -36,6 +37,7 @@ mod views;
 
 use egui::{CursorIcon, Frame, Key, Margin, PointerButton, Pos2, Rect};
 use glam::Vec3;
+use panels::Group;
 
 use crate::camera::OrbitCamera;
 use crate::input::{FilePurpose, InputEvent, InputState};
@@ -526,7 +528,11 @@ impl App {
         // keys asked for, the timelapse, the reference's mesh.
         self.panels.settle(self.study.layout);
         self.sculpt_upkeep(ui);
-        if !self.panels.hidden() {
+        // A panel with none of its groups left (from the window menu) gives
+        // its width to the views; the timelapse's controls keep the left one.
+        let sculpt_panel = self.playback.is_some() || self.panels.holds_any(&Group::SCULPT);
+        let reference_panel = self.panels.holds_any(&Group::REFERENCE);
+        if !self.panels.hidden() && sculpt_panel {
             egui::Panel::left("sculpt tools")
                 .exact_size(PANEL_WIDTH)
                 .resizable(false)
@@ -539,6 +545,8 @@ impl App {
                         .auto_shrink([false; 2])
                         .show(ui, |ui| self.sculpt_panel(ui));
                 });
+        }
+        if !self.panels.hidden() && reference_panel {
             egui::Panel::right("reference tools")
                 .exact_size(PANEL_WIDTH)
                 .resizable(false)

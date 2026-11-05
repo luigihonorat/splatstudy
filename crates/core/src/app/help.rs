@@ -75,7 +75,8 @@ impl App {
     }
 
     /// The preferences that outlive a session, as `key=value` pairs joined
-    /// by `&`: `lang=ja&theme=dark&nav=zbrush`. The shells store this
+    /// by `&`: `lang=ja&theme=dark&nav=zbrush`, then `&hide=crop,credit`
+    /// when the window menu took groups out of the panels. The shells store this
     /// string as is (localStorage on the web, a file on desktop) and hand it
     /// back to [`App::apply_preferences`] at start.
     pub fn preferences(&self) -> String {
@@ -89,7 +90,12 @@ impl App {
             ThemeMode::Dark => "dark",
         };
         let nav = self.nav.name().to_ascii_lowercase();
-        format!("lang={lang}&theme={theme}&nav={nav}")
+        let mut saved = format!("lang={lang}&theme={theme}&nav={nav}");
+        let removed = self.panels.removed_names();
+        if !removed.is_empty() {
+            saved += &format!("&hide={removed}");
+        }
+        saved
     }
 
     /// Restores preferences saved from [`App::preferences`]. Unknown keys
@@ -115,6 +121,7 @@ impl App {
                         self.nav = nav;
                     }
                 }
+                "hide" => self.panels.set_removed_names(value),
                 _ => {}
             }
         }

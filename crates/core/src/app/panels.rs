@@ -5,12 +5,16 @@
 //! sculpt view fills the window. The menu bar always stays.
 //!
 //! The hidden state lasts for the session; scenes don't keep it.
+//!
+//! The window menu also chooses which groups the panels hold. That choice
+//! is a preference, so it outlives the session. A side panel with none of
+//! its groups left goes away, and the views take its width.
 
 use egui::{Event, Key};
 
 use super::App;
 use super::study::Layout;
-use crate::ui::menu;
+use crate::ui::{i18n::Tr, menu};
 
 /// Whether the panels show, and what to put back after Shift+Tab.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -18,6 +22,69 @@ pub(super) struct Panels {
     hidden: bool,
     /// Shift+Tab's view of the sculpt alone, and what there was before.
     focus: Option<Before>,
+    /// The groups taken out of the panels from the window menu, by
+    /// [`Group`] index. All of them show at first.
+    removed: [bool; Group::ALL.len()],
+}
+
+/// A group of controls in a side panel, which the window menu can take out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Group {
+    ToolSettings,
+    Subdivision,
+    Remeshing,
+    Reference,
+    Alignment,
+    Crop,
+    Credit,
+}
+
+impl Group {
+    pub(super) const ALL: [Group; 7] = [
+        Group::ToolSettings,
+        Group::Subdivision,
+        Group::Remeshing,
+        Group::Reference,
+        Group::Alignment,
+        Group::Crop,
+        Group::Credit,
+    ];
+    /// The sculpt panel's groups, on the left.
+    pub(super) const SCULPT: [Group; 3] =
+        [Group::ToolSettings, Group::Subdivision, Group::Remeshing];
+    /// The reference panel's groups, on the right.
+    pub(super) const REFERENCE: [Group; 4] = [
+        Group::Reference,
+        Group::Alignment,
+        Group::Crop,
+        Group::Credit,
+    ];
+
+    /// Its name in the preferences string.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Group::ToolSettings => "tools",
+            Group::Subdivision => "subdivision",
+            Group::Remeshing => "remeshing",
+            Group::Reference => "reference",
+            Group::Alignment => "alignment",
+            Group::Crop => "crop",
+            Group::Credit => "credit",
+        }
+    }
+
+    /// Its heading in the panel, which the window menu repeats.
+    pub(super) fn title(self, tr: &Tr) -> &'static str {
+        match self {
+            Group::ToolSettings => tr.mesh.tool_settings,
+            Group::Subdivision => tr.mesh.subdivision,
+            Group::Remeshing => tr.mesh.remeshing,
+            Group::Reference => tr.reference_tools,
+            Group::Alignment => tr.refs.alignment,
+            Group::Crop => tr.refs.crop,
+            Group::Credit => tr.refs.credit,
+        }
+    }
 }
 
 /// What Shift+Tab hid, to show again.
@@ -30,6 +97,43 @@ struct Before {
 impl Panels {
     pub(super) fn hidden(&self) -> bool {
         self.hidden
+    }
+
+    /// Whether `group` is in its panel (the window menu's choice; Tab
+    /// hides the panels without changing it).
+    pub(super) fn holds(&self, group: Group) -> bool {
+        !self.removed[group as usize]
+    }
+
+    /// Whether any of `groups` is in its panel, so the panel is worth its
+    /// width.
+    pub(super) fn holds_any(&self, groups: &[Group]) -> bool {
+        groups.iter().any(|&g| self.holds(g))
+    }
+
+    /// The window menu: takes `group` out of its panel or puts it back.
+    pub(super) fn toggle_group(&mut self, group: Group) {
+        self.removed[group as usize] ^= true;
+    }
+
+    /// The groups taken out, for the preferences: `crop,credit`.
+    pub(super) fn removed_names(&self) -> String {
+        let names: Vec<_> = Group::ALL
+            .into_iter()
+            .filter(|&g| !self.holds(g))
+            .map(Group::name)
+            .collect();
+        names.join(",")
+    }
+
+    /// Takes out the groups named in `names`, as saved by
+    /// [`Panels::removed_names`], and puts back the others. Unknown names
+    /// are skipped.
+    pub(super) fn set_removed_names(&mut self, names: &str) {
+        let names: Vec<_> = names.split(',').collect();
+        for group in Group::ALL {
+            self.removed[group as usize] = names.contains(&group.name());
+        }
     }
 
     /// The sculpt view alone, without panels (Shift+Tab).
@@ -125,6 +229,26 @@ impl App {
         self.dirty = true;
     }
 
+    /// The window menu: each panel's groups, underlined while they show.
+    pub(super) fn window_menu(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        ui.set_min_width(menu::MIN_WIDTH);
+        for (k, groups) in [&Group::SCULPT[..], &Group::REFERENCE[..]]
+            .into_iter()
+            .enumerate()
+        {
+            if k > 0 {
+                ui.separator();
+            }
+            for &group in groups {
+                if menu::item(ui, group.title(tr), "", self.panels.holds(group)).clicked() {
+                    self.panels.toggle_group(group);
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
     /// The panel items in the view menu.
     pub(super) fn panel_items(&mut self, ui: &mut egui::Ui) {
         let st = self.lang.tr().study;
@@ -163,7 +287,7 @@ mod tests {
         ] {
             let mut panels = Panels {
                 hidden,
-                focus: None,
+                ..Panels::default()
             };
             let mut layout = layout_before;
             panels.toggle_focus(&mut layout);
@@ -179,7 +303,7 @@ mod tests {
     fn tab_out_of_the_sculpt_alone_brings_back_panels_and_views() {
         let mut panels = Panels {
             hidden: true,
-            focus: None,
+            ..Panels::default()
         };
         let mut layout = Layout::Both;
         panels.toggle_focus(&mut layout);
@@ -250,6 +374,57 @@ mod tests {
             h.frames(1);
             assert_eq!(h.app.panels.hidden(), hidden);
         }
+    }
+
+    #[test]
+    fn removed_groups_round_trip_through_their_names() {
+        let mut panels = Panels::default();
+        assert!(Group::ALL.iter().all(|&g| panels.holds(g)), "all at first");
+        assert_eq!(panels.removed_names(), "");
+        panels.toggle_group(Group::Crop);
+        panels.toggle_group(Group::ToolSettings);
+        assert_eq!(panels.removed_names(), "tools,crop");
+
+        let mut back = Panels::default();
+        back.set_removed_names("crop,unknown,tools");
+        assert_eq!(back, panels);
+        back.set_removed_names("");
+        assert_eq!(back, Panels::default(), "an empty list puts all back");
+    }
+
+    #[test]
+    fn a_panel_without_groups_gives_its_width_to_the_views() {
+        use super::super::study::tests::Harness;
+        use super::super::{PANEL_WIDTH, REFERENCE, SCULPT};
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let width = h.app.ctx.content_rect().width();
+        for group in Group::SCULPT {
+            h.app.panels.toggle_group(group);
+        }
+        h.frames(1);
+        let rects = h.app.view_rects;
+        assert_eq!(rects[SCULPT].left(), 0.0);
+        assert_eq!(rects[REFERENCE].right(), width - PANEL_WIDTH);
+
+        // One group back is enough to bring the panel back.
+        h.app.panels.toggle_group(Group::Remeshing);
+        h.frames(1);
+        assert_eq!(h.app.view_rects[SCULPT].left(), PANEL_WIDTH);
+
+        // The preferences keep the choice.
+        let saved = h.app.preferences();
+        assert!(saved.ends_with("&hide=tools,subdivision"), "{saved}");
+        h.app.apply_preferences("lang=en");
+        assert!(
+            !h.app.panels.holds(Group::ToolSettings),
+            "no hide key: kept"
+        );
+        h.app
+            .apply_preferences(&saved.replace("hide=tools,subdivision", "hide="));
+        assert_eq!(h.app.panels.removed_names(), "");
     }
 
     fn tab(pressed: bool, modifiers: egui::Modifiers) -> Event {

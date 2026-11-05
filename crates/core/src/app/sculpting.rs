@@ -10,6 +10,7 @@ use std::sync::Arc;
 use egui::{Key, Pos2, Rect, Stroke};
 use glam::{Mat4, Vec2, Vec3};
 
+use super::panels::Group;
 use super::{App, Drag, Request, SCULPT};
 use crate::camera::OrbitCamera;
 use crate::input::{FilePurpose, PointerKind};
@@ -641,7 +642,7 @@ impl App {
 
     /// The sculpt panel, in groups that fold away: the current tool's
     /// settings (the tool is picked on the toolbar), the subdivision levels,
-    /// and the remeshes.
+    /// and the remeshes; those the window menu left in.
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
         if self.playback.is_some() {
             self.playback_panel(ui);
@@ -649,16 +650,22 @@ impl App {
         }
         let tr = self.lang.tr();
         let m = tr.mesh;
-        ui::group(ui, "tool settings", m.tool_settings, |ui| {
-            self.tool_settings(ui)
-        });
-        ui::group(ui, "subdivision", m.subdivision, |ui| {
-            if ui::choice(ui, m.subdivide, false).clicked() {
-                self.ask_subdivide();
-            }
-            self.levels_panel(ui);
-        });
-        ui::group(ui, "remeshing", m.remeshing, |ui| self.remesh_controls(ui));
+        if self.panels.holds(Group::ToolSettings) {
+            ui::group(ui, "tool settings", m.tool_settings, |ui| {
+                self.tool_settings(ui)
+            });
+        }
+        if self.panels.holds(Group::Subdivision) {
+            ui::group(ui, "subdivision", m.subdivision, |ui| {
+                if ui::choice(ui, m.subdivide, false).clicked() {
+                    self.ask_subdivide();
+                }
+                self.levels_panel(ui);
+            });
+        }
+        if self.panels.holds(Group::Remeshing) {
+            ui::group(ui, "remeshing", m.remeshing, |ui| self.remesh_controls(ui));
+        }
     }
 
     /// The tools, and the chosen one's size, strength, stabiliser,

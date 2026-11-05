@@ -22,6 +22,7 @@ impl App {
             ui.menu_button(tr.menu_timelapse, |ui| self.timelapse_menu(ui));
             ui.menu_button(tr.navigation, |ui| self.navigation_menu(ui));
             ui.menu_button(tr.menu_language, |ui| self.language_menu(ui));
+            ui.menu_button(tr.menu_window, |ui| self.window_menu(ui));
             ui.menu_button(tr.menu_help, |ui| self.help_menu(ui));
         });
     }

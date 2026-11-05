@@ -15,6 +15,7 @@ use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+use super::panels::Group;
 use super::study::ReferenceLook;
 use super::{App, REFERENCE, Request, SCULPT};
 use crate::camera::OrbitCamera;
@@ -351,7 +352,8 @@ impl App {
     }
 
     /// The reference panel, in groups that fold away: the reference
-    /// itself, then for a 3D one its alignment and crop, and the credit.
+    /// itself, then for a 3D one its alignment and crop, and the credit;
+    /// those the window menu left in.
     pub(super) fn reference_panel(&mut self, ui: &mut egui::Ui) {
         // The whole panel scrolls when it is taller than the window (the
         // crop sliders and the credit fields together), behind a thin line
@@ -362,19 +364,28 @@ impl App {
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 let tr = self.lang.tr();
-                ui::group(ui, "reference", tr.reference_tools, |ui| {
-                    self.reference_file(ui)
-                });
+                let panels = self.panels;
+                if panels.holds(Group::Reference) {
+                    ui::group(ui, "reference", tr.reference_tools, |ui| {
+                        self.reference_file(ui)
+                    });
+                }
                 let Some(r) = &self.reference.current else {
                     return;
                 };
                 if !matches!(r.content, Content::Image(_)) {
-                    ui::group(ui, "alignment", tr.refs.alignment, |ui| {
-                        self.reference_alignment(ui)
-                    });
-                    ui::group(ui, "crop", tr.refs.crop, |ui| self.reference_crop(ui));
+                    if panels.holds(Group::Alignment) {
+                        ui::group(ui, "alignment", tr.refs.alignment, |ui| {
+                            self.reference_alignment(ui)
+                        });
+                    }
+                    if panels.holds(Group::Crop) {
+                        ui::group(ui, "crop", tr.refs.crop, |ui| self.reference_crop(ui));
+                    }
                 }
-                ui::group(ui, "credit", tr.refs.credit, |ui| self.reference_credit(ui));
+                if panels.holds(Group::Credit) {
+                    ui::group(ui, "credit", tr.refs.credit, |ui| self.reference_credit(ui));
+                }
             });
     }
 
