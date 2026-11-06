@@ -806,6 +806,7 @@ mod tests {
             invert: false,
             symmetry: false,
             direction: glam::Vec3::ZERO,
+            buildup: Default::default(),
         };
         app.sculpt.set_clock(from);
         app.sculpt.begin_stroke();

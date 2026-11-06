@@ -468,7 +468,7 @@ impl App {
                     })
                     .map(|s| {
                         let pos = self.view_pos_in(index, rect, egui::pos2(s.pos[0], s.pos[1]));
-                        (pos, s.pressure)
+                        (pos, s.brush_pressure())
                     })
                     .collect();
                 for (pos, pressure) in samples {

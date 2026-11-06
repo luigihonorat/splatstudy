@@ -92,15 +92,16 @@ pub enum Falloff {
     /// A soft dome: full at the centre, flat at both ends.
     #[default]
     Smooth,
-    /// A cone: fades evenly to the rim.
-    Linear,
+    /// A plateau, like a clay tube: full over the inner half, then a soft
+    /// shoulder down to the rim.
+    Flat,
     /// A narrow peak: most of the effect near the centre.
     Sharp,
 }
 
 impl Falloff {
     /// Every falloff, in the order the panel lists them.
-    pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Linear, Falloff::Sharp];
+    pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Flat, Falloff::Sharp];
 
     /// The weight at `distance` from the centre of a brush of `radius`:
     /// 1 at the centre, 0 at the rim and beyond.
@@ -111,7 +112,10 @@ impl Falloff {
                 let s = 1.0 - t * t;
                 s * s
             }
-            Falloff::Linear => 1.0 - t,
+            Falloff::Flat => {
+                let s = ((1.0 - t) * 2.0).min(1.0);
+                s * s * (3.0 - 2.0 * s)
+            }
             Falloff::Sharp => {
                 let s = 1.0 - t;
                 s * s * s
@@ -119,6 +123,27 @@ impl Falloff {
         }
     }
 }
+
+/// How clay builds where one stroke passes again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Buildup {
+    /// Every pass adds more, as in most sculpting apps.
+    #[default]
+    Accumulate,
+    /// A stroke lays one layer, [`LAYER`] times its height, and going
+    /// over it again in the same stroke adds nothing; the next stroke lays
+    /// the next layer.
+    Layer,
+}
+
+impl Buildup {
+    /// Every way, in the order the panel lists them.
+    pub const ALL: [Buildup; 2] = [Buildup::Layer, Buildup::Accumulate];
+}
+
+/// How thick one stroke's layer of clay is, as a share of the brush
+/// radius at full strength (see [`Buildup::Layer`]).
+pub const LAYER: f32 = 0.5;
 
 /// One touch of the brush on the surface, in world units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,6 +160,8 @@ pub struct Dab {
     pub symmetry: bool,
     /// Which way the stroke is heading, unit length; zero at its first dab.
     pub direction: Vec3,
+    /// Clay: whether a stroke builds more where it passes again.
+    pub buildup: Buildup,
 }
 
 /// One undoable change: the vertices a stroke touched, before and after.
@@ -204,6 +231,8 @@ pub struct Sculpt {
     touched: Stamp,
     stroke_indices: Vec<u32>,
     stroke_before: Vec<Vec3>,
+    /// For each vertex the stroke touched, its place in `stroke_indices`.
+    stroke_slot: Vec<u32>,
     /// The mask and chalk of each vertex in `stroke_indices`, when the
     /// stroke first touched it.
     stroke_layers_before: Vec<[f32; 2]>,
@@ -300,6 +329,7 @@ impl Sculpt {
             touched: Stamp::new(n),
             stroke_indices: Vec::new(),
             stroke_before: Vec::new(),
+            stroke_slot: vec![0; n],
             stroke_layers_before: Vec::new(),
             grabbed: Vec::new(),
             grab_wiped: false,
@@ -447,6 +477,7 @@ impl Sculpt {
         self.stamp = Stamp::new(n);
         self.unique = Stamp::new(n);
         self.touched = Stamp::new(n);
+        self.stroke_slot = vec![0; n];
         self.dirty_pages = vec![true; n.div_ceil(PAGE)];
         self.grabbed.clear();
         self.stroke_indices.clear();
@@ -749,6 +780,7 @@ impl Sculpt {
     /// stroke first changed it.
     fn touch(&mut self, v: u32) {
         if self.stroke_open && self.touched.mark(v) {
+            self.stroke_slot[v as usize] = self.stroke_indices.len() as u32;
             self.stroke_indices.push(v);
             self.stroke_before.push(self.mesh.positions[v as usize]);
             self.stroke_layers_before.push(self.layers_at(v));
@@ -918,6 +950,8 @@ impl Sculpt {
         let sign = if dab.invert { -1.0 } else { 1.0 };
         // How far above the area the clay builds up, at full strength.
         let height = dab.radius * 0.25 * dab.strength;
+        // In layers: how far a vertex may rise in this stroke.
+        let layer = dab.radius * LAYER * dab.strength;
         for &v in found {
             if !self.faces(v, n) {
                 continue;
@@ -927,11 +961,27 @@ impl Sculpt {
             if above >= height {
                 continue;
             }
-            let lift = (height - above).min(2.0 * height)
+            let mut lift = (height - above).min(2.0 * height)
                 * self.weight(p.distance(dab.centre), dab.radius)
                 * 0.3;
+            if dab.buildup == Buildup::Layer {
+                lift = lift.min(layer - self.risen(v, n) * sign);
+                if lift <= 0.0 {
+                    continue;
+                }
+            }
             self.place(v, p + n * (sign * lift));
         }
+    }
+
+    /// How far vertex `v` has moved along `n` since the open stroke first
+    /// touched it.
+    fn risen(&self, v: u32, n: Vec3) -> f32 {
+        if !self.stroke_open || !self.touched.is_marked(v) {
+            return 0.0;
+        }
+        let before = self.stroke_before[self.stroke_slot[v as usize] as usize];
+        (self.mesh.positions[v as usize] - before).dot(n)
     }
 
     fn flatten(&mut self, found: &[u32], dab: Dab) {
@@ -1200,6 +1250,7 @@ mod tests {
             invert: false,
             symmetry: false,
             direction: Vec3::ZERO,
+            buildup: Default::default(),
         }
     }
 
@@ -1227,6 +1278,89 @@ mod tests {
             s.refresh();
         }
         s.end_stroke();
+    }
+
+    #[test]
+    fn falloffs_run_from_full_at_the_centre_to_nothing_at_the_rim() {
+        for falloff in Falloff::ALL {
+            assert_eq!(falloff.weight(0.0, 1.0), 1.0);
+            assert_eq!(falloff.weight(1.0, 1.0), 0.0);
+            assert_eq!(falloff.weight(2.0, 1.0), 0.0);
+        }
+        // Flat holds its full weight over the inner half; sharp drops first.
+        assert_eq!(Falloff::Flat.weight(0.5, 1.0), 1.0);
+        let at = |f: Falloff| f.weight(0.4, 1.0);
+        assert!(at(Falloff::Flat) > at(Falloff::Smooth));
+        assert!(at(Falloff::Smooth) > at(Falloff::Sharp));
+    }
+
+    /// A clay stroke as the app makes it, across the top of the sphere:
+    /// each dab centred where a ray from above meets the clay now.
+    fn clay_stroke(s: &mut Sculpt, xs: &[f32], buildup: Buildup) {
+        s.begin_stroke();
+        for &x in xs {
+            let hit = s.raycast(Vec3::new(x, 0.0, 3.0), -Vec3::Z).unwrap();
+            s.dab(Dab {
+                strength: 0.5,
+                radius: 0.2,
+                direction: Vec3::X,
+                buildup,
+                ..dab(Brush::Clay, hit.point)
+            });
+            s.refresh();
+        }
+        s.end_stroke();
+    }
+
+    /// The clay's height above the point (0, y), in brush radii (0.2).
+    fn height_at(s: &Sculpt, y: f32) -> f32 {
+        s.raycast(Vec3::new(0.0, y, 3.0), -Vec3::Z).unwrap().point.z / 0.2
+    }
+
+    /// Dabs every 0.15 radius along X, as the app spaces them.
+    fn path() -> Vec<f32> {
+        (0..=20).map(|i| -0.3 + i as f32 * 0.03).collect()
+    }
+
+    #[test]
+    fn a_stroke_in_layers_builds_once_however_often_it_passes() {
+        let there_and_back: Vec<f32> = (0..5)
+            .flat_map(|k| {
+                let mut xs = path();
+                if k % 2 == 1 {
+                    xs.reverse();
+                }
+                xs
+            })
+            .collect();
+        for falloff in Falloff::ALL {
+            let built = |xs: &[f32], buildup: Buildup, strokes: usize| {
+                let mut s = Sculpt::new(Mesh::icosphere(5));
+                s.set_falloff(falloff);
+                let start = height_at(&s, 0.0);
+                for _ in 0..strokes {
+                    clay_stroke(&mut s, xs, buildup);
+                }
+                height_at(&s, 0.0) - start
+            };
+            let once = built(&path(), Buildup::Layer, 1);
+            let scrubbed = built(&there_and_back, Buildup::Layer, 1);
+            // Going over it fills up to the layer (a sharp falloff doesn't
+            // reach it in one pass) and no further. Measured along the
+            // view, not the plane's normal: a little over on the curve.
+            let layer = LAYER * 0.5;
+            assert!(once <= scrubbed + 0.01, "{falloff:?}: {once} once");
+            assert!(
+                (scrubbed - layer).abs() < 0.1 * layer,
+                "{falloff:?}: {scrubbed} scrubbed"
+            );
+            // A new stroke lays the next layer.
+            let twice = built(&path(), Buildup::Layer, 2);
+            assert!(twice > 1.8 * once, "{falloff:?}: {twice}");
+            // Accumulating, going over it again builds more.
+            let piled = built(&there_and_back, Buildup::Accumulate, 1);
+            assert!(piled > 2.0 * scrubbed, "{falloff:?}: {piled}");
+        }
     }
 
     #[test]

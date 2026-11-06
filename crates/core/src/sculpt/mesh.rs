@@ -367,6 +367,11 @@ impl Stamp {
         }
     }
 
+    /// True if `i` is marked in this round.
+    pub fn is_marked(&self, i: u32) -> bool {
+        self.marks[i as usize] == self.current
+    }
+
     /// Marks `i`; true if it was not marked yet in this round.
     pub fn mark(&mut self, i: u32) -> bool {
         let m = &mut self.marks[i as usize];

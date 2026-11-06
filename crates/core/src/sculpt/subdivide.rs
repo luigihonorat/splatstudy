@@ -371,6 +371,7 @@ mod tests {
                         invert: false,
                         symmetry: true,
                         direction: Vec3::X,
+                        buildup: Default::default(),
                     });
                 }
                 t_dabs += ms(start);

@@ -21,8 +21,8 @@ use crate::render::clay::GpuMesh;
 pub(super) use tool_pie::TOOL_PIE_KEY;
 
 use crate::sculpt::{
-    Brush, Dab, Falloff, Hit, LayerOp, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh, START_LEVEL,
-    Sculpt, cube_sphere,
+    Brush, Buildup, Dab, Falloff, Hit, LayerOp, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh,
+    START_LEVEL, Sculpt, cube_sphere,
 };
 use crate::ui::{self, i18n::Tr, icons, menu, theme};
 use crate::voxel;
@@ -38,6 +38,14 @@ const TICK: f32 = 0.3;
 
 /// The stabiliser's longest string, in points.
 const MAX_STABILISER: f32 = 120.0;
+
+/// Pen pressure scales the brush's strength and its size: its size at the
+/// lightest touch, as a share of its full size.
+const MIN_PRESSURE_SIZE: f32 = 0.2;
+
+/// How long the size and strength show by the brush after they change,
+/// in seconds.
+const READOUT: f64 = 1.2;
 
 /// Each brush with its letter key and starting strength, in `Brush::ALL`
 /// order; its digit is in `DIGITS`.
@@ -140,10 +148,49 @@ fn falloff_curve(ui: &mut egui::Ui, falloff: Falloff) {
     painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, ink)));
 }
 
+fn buildup_name(tr: &Tr, buildup: Buildup) -> &'static str {
+    match buildup {
+        Buildup::Layer => tr.mesh.buildup_layer,
+        Buildup::Accumulate => tr.mesh.buildup_accumulate,
+    }
+}
+
+/// A heading, then its options in a row; the chosen one underlined.
+fn choices<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    heading: &str,
+    options: &[(&str, T)],
+    chosen: &mut T,
+) {
+    ui::section(ui, heading);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
+        for &(text, value) in options {
+            if ui::choice(ui, text, *chosen == value).clicked() {
+                *chosen = value;
+            }
+        }
+    });
+}
+
+/// What it switches, then on / off.
+fn switch(ui: &mut egui::Ui, tr: &Tr, on: &mut bool, label: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
+        let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+        ui.label(egui::RichText::new(label).color(muted));
+        for (text, value) in [(tr.mesh.switch_on, true), (tr.mesh.switch_off, false)] {
+            if ui::choice(ui, text, *on == value).clicked() {
+                *on = value;
+            }
+        }
+    });
+}
+
 fn falloff_name(tr: &Tr, falloff: Falloff) -> &'static str {
     match falloff {
         Falloff::Smooth => tr.mesh.falloff_smooth,
-        Falloff::Linear => tr.mesh.falloff_linear,
+        Falloff::Flat => tr.mesh.falloff_flat,
         Falloff::Sharp => tr.mesh.falloff_sharp,
     }
 }
@@ -156,6 +203,10 @@ pub(super) struct ToolSettings {
     pub(super) strength: [f32; 8],
     /// How each tool fades towards its rim, in `Brush::ALL` order.
     pub(super) falloff: [Falloff; 8],
+    /// Whether the clay builds more where a stroke passes again.
+    pub(super) buildup: Buildup,
+    /// When the size or strength last changed, to show them by the brush.
+    readout: Option<f64>,
     pub(super) symmetry: bool,
     /// Stroke stabiliser: how far the brush trails the pointer, in
     /// points; 0 is off.
@@ -196,6 +247,8 @@ impl Default for ToolSettings {
             radius: 48.0,
             strength: BRUSHES.map(|(_, _, strength)| strength),
             falloff: [Falloff::Smooth; 8],
+            buildup: Buildup::Layer,
+            readout: None,
             // A study from a reference is rarely symmetric: mirroring is
             // asked for, not assumed.
             symmetry: false,
@@ -346,11 +399,26 @@ impl App {
             }
             self.level_shortcuts(ui);
         }
+        // Strength first: plain [ ] would take Shift + [ ] too. Browsers
+        // name the shifted keys { }, the desktop [ ] with Shift.
+        let index = tool_index(self.tool.tool);
+        let strength = self.tool.strength[index];
+        if pressed(M::SHIFT, Key::OpenBracket) || pressed(M::NONE, Key::OpenCurlyBracket) {
+            self.tool.strength[index] = (strength - 0.05).max(0.0);
+        } else if pressed(M::SHIFT, Key::CloseBracket) || pressed(M::NONE, Key::CloseCurlyBracket) {
+            self.tool.strength[index] = (strength + 0.05).min(1.0);
+        }
+        let radius = self.tool.radius;
         if pressed(M::NONE, Key::OpenBracket) {
             self.tool.radius = (self.tool.radius / 1.2).max(4.0);
         }
         if pressed(M::NONE, Key::CloseBracket) {
             self.tool.radius = (self.tool.radius * 1.2).min(400.0);
+        }
+        if self.tool.radius != radius || self.tool.strength[index] != strength {
+            self.tool.readout = Some(self.now);
+            // The brush may have been drawn already this frame.
+            ui.ctx().request_repaint();
         }
     }
 
@@ -672,13 +740,20 @@ impl App {
     /// falloff and symmetry.
     fn tool_settings(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
-        ui::slider(ui, tr.size, &mut self.tool.radius, 4.0..=400.0, |v| {
+        let tool = self.tool.tool;
+        let index = tool_index(tool);
+        let size = ui::slider(ui, tr.size, &mut self.tool.radius, 4.0..=400.0, |v| {
             format!("{v:.0}")
         });
-        let strength = &mut self.tool.strength[tool_index(self.tool.tool)];
-        ui::slider(ui, tr.strength, strength, 0.0..=1.0, |v| {
+        let strength = &mut self.tool.strength[index];
+        let strength = ui::slider(ui, tr.strength, strength, 0.0..=1.0, |v| {
             format!("{:.0}%", v * 100.0)
         });
+        if size.changed() || strength.changed() {
+            self.tool.readout = Some(self.now);
+            // The brush may have been drawn already this frame.
+            ui.ctx().request_repaint();
+        }
         let off = tr.mesh.off;
         let stabiliser = &mut self.tool.stabiliser;
         ui::slider(
@@ -698,6 +773,10 @@ impl App {
         if *stabiliser < 0.5 {
             *stabiliser = 0.0;
         }
+        if tool == Brush::Clay {
+            let options = Buildup::ALL.map(|b| (buildup_name(tr, b), b));
+            choices(ui, tr.mesh.buildup, &options, &mut self.tool.buildup);
+        }
         ui::section(ui, tr.mesh.falloff);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
@@ -710,9 +789,7 @@ impl App {
         });
         falloff_curve(ui, self.tool.falloff[tool_index(self.tool.tool)]);
         ui.add_space(10.0);
-        if ui::choice(ui, tr.symmetry, self.tool.symmetry).clicked() {
-            self.tool.symmetry = !self.tool.symmetry;
-        }
+        switch(ui, tr, &mut self.tool.symmetry, tr.mesh.symmetry_x);
     }
 
     /// The voxel remesh and the mesh from the reference, which share its
@@ -756,13 +833,15 @@ impl App {
     }
 
     fn pressure(&self) -> f32 {
-        self.input.last.map_or(1.0, |e| {
-            if e.kind == PointerKind::Mouse {
-                1.0
-            } else {
-                e.pressure
-            }
-        })
+        self.input.last.map_or(1.0, |e| e.brush_pressure())
+    }
+
+    /// True while the pen is used with its eraser end: the brush does
+    /// its opposite action, as with the invert key.
+    fn erasing(&self) -> bool {
+        self.input
+            .last
+            .is_some_and(|e| e.kind == PointerKind::Pen && e.eraser)
     }
 
     pub(super) fn start_stroke(&mut self, rect: Rect, pos: Pos2, hit: Hit) {
@@ -825,6 +904,9 @@ impl App {
             },
         );
         for (pos, pressure) in dabs {
+            // The last dab moved the clay out of its boxes: a ray through
+            // them would miss it, and find the far side of the form.
+            self.sculpt.refresh();
             if let Some(hit) = self.pick(rect, pos) {
                 self.dab_at(rect, pressure, hit, direction);
             }
@@ -849,22 +931,25 @@ impl App {
         }
     }
 
-    /// One dab: pen pressure scales the tool's strength.
+    /// One dab: pen pressure scales the tool's strength and size.
     fn dab_at(&mut self, rect: Rect, pressure: f32, hit: Hit, direction: Vec3) {
         let m = self.ctx.input(|i| i.modifiers.into());
         let tool = self.held_tool();
+        let index = tool_index(tool);
         let pressure = pressure.clamp(0.0, 1.0);
-        let strength = self.tool.strength[tool_index(tool)] * pressure;
+        let strength = self.tool.strength[index] * pressure;
+        let size = MIN_PRESSURE_SIZE + (1.0 - MIN_PRESSURE_SIZE) * pressure;
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
-        self.sculpt.set_falloff(self.tool.falloff[tool_index(tool)]);
+        self.sculpt.set_falloff(self.tool.falloff[index]);
         self.sculpt.dab(Dab {
             brush: tool,
             centre: hit.point,
-            radius: self.tool.radius * scale,
+            radius: self.tool.radius * size * scale,
             strength,
-            invert: self.nav.inverts(m),
+            invert: self.nav.inverts(m) || self.erasing(),
             symmetry: self.tool.symmetry,
             direction,
+            buildup: self.tool.buildup,
         });
     }
 
@@ -879,9 +964,12 @@ impl App {
     }
 
     /// The tool outline, while the pointer is over the clay view: a circle
-    /// lying on the clay under the brush, or a circle on the screen where
-    /// there is no clay. In a stabilised stroke the brush trails the
-    /// pointer, and a thin line joins them.
+    /// lying on the clay under the brush, or a circle on the screen where there is no clay. A fainter ring inside marks
+    /// where the brush works at half strength. The outline is dashed while
+    /// the brush does its opposite action, and a held tool (Shift smooths)
+    /// shows its icon. In a stabilised stroke the brush trails the pointer,
+    /// and a thin line joins them. Just after the size or strength
+    /// changed, both show by the brush.
     pub(super) fn tool_cursor(&self, ui: &egui::Ui, rect: Rect) {
         let Some(screen) = ui
             .input(|i| i.pointer.hover_pos())
@@ -899,6 +987,10 @@ impl App {
         let ink = theme::VIEW_INK.gamma_multiply(0.6);
         let line = Stroke::new(1.0, ink);
         let painter = ui.painter().with_clip_rect(rect);
+        let held = self.held_tool();
+        let falloff = self.tool.falloff[tool_index(held)];
+        let m = ui.input(|i| i.modifiers.into());
+        let dashed = held != Brush::Mask && (self.nav.inverts(m) || self.erasing());
         // Strokes work in the rendered view's points; the mirror view shows
         // it flipped, and `view_pos` maps either way.
         let pointer = self.view_pos(rect, screen);
@@ -912,23 +1004,50 @@ impl App {
             painter.circle_filled(screen, 1.5, ink);
         }
         let camera = &self.cameras[SCULPT];
+        let outline = |ring: Vec<Pos2>, line: Stroke| {
+            let mut ring: Vec<Pos2> = ring.into_iter().map(|p| self.view_pos(rect, p)).collect();
+            if dashed {
+                ring.push(ring[0]);
+                painter.extend(egui::Shape::dashed_line(&ring, line, 4.0, 3.0));
+            } else {
+                painter.add(egui::Shape::closed_line(ring, line));
+            }
+        };
         let draw = |ring: Vec<Pos2>, tick: [Pos2; 2], line: Stroke| {
-            let ring = ring.into_iter().map(|p| self.view_pos(rect, p)).collect();
-            painter.add(egui::Shape::closed_line(ring, line));
+            outline(ring, line);
             painter.line_segment(tick.map(|p| self.view_pos(rect, p)), line);
         };
+        let half = half_weight(falloff);
+        let faint = Stroke::new(1.0, ink.gamma_multiply(0.45));
         let hit = self.pick(rect, brush);
         // The brush's size on the clay, in the clay's units.
         let radius =
             hit.map(|hit| self.tool.radius * camera.world_per_point(hit.point, rect.height()));
-        let outline = hit.zip(radius).and_then(|(hit, radius)| {
+        let on_clay = hit.zip(radius).and_then(|(hit, radius)| {
             let normal = self.sculpt.normal_at(&hit);
-            surface_outline(camera, rect, hit.point, normal, radius)
+            let full = surface_outline(camera, rect, hit.point, normal, radius)?;
+            let inner = surface_outline(camera, rect, hit.point, normal, radius * half);
+            Some((full, inner))
         });
-        match outline {
-            Some((ring, tick)) => draw(ring, tick, line),
+        match on_clay {
+            Some(((ring, tick), inner)) => {
+                draw(ring, tick, line);
+                if let Some((inner, _)) = inner {
+                    outline(inner, faint);
+                }
+            }
             None => {
-                painter.circle_stroke(centre, self.tool.radius, line);
+                let r = self.tool.radius;
+                let ring = |r: f32| -> Vec<Pos2> {
+                    (0..CURSOR_SEGMENTS)
+                        .map(|i| {
+                            let a = i as f32 / CURSOR_SEGMENTS as f32 * std::f32::consts::TAU;
+                            brush + egui::vec2(a.cos(), a.sin()) * r
+                        })
+                        .collect()
+                };
+                outline(ring(r), line);
+                outline(ring(r * half), faint);
             }
         }
         // With symmetry on, the other side the stroke reaches, in grey.
@@ -947,7 +1066,51 @@ impl App {
             draw(ring, tick, Stroke::new(1.0, grey));
         }
         painter.circle_filled(centre, 1.5, ink);
+        // A tool held by a key, not the one chosen: its icon by the brush.
+        if held != self.tool.tool {
+            let icon = Rect::from_min_size(centre + egui::vec2(8.0, -22.0), egui::vec2(14.0, 14.0));
+            brush_icon(held)(&painter, icon, ink);
+        }
+        if let Some(at) = self.tool.readout {
+            let age = self.now - at;
+            if age < READOUT {
+                let tr = self.lang.tr();
+                let strength = self.tool.strength[tool_index(self.tool.tool)];
+                let text = format!(
+                    "{} {:.0}   {} {:.0}%",
+                    tr.size,
+                    self.tool.radius,
+                    tr.strength,
+                    strength * 100.0
+                );
+                let font = egui::TextStyle::Small.resolve(ui.style());
+                painter.text(
+                    centre + egui::vec2(10.0, 10.0),
+                    egui::Align2::LEFT_TOP,
+                    text,
+                    font,
+                    theme::VIEW_INK,
+                );
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(READOUT - age));
+            }
+        }
     }
+}
+
+/// How far out, as a share of the radius, a brush with `falloff` works at
+/// half strength.
+fn half_weight(falloff: Falloff) -> f32 {
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..20 {
+        let mid = (lo + hi) / 2.0;
+        if falloff.weight(mid, 1.0) > 0.5 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) / 2.0
 }
 
 /// A point in the world as seen in a view of `rect`, in its points (before
@@ -1019,6 +1182,14 @@ mod tests {
 
     fn view() -> Rect {
         Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(800.0, 600.0))
+    }
+
+    #[test]
+    fn the_inner_ring_is_where_the_brush_works_at_half_strength() {
+        for falloff in Falloff::ALL {
+            let t = half_weight(falloff);
+            assert!((falloff.weight(t, 1.0) - 0.5).abs() < 1e-3, "{falloff:?}");
+        }
     }
 
     #[test]
@@ -1263,5 +1434,54 @@ mod tests {
             carry = walk(a, pa, carry, b, pb, spacing, |at, _| raw.push(at));
         }
         assert!(raw.iter().any(|at| at.y.abs() > 2.0));
+    }
+    #[test]
+    fn a_fast_stroke_leaves_the_far_side_of_the_clay_alone() {
+        use super::super::study::tests::Harness;
+        use crate::{InputEvent, PointerEvent, PointerKind, PointerPhase};
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let rect = h.app.view_rects[SCULPT];
+        let camera = h.app.cameras[SCULPT];
+        let towards_eye = camera.eye() - camera.target;
+        let before = h.app.sculpt.mesh.positions.clone();
+        // A quick pen stroke: many samples in one frame, each dab lifting
+        // the clay where the next one looks for it.
+        let event = |phase, x: f32| {
+            InputEvent::Pointer(PointerEvent {
+                id: 1,
+                kind: PointerKind::Pen,
+                phase,
+                pos: [x, rect.center().y],
+                button: matches!(phase, PointerPhase::Down | PointerPhase::Up)
+                    .then_some(crate::Button::Primary),
+                pressure: if phase == PointerPhase::Up { 0.0 } else { 1.0 },
+                eraser: false,
+            })
+        };
+        let x0 = rect.center().x - 80.0;
+        h.app.push_event(event(PointerPhase::Move, x0));
+        h.frames(1);
+        h.app.push_event(event(PointerPhase::Down, x0));
+        h.frames(1);
+        for i in 1..=40 {
+            h.app
+                .push_event(event(PointerPhase::Move, x0 + i as f32 * 4.0));
+        }
+        h.frames(1);
+        h.app.push_event(event(PointerPhase::Up, x0 + 160.0));
+        h.frames(1);
+        let after = &h.app.sculpt.mesh.positions;
+        let moved = |far: bool| {
+            before
+                .iter()
+                .zip(after)
+                .filter(|(a, b)| a != b && ((**a - camera.target).dot(towards_eye) < 0.0) == far)
+                .count()
+        };
+        assert!(moved(false) > 100, "the stroke built nothing");
+        assert_eq!(moved(true), 0, "clay moved on the far side");
     }
 }
