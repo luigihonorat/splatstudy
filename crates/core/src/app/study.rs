@@ -86,7 +86,7 @@ pub(super) struct Measure {
     /// so the mirror view flips it with the form it measures.
     pub(super) lines: [Option<[Vec2; 2]>; 2],
     /// The view a line is being dragged in.
-    drawing: Option<usize>,
+    pub(super) drawing: Option<usize>,
 }
 
 /// Lines shorter than this, in points, are a click: they clear the view's line.

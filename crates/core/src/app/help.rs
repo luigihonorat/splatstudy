@@ -1,22 +1,19 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! Getting started, the first-run hint and preferences, plus what the shells
-//! tell the app about the session: options from the page's URL (or the
-//! command line) and where a text field is being edited, for the IME.
+//! tell the app about the session: where a text field is being edited, for
+//! the IME. The options in the page's URL are in `start`.
 
 use egui::{Align2, RichText};
 
 use super::sculpting::{BRUSHES, brush_digit, brush_name};
-use super::study::Layout;
-use super::{App, Request, SCULPT};
-use crate::input::FilePurpose;
+use super::{App, SCULPT};
 use crate::navigation::NavStyle;
-use crate::reference::samples::Sample;
 use crate::ui::i18n::Lang;
 use crate::ui::theme::ThemeMode;
 use crate::ui::{self, menu, theme};
 
-/// The getting started window and what the URL asked for.
+/// The getting started window and the first-run hint.
 #[derive(Default)]
 pub(super) struct HelpState {
     show_getting_started: bool,
@@ -38,42 +35,6 @@ pub struct TextField {
 }
 
 impl App {
-    /// Applies options given in the page's query string (`?a=1&b=2`, with or
-    /// without the `?`) or, on desktop, on the command line:
-    ///
-    /// - `sample=<id>` loads a bundled sample (see
-    ///   [`SAMPLES`](crate::reference::samples::SAMPLES)) as the reference,
-    ///   through [`Request::Fetch`].
-    /// - `view=<name>[,<name>…]` (repeatable) turns study aids on:
-    ///   `silhouette`, `ghost`, `mirror`, `plumb`, `grid`, `link`, `swap`,
-    ///   `ortho`, and the layout `both`, `sculpt` or `reference`. The
-    ///   aids each view has of its own turn on in both. Unknown names are
-    ///   logged and skipped.
-    ///
-    /// `lang` and `debug` are read by the shells themselves.
-    pub fn apply_url_options(&mut self, query: &str) {
-        for (key, value) in query_pairs(query) {
-            match key {
-                "sample" => match Sample::by_id(value) {
-                    Some(sample) => self.request(Request::Fetch {
-                        url: sample.path(),
-                        purpose: FilePurpose::Reference,
-                    }),
-                    None => log::warn!("no sample {value:?}"),
-                },
-                "view" => {
-                    for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-                        if !self.apply_view(&name.to_ascii_lowercase()) {
-                            log::warn!("no view {name:?}");
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.dirty = true;
-    }
-
     /// The preferences that outlive a session, as `key=value` pairs joined
     /// by `&`: `lang=ja&theme=dark&nav=zbrush`, then `&hide=crop,credit`
     /// when the window menu took groups out of the panels. The shells store this
@@ -126,27 +87,6 @@ impl App {
             }
         }
         self.dirty = true;
-    }
-
-    /// Turns on one study aid by its URL name, in both views; false if
-    /// there is none.
-    fn apply_view(&mut self, name: &str) -> bool {
-        let st = &mut self.study;
-        match name {
-            "silhouette" => st.views.iter_mut().for_each(|v| v.silhouette = true),
-            "ghost" => st.ghost = true,
-            "mirror" => st.views.iter_mut().for_each(|v| v.mirror = true),
-            "plumb" => st.views.iter_mut().for_each(|v| v.plumb = true),
-            "grid" => st.views.iter_mut().for_each(|v| v.grid = true),
-            "ortho" => self.cameras.iter_mut().for_each(|c| c.ortho = true),
-            "link" => st.link = true,
-            "swap" => st.swapped = true,
-            "both" => st.layout = Layout::Both,
-            "sculpt" => st.layout = Layout::Sculpt,
-            "reference" => st.layout = Layout::Reference,
-            _ => return false,
-        }
-        true
     }
 
     /// The shell knows whether this is the first visit (it keeps a flag in
@@ -291,7 +231,7 @@ impl App {
 }
 
 /// `key=value` pairs of a query string; a bare key has an empty value.
-fn query_pairs(query: &str) -> impl Iterator<Item = (&str, &str)> {
+pub(super) fn query_pairs(query: &str) -> impl Iterator<Item = (&str, &str)> {
     query
         .trim_start_matches('?')
         .split('&')

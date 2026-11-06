@@ -22,7 +22,7 @@ pub mod sculpt;
 pub mod ui;
 pub mod voxel;
 
-pub use app::{App, FrameOutput, Request};
+pub use app::{App, FrameOutput, Request, StartOptions};
 pub use egui::{CursorIcon, Key};
 pub use input::{
     Button, FilePurpose, InputEvent, Modifiers, PointerEvent, PointerKind, PointerPhase,
