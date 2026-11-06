@@ -37,6 +37,18 @@ pub(super) fn viewpoints(tr: &Tr) -> [(&'static str, Option<u8>, f32, f32); 7] {
     ]
 }
 
+/// The viewpoints' names in URL options (`view=three-quarter`), in
+/// `viewpoints` order.
+pub(super) const VIEWPOINT_IDS: [&str; 7] = [
+    "front",
+    "back",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "three-quarter",
+];
+
 /// A numpad key as the menus and the shortcuts window show it.
 pub(super) fn numpad_name(digit: u8) -> String {
     format!("Numpad {digit}")

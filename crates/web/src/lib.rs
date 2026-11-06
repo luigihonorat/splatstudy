@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use splatstudy_core::{
     App, Button, CursorIcon, InputEvent, Key, Lang, Modifiers, PointerEvent, PointerKind,
-    PointerPhase, Request,
+    PointerPhase, Request, StartOptions,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -127,8 +127,12 @@ async fn run() -> Result<(), JsValue> {
     };
 
     // `?lang=fr` overrides the browser's language; `?debug` shows pen data;
-    // the app reads the rest (`?sample=`, `?view=`).
+    // the app reads the rest (`?sample=`, `?view=`…, see `StartOptions`).
     let search = window.location().search().unwrap_or_default();
+    // A URL that sets the views up (a shot of the demo) opens a scratch
+    // session: the last one neither comes back over it, as with `?fresh`,
+    // nor is replaced by it.
+    let scratch = StartOptions::parse(&search).sets_state();
     let lang = query_value(&search, "lang")
         .or_else(|| window.navigator().language())
         .map(|t| Lang::from_tag(&t))
@@ -147,7 +151,7 @@ async fn run() -> Result<(), JsValue> {
     }
     // The last session first (unless `?fresh`): its scene now, its
     // reference, which can take seconds to read, after a first frame.
-    let start = storage::begin_restore(&search).await;
+    let start = storage::begin_restore(&search, scratch).await;
     let preferences = app.preferences();
     let mut shell = Shell {
         app,
@@ -193,12 +197,16 @@ async fn run() -> Result<(), JsValue> {
         files.handle(request);
     }
     let text = ime::TextInput::new(&document, &canvas, deliver)?;
-    let s = shell.clone();
-    storage::Autosave::start(Rc::new(move |f| {
-        if let Ok(mut shell) = s.try_borrow_mut() {
-            f(&mut shell.app);
-        }
-    }))?;
+    if scratch {
+        log::info!("options in the URL: a scratch session, without autosave");
+    } else {
+        let s = shell.clone();
+        storage::Autosave::start(Rc::new(move |f| {
+            if let Ok(mut shell) = s.try_borrow_mut() {
+                f(&mut shell.app);
+            }
+        }))?;
+    }
     animate(shell, files, text, pending);
     let _ = canvas.focus();
     Ok(())

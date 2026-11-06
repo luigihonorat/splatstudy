@@ -289,10 +289,10 @@ pub enum Start {
     Scene(Vec<u8>),
 }
 
-/// Reads the last session's scene, unless the URL has `?fresh` or the
-/// last restore never finished.
-pub async fn begin_restore(search: &str) -> Start {
-    if crate::query_value(search, "fresh").is_some() {
+/// Reads the last session's scene, unless the URL has `?fresh` (or the
+/// shell says `fresh`) or the last restore never finished.
+pub async fn begin_restore(search: &str, fresh: bool) -> Start {
+    if fresh || crate::query_value(search, "fresh").is_some() {
         return Start::Nothing;
     }
     let scene = read_scene().await;

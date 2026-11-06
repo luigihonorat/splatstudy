@@ -18,6 +18,7 @@
 //! - `export`: exporting the timelapse
 //! - `screenshot`: a picture of the views
 //! - `help`: getting started and preferences
+//! - `start`: the options in the page's URL, applied at start
 //! - `menus` and `shortcuts`: shared; they call a hook in each part's file,
 //!   so a part grows without touching them.
 
@@ -31,6 +32,8 @@ mod reference;
 mod screenshot;
 mod sculpting;
 mod shortcuts;
+mod start;
+pub use start::StartOptions;
 mod study;
 mod toolbar;
 mod views;

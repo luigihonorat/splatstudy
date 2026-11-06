@@ -54,7 +54,10 @@ For the browser build:
   `DataTransfer` and dispatch a `drop` `DragEvent` on the canvas. Generate
   tiny fixtures in the script (an OBJ octahedron is 14 lines); never copy
   files from elsewhere.
-- **URL options:** `?sample=<id>` loads a bundled sample, `?view=silhouette,ghost,…`
-  turns study aids on, `?debug` shows the pen HUD.
+- **URL options:** `?sample=<id>` loads a bundled sample, `?debug` shows the
+  pen HUD. `?view=`, `?sculpt=`, `?reference=`, `?grid=`, `?hide=`, `?tool=`,
+  `?symmetry`, `?timer=` set the viewpoints, aids, panels and tool at start
+  (all listed in `crates/core/src/app/start.rs`); with any of them the page
+  opens a scratch session, without restoring or writing the autosave.
 - Notices last 4 s after the frame that posts them; take the screenshot
   soon after the action.
