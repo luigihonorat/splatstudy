@@ -41,18 +41,53 @@ EDGE = os.environ.get(
 )
 
 
-def devtools_port(profile, edge):
-    """Edge writes the port it picked into the profile once it listens."""
+def devtools_port(profile):
+    """Edge writes the port it picked into the profile once it listens.
+
+    msedge.exe can be only a launcher that starts the real browser and exits
+    (for example while an update is pending), so its exit is not a failure.
+    """
     path = os.path.join(profile, "DevToolsActivePort")
-    for _ in range(100):
-        if edge.poll() is not None:
-            raise SystemExit("Edge exited before DevTools was ready")
+    for _ in range(200):
         try:
             with open(path) as f:
                 return int(f.readline())
         except (OSError, ValueError):
             time.sleep(0.1)
     raise SystemExit("Edge never opened a DevTools port")
+
+
+def close_edge(port, profile, edge):
+    """Closes the real browser, not just the launcher we started, then kills
+    anything still using the profile so it can be deleted."""
+    if port:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=5) as r:
+                browser = websocket.create_connection(
+                    json.load(r)["webSocketDebuggerUrl"], timeout=5
+                )
+            browser.send(json.dumps({"id": 1, "method": "Browser.close"}))
+            browser.close()
+        except (OSError, KeyError, ValueError, websocket.WebSocketException):
+            pass
+    edge.terminate()
+    try:
+        edge.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        edge.kill()
+    if os.name == "nt":
+        # Any msedge.exe whose command line names this profile is ours.
+        needle = profile.replace("'", "''")
+        subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*{needle}*' }} | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 def page_socket(port):
@@ -150,6 +185,9 @@ def main():
             "--enable-unsafe-webgpu",
             "--no-first-run",
             "--disable-sync",
+            # Otherwise every fresh profile downloads ~0.5 GB of components
+            # (AI models, Widevine) that a screenshot never uses.
+            "--disable-component-update",
             f"--user-data-dir={profile}",
             "--remote-debugging-port=0",
             "about:blank",
@@ -157,8 +195,10 @@ def main():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    port = None
     try:
-        page = Page(page_socket(devtools_port(profile, edge)))
+        port = devtools_port(profile)
+        page = Page(page_socket(port))
         page.call("Runtime.enable")
         page.call("Page.enable")
         page.call(
@@ -212,13 +252,16 @@ def main():
         print("saved", args.out)
         page.ws.close()
     finally:
-        edge.terminate()
-        try:
-            edge.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            edge.kill()
+        close_edge(port, profile, edge)
         if not args.profile:
-            shutil.rmtree(profile, ignore_errors=True)
+            # Edge can hold files for a moment after it exits.
+            for _ in range(20):
+                shutil.rmtree(profile, ignore_errors=True)
+                if not os.path.exists(profile):
+                    break
+                time.sleep(0.25)
+            else:
+                print("warning: could not delete", profile, file=sys.stderr)
 
 
 if __name__ == "__main__":
