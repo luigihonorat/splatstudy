@@ -904,6 +904,9 @@ impl App {
             },
         );
         for (pos, pressure) in dabs {
+            // The last dab moved the clay out of its boxes: a ray through
+            // them would miss it, and find the far side of the form.
+            self.sculpt.refresh();
             if let Some(hit) = self.pick(rect, pos) {
                 self.dab_at(rect, pressure, hit, direction);
             }
@@ -1445,4 +1448,53 @@ mod tests {
         }
         assert!(raw.iter().any(|at| at.y.abs() > 2.0));
     }
+    #[test]
+    fn a_fast_stroke_leaves_the_far_side_of_the_clay_alone() {
+        use super::super::study::tests::Harness;
+        use crate::{InputEvent, PointerEvent, PointerKind, PointerPhase};
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let rect = h.app.view_rects[SCULPT];
+        let camera = h.app.cameras[SCULPT];
+        let towards_eye = camera.eye() - camera.target;
+        let before = h.app.sculpt.mesh.positions.clone();
+        // A quick pen stroke: many samples in one frame, each dab lifting
+        // the clay where the next one looks for it.
+        let event = |phase, x: f32| {
+            InputEvent::Pointer(PointerEvent {
+                id: 1,
+                kind: PointerKind::Pen,
+                phase,
+                pos: [x, rect.center().y],
+                button: matches!(phase, PointerPhase::Down | PointerPhase::Up)
+                    .then_some(crate::Button::Primary),
+                pressure: if phase == PointerPhase::Up { 0.0 } else { 1.0 },
+                eraser: false,
+            })
+        };
+        let x0 = rect.center().x - 80.0;
+        h.app.push_event(event(PointerPhase::Move, x0));
+        h.frames(1);
+        h.app.push_event(event(PointerPhase::Down, x0));
+        h.frames(1);
+        for i in 1..=40 {
+            h.app.push_event(event(PointerPhase::Move, x0 + i as f32 * 4.0));
+        }
+        h.frames(1);
+        h.app.push_event(event(PointerPhase::Up, x0 + 160.0));
+        h.frames(1);
+        let after = &h.app.sculpt.mesh.positions;
+        let moved = |far: bool| {
+            before
+                .iter()
+                .zip(after)
+                .filter(|(a, b)| a != b && ((**a - camera.target).dot(towards_eye) < 0.0) == far)
+                .count()
+        };
+        assert!(moved(false) > 100, "the stroke built nothing");
+        assert_eq!(moved(true), 0, "clay moved on the far side");
+    }
 }
+
