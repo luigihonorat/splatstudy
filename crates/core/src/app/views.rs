@@ -258,14 +258,27 @@ impl App {
                 );
             }
         }
-        // Empty reference view: say what can go there.
+        // Empty reference view: say what can go there, with a link to the
+        // gallery; or that a sample is on its way.
         let reference = rects[REFERENCE];
+        let loading = self.loading_text();
         if shown(reference) && !self.has_reference() {
             painter.with_clip_rect(reference).text(
                 reference.center(),
                 Align2::CENTER_CENTER,
-                tr.drop_hint,
+                loading.as_deref().unwrap_or(tr.drop_hint),
                 fonts::light(16.0),
+                theme::VIEW_TEXT,
+            );
+            self.gallery_link(ui, reference.center() + egui::vec2(0.0, 18.0));
+        } else if let Some(text) = loading
+            && shown(reference)
+        {
+            painter.with_clip_rect(reference).text(
+                reference.center_top() + egui::vec2(0.0, 12.0),
+                Align2::CENTER_TOP,
+                text,
+                fonts::regular(12.0),
                 theme::VIEW_TEXT,
             );
         }

@@ -51,6 +51,8 @@ pub(super) struct ReferenceState {
     /// when the file has view-dependent colour. Off by default; kept from
     /// one reference to the next, not in the scene.
     base_colour_only: bool,
+    /// The bundled casts to choose from, and the one on its way.
+    pub(super) gallery: super::gallery::GalleryState,
 }
 
 enum Drawn {

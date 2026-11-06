@@ -105,6 +105,18 @@ pub enum FilePurpose {
     Reference,
     Sculpt,
     Scene,
+    /// A sample's picture for the gallery, fetched next to the page. Many
+    /// are fetched at once, and none of them replaces another fetch or
+    /// read in progress. Empty when the fetch failed.
+    Thumbnail,
+}
+
+impl FilePurpose {
+    /// Whether a newer file of this kind makes an older one, still being
+    /// read or fetched, stale: true for everything the user opens.
+    pub fn supersedes(self) -> bool {
+        self != FilePurpose::Thumbnail
+    }
 }
 
 impl From<egui::Modifiers> for Modifiers {

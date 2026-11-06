@@ -8,8 +8,7 @@ use egui::{Align2, RichText};
 
 use super::sculpting::{BRUSHES, brush_digit, brush_name};
 use super::study::Layout;
-use super::{App, Request, SCULPT};
-use crate::input::FilePurpose;
+use super::{App, SCULPT};
 use crate::navigation::NavStyle;
 use crate::reference::samples::Sample;
 use crate::ui::i18n::Lang;
@@ -55,10 +54,7 @@ impl App {
         for (key, value) in query_pairs(query) {
             match key {
                 "sample" => match Sample::by_id(value) {
-                    Some(sample) => self.request(Request::Fetch {
-                        url: sample.path(),
-                        purpose: FilePurpose::Reference,
-                    }),
+                    Some(sample) => self.load_sample(sample),
                     None => log::warn!("no sample {value:?}"),
                 },
                 "view" => {
