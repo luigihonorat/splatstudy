@@ -34,7 +34,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-14, ubuntu-24.04]
+        # Windows only while the repo is private (macOS minutes count 10x);
+        # add macos-14 and ubuntu-24.04 back once it is public.
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
