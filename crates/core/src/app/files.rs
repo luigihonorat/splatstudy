@@ -118,6 +118,7 @@ fn extensions_for(purpose: FilePurpose) -> &'static [&'static str] {
         FilePurpose::Scene => &[SCENE_EXTENSION],
         FilePurpose::Reference => REFERENCE_EXTENSIONS,
         FilePurpose::Sculpt => meshio::EXTENSIONS,
+        FilePurpose::Thumbnail => &["png"],
         FilePurpose::Any => &[],
     }
 }
@@ -153,6 +154,11 @@ impl App {
             FilePurpose::Any => purpose_of(name),
             purpose => purpose,
         };
+        // The sample on its way has arrived, or this file took its place
+        // (the shell drops a fetch that a newer file overtakes).
+        if purpose.supersedes() {
+            self.reference.gallery.loading = None;
+        }
         match purpose {
             FilePurpose::Scene => self.open_scene(name, bytes),
             FilePurpose::Reference => {
@@ -160,6 +166,7 @@ impl App {
                 self.load_reference(name, bytes);
             }
             FilePurpose::Sculpt => self.import_sculpt(name, bytes),
+            FilePurpose::Thumbnail => self.on_thumbnail(name, &bytes),
             FilePurpose::Any => self.cannot_open(name),
         }
     }
@@ -467,6 +474,7 @@ impl App {
                 extensions: REFERENCE_EXTENSIONS,
             });
         }
+        self.gallery_items(ui);
         if menu::action(ui, true, tr.import_sculpt, "") {
             self.ask_import_sculpt();
         }

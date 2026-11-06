@@ -240,22 +240,25 @@ fn read_all(files: Vec<File>, purpose: FilePurpose, deliver: Deliver) {
     });
 }
 
-/// Fetches a file shipped next to the page and hands it to the app.
+/// Fetches a file shipped next to the page and hands it to the app, empty
+/// if it couldn't be fetched, so the app can say so. Thumbnails come many
+/// at once and don't make each other, or a sample on its way, stale.
 fn fetch(url: String, purpose: FilePurpose, deliver: Deliver) {
-    let ticket = ticket();
+    let ticket = purpose.supersedes().then(ticket);
     wasm_bindgen_futures::spawn_local(async move {
         let fetched = fetch_bytes(&url).await;
-        if !is_latest(ticket) {
+        if ticket.is_some_and(|t| !is_latest(t)) {
             return;
         }
-        match fetched {
-            Ok(bytes) => deliver(InputEvent::File {
-                purpose,
-                name: file_name(&url).to_owned(),
-                bytes,
-            }),
-            Err(err) => log::error!("could not fetch {url}: {err:?}"),
-        }
+        let bytes = fetched.unwrap_or_else(|err| {
+            log::error!("could not fetch {url}: {err:?}");
+            Arc::from([])
+        });
+        deliver(InputEvent::File {
+            purpose,
+            name: file_name(&url).to_owned(),
+            bytes,
+        });
     });
 }
 

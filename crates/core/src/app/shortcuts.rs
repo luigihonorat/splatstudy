@@ -177,6 +177,7 @@ impl App {
         self.show_about = open;
 
         self.help_windows(ui);
+        self.gallery_window(ui);
         self.export_window(ui);
         self.screenshot_step(ui);
     }

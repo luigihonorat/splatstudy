@@ -10,6 +10,7 @@
 //! - `sculpting`: tools, strokes and the sculpt panel
 //! - `playback`: watching the timelapse
 //! - `reference`: the reference and its panel
+//! - `gallery`: the bundled casts to choose a reference from
 //! - `study`: comparison aids (camera link, silhouette, ghost, guides, timer)
 //! - `toolbar`: each view's toolbar of view options
 //! - `panels`: hiding the side panels (Tab, Shift+Tab) and choosing their
@@ -24,6 +25,7 @@
 
 mod export;
 mod files;
+mod gallery;
 mod help;
 mod menus;
 mod panels;

@@ -41,8 +41,7 @@
 use super::help::query_pairs;
 use super::study::{GRID_DIVISIONS, Layout, TIMER_MINUTES, TIMER_ROUNDS};
 use super::views::{VIEWPOINT_IDS, viewpoints};
-use super::{App, REFERENCE, Request, SCULPT};
-use crate::input::FilePurpose;
+use super::{App, REFERENCE, SCULPT};
 use crate::reference::samples::Sample;
 use crate::render::clay::Lighting;
 use crate::sculpt::Brush;
@@ -308,7 +307,8 @@ fn parse_timer(value: &str) -> Option<(u32, u32)> {
 impl App {
     /// Applies the options in the page's query string or, on desktop, on
     /// the command line, joined by `&`: see [`StartOptions`]. The sample
-    /// is fetched through [`Request::Fetch`]; the rest applies now.
+    /// is fetched as the gallery does, showing it loading; the rest applies
+    /// now.
     pub fn apply_url_options(&mut self, query: &str) {
         self.apply_start_options(&StartOptions::parse(query));
     }
@@ -318,10 +318,7 @@ impl App {
             log::warn!("URL option not understood: {unknown}");
         }
         if let Some(sample) = o.sample.and_then(Sample::by_id) {
-            self.request(Request::Fetch {
-                url: sample.path(),
-                purpose: FilePurpose::Reference,
-            });
+            self.load_sample(sample);
         }
         let st = &mut self.study;
         if let Some(layout) = o.layout {

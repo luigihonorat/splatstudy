@@ -38,9 +38,41 @@ SPDX-License-Identifier = "OFL-1.1"
 
 # Bundled sample references: plaster casts from the Royal Cast Collection,
 # scanned and released into the public domain by SMK. Converted from SMK's
-# STL to binary PLY, stood upright (Z up to Y up); nothing else changed.
+# STL to binary PLY, stood upright (Z up to Y up); nothing else changed
+# (`cargo xtask samples convert`).
 [[annotations]]
-path = "web/samples/*.ply"
+path = [
+    "web/samples/brutus.ply",
+    "web/samples/venus-de-milo.ply",
+    "web/samples/head-of-david.ply",
+    "web/samples/homer.ply",
+    "web/samples/socrates.ply",
+    "web/samples/julius-caesar.ply",
+    "web/samples/farnese-hercules-head.ply",
+    "web/samples/athlete-right-foot.ply",
+]
 precedence = "override"
 SPDX-FileCopyrightText = "SMK – National Gallery of Denmark (Statens Museum for Kunst), The Royal Cast Collection"
+SPDX-License-Identifier = "CC0-1.0"
+
+# Abraham Lincoln's hands, plaster casts after Leonard Wells Volk (S/NPG.71.6),
+# scanned and released under CC0 by the Smithsonian. The two 150k OBJs joined
+# into one binary PLY, placed as the Smithsonian's viewer places them; the
+# textures left out, the geometry unchanged.
+[[annotations]]
+path = "web/samples/lincoln-hands.ply"
+precedence = "override"
+SPDX-FileCopyrightText = "National Portrait Gallery, Smithsonian Institution"
+SPDX-License-Identifier = "CC0-1.0"
+
+# The gallery's thumbnails, drawn from the samples above by the app's renderer
+# (`cargo xtask samples thumbs`).
+[[annotations]]
+path = "web/samples/thumbs/*.png"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 The SplatStudy contributors",
+    "SMK – National Gallery of Denmark (Statens Museum for Kunst), The Royal Cast Collection",
+    "National Portrait Gallery, Smithsonian Institution",
+]
 SPDX-License-Identifier = "CC0-1.0"

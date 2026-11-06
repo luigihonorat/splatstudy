@@ -321,6 +321,53 @@ impl GpuMesh {
         gpu
     }
 
+    /// A scanned mesh to draw lit, from its triangles: each vertex's
+    /// normal is the area-weighted mean of its triangles', and its colour
+    /// the one in `colors`, white without.
+    pub fn from_triangles(
+        device: &wgpu::Device,
+        positions: &[Vec3],
+        triangles: &[[u32; 3]],
+        colors: Option<&[[u8; 4]]>,
+    ) -> Self {
+        let mut normals = vec![Vec3::ZERO; positions.len()];
+        for t in triangles {
+            let [a, b, c] = t.map(|i| positions[i as usize]);
+            // Area-weighted: the cross product's length is twice the area.
+            let n = (b - a).cross(c - a);
+            for &i in t {
+                normals[i as usize] += n;
+            }
+        }
+        let vertices: Vec<Vertex> = positions
+            .iter()
+            .zip(&normals)
+            .enumerate()
+            .map(|(i, (p, n))| Vertex {
+                position: p.to_array(),
+                normal: n.normalize_or(Vec3::Y).to_array(),
+                color: colors.and_then(|c| c.get(i)).copied().unwrap_or([255; 4]),
+                layers: [0; 4],
+            })
+            .collect();
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("reference vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("reference indices"),
+            contents: bytemuck::cast_slice(triangles),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            vertices,
+            indices,
+            index_count: (triangles.len() * 3) as u32,
+            wire: OnceLock::new(),
+        }
+    }
+
     /// Uploads the vertices in `range` after sculpting changed them.
     pub fn write(&self, queue: &wgpu::Queue, mesh: &Mesh, range: std::ops::Range<usize>) {
         let data: Vec<Vertex> = range.clone().map(|i| mesh.vertex(i)).collect();
