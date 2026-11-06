@@ -475,7 +475,6 @@ mod job {
                 invert: false,
                 symmetry: true,
                 direction: Vec3::ZERO,
-                shape: Default::default(),
                 buildup: Default::default(),
             });
             s.end_stroke();

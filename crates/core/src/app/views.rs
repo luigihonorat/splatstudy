@@ -473,7 +473,6 @@ impl App {
                 self.drags[index] = None;
             }
             Some(_) => {
-                self.finish_stroke(rect);
                 self.sculpt.end_stroke();
                 self.drags[index] = None;
             }

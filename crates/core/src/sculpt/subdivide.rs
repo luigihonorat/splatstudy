@@ -371,7 +371,6 @@ mod tests {
                         invert: false,
                         symmetry: true,
                         direction: Vec3::X,
-                        shape: Default::default(),
                         buildup: Default::default(),
                     });
                 }

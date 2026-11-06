@@ -22,7 +22,7 @@ pub(super) use tool_pie::TOOL_PIE_KEY;
 
 use crate::sculpt::{
     Brush, Buildup, Dab, Falloff, Hit, LayerOp, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh,
-    START_LEVEL, Sculpt, Shape, cube_sphere,
+    START_LEVEL, Sculpt, cube_sphere,
 };
 use crate::ui::{self, i18n::Tr, icons, menu, theme};
 use crate::voxel;
@@ -39,40 +39,13 @@ const TICK: f32 = 0.3;
 /// The stabiliser's longest string, in points.
 const MAX_STABILISER: f32 = 120.0;
 
-/// With size following the pressure, the brush's size at the lightest
-/// touch, as a share of its full size.
+/// Pen pressure scales the brush's strength and its size: its size at the
+/// lightest touch, as a share of its full size.
 const MIN_PRESSURE_SIZE: f32 = 0.2;
 
 /// How long the size and strength show by the brush after they change,
 /// in seconds.
 const READOUT: f64 = 1.2;
-
-/// A strip waits for the pointer to move this far, in points, to know
-/// which way to turn.
-const STRIP_HEADING: f32 = 2.0;
-
-/// How hard the pen has to press for the full effect.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Touch {
-    Light,
-    #[default]
-    Medium,
-    Firm,
-}
-
-impl Touch {
-    const ALL: [Touch; 3] = [Touch::Light, Touch::Medium, Touch::Firm];
-
-    /// The pen's pressure, 0..1, as the brush takes it.
-    fn curve(self, pressure: f32) -> f32 {
-        let p = pressure.clamp(0.0, 1.0);
-        match self {
-            Touch::Light => p.sqrt(),
-            Touch::Medium => p,
-            Touch::Firm => p * p,
-        }
-    }
-}
 
 /// Each brush with its letter key and starting strength, in `Brush::ALL`
 /// order; its digit is in `DIGITS`.
@@ -175,25 +148,10 @@ fn falloff_curve(ui: &mut egui::Ui, falloff: Falloff) {
     painter.add(egui::Shape::line(points, egui::Stroke::new(1.0, ink)));
 }
 
-fn shape_name(tr: &Tr, shape: Shape) -> &'static str {
-    match shape {
-        Shape::Round => tr.mesh.shape_round,
-        Shape::Strip => tr.mesh.shape_strip,
-    }
-}
-
 fn buildup_name(tr: &Tr, buildup: Buildup) -> &'static str {
     match buildup {
         Buildup::Layer => tr.mesh.buildup_layer,
         Buildup::Accumulate => tr.mesh.buildup_accumulate,
-    }
-}
-
-fn touch_name(tr: &Tr, touch: Touch) -> &'static str {
-    match touch {
-        Touch::Light => tr.mesh.touch_light,
-        Touch::Medium => tr.mesh.touch_medium,
-        Touch::Firm => tr.mesh.touch_firm,
     }
 }
 
@@ -215,17 +173,17 @@ fn choices<T: Copy + PartialEq>(
     });
 }
 
-/// On / off, then what it switches.
+/// What it switches, then on / off.
 fn switch(ui: &mut egui::Ui, tr: &Tr, on: &mut bool, label: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 14.0;
+        let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+        ui.label(egui::RichText::new(label).color(muted));
         for (text, value) in [(tr.mesh.switch_on, true), (tr.mesh.switch_off, false)] {
             if ui::choice(ui, text, *on == value).clicked() {
                 *on = value;
             }
         }
-        let muted = ui.visuals().widgets.inactive.fg_stroke.color;
-        ui.label(egui::RichText::new(label).color(muted));
     });
 }
 
@@ -245,20 +203,10 @@ pub(super) struct ToolSettings {
     pub(super) strength: [f32; 8],
     /// How each tool fades towards its rim, in `Brush::ALL` order.
     pub(super) falloff: [Falloff; 8],
-    /// Each tool's footprint, in `Brush::ALL` order; only clay and
-    /// flatten offer a strip.
-    pub(super) shape: [Shape; 8],
     /// Whether the clay builds more where a stroke passes again.
     pub(super) buildup: Buildup,
-    /// Whether each tool's size follows the pen's pressure, in
-    /// `Brush::ALL` order. Its strength always does.
-    pub(super) size_pressure: [bool; 8],
-    pub(super) touch: Touch,
     /// When the size or strength last changed, to show them by the brush.
     readout: Option<f64>,
-    /// Which way the last stroke went, in the world: the strip outline
-    /// turns that way.
-    heading: Vec3,
     pub(super) symmetry: bool,
     /// Stroke stabiliser: how far the brush trails the pointer, in
     /// points; 0 is off.
@@ -298,20 +246,9 @@ impl Default for ToolSettings {
             tool: Brush::Clay,
             radius: 48.0,
             strength: BRUSHES.map(|(_, _, strength)| strength),
-            falloff: BRUSHES.map(|(brush, _, _)| match brush {
-                // Like the flat of a clay tube.
-                Brush::Clay => Falloff::Flat,
-                _ => Falloff::Smooth,
-            }),
-            shape: BRUSHES.map(|(brush, _, _)| match brush {
-                Brush::Clay => Shape::Strip,
-                _ => Shape::Round,
-            }),
+            falloff: [Falloff::Smooth; 8],
             buildup: Buildup::Layer,
-            size_pressure: BRUSHES.map(|(brush, _, _)| brush == Brush::Clay),
-            touch: Touch::Medium,
             readout: None,
-            heading: Vec3::ZERO,
             // A study from a reference is rarely symmetric: mirroring is
             // asked for, not assumed.
             symmetry: false,
@@ -836,11 +773,6 @@ impl App {
         if *stabiliser < 0.5 {
             *stabiliser = 0.0;
         }
-        if matches!(tool, Brush::Clay | Brush::Flatten) {
-            let chosen = &mut self.tool.shape[index];
-            let options = Shape::ALL.map(|shape| (shape_name(tr, shape), shape));
-            choices(ui, tr.mesh.shape, &options, chosen);
-        }
         if tool == Brush::Clay {
             let options = Buildup::ALL.map(|b| (buildup_name(tr, b), b));
             choices(ui, tr.mesh.buildup, &options, &mut self.tool.buildup);
@@ -856,17 +788,6 @@ impl App {
             }
         });
         falloff_curve(ui, self.tool.falloff[tool_index(self.tool.tool)]);
-        if tool != Brush::Move {
-            ui::section(ui, tr.mesh.pressure);
-            switch(
-                ui,
-                tr,
-                &mut self.tool.size_pressure[index],
-                tr.mesh.pressure_size,
-            );
-            let options = Touch::ALL.map(|t| (touch_name(tr, t), t));
-            choices(ui, tr.mesh.touch, &options, &mut self.tool.touch);
-        }
         ui.add_space(10.0);
         switch(ui, tr, &mut self.tool.symmetry, tr.mesh.symmetry_x);
     }
@@ -923,17 +844,6 @@ impl App {
             .is_some_and(|e| e.kind == PointerKind::Pen && e.eraser)
     }
 
-    /// The footprint the tool held now lays: a strip only for clay and
-    /// flatten.
-    fn held_shape(&self) -> Shape {
-        let tool = self.held_tool();
-        if matches!(tool, Brush::Clay | Brush::Flatten) {
-            self.tool.shape[tool_index(tool)]
-        } else {
-            Shape::Round
-        }
-    }
-
     pub(super) fn start_stroke(&mut self, rect: Rect, pos: Pos2, hit: Hit) {
         self.sculpt.begin_stroke();
         let camera = &self.cameras[SCULPT];
@@ -952,36 +862,12 @@ impl App {
             });
         } else {
             let pressure = self.pressure();
-            // A strip turns along the stroke, so its first dab waits for
-            // the stroke to head somewhere: then it lands here, where the
-            // stroke began (the walk's first step is at its start).
-            let strip = self.held_shape() == Shape::Strip;
-            let spacing = (self.tool.radius * SPACING).max(1.0);
             self.drags[SCULPT] = Some(Drag::Stroke {
                 last: pos,
                 pressure,
-                carry: if strip { spacing } else { 0.0 },
-                dabbed: !strip,
+                carry: 0.0,
             });
-            if !strip {
-                self.dab_at(rect, pressure, hit, Vec3::ZERO);
-            }
-        }
-    }
-
-    /// Ends a stroke: a strip that never moved (a tap) still lays one
-    /// dab, turned along the screen.
-    pub(super) fn finish_stroke(&mut self, rect: Rect) {
-        if let Some(Drag::Stroke {
-            last,
-            pressure,
-            dabbed: false,
-            ..
-        }) = self.drags[SCULPT]
-            && let Some(hit) = self.pick(rect, last)
-        {
-            let (right, _) = self.cameras[SCULPT].right_up();
-            self.dab_at(rect, pressure, hit, right);
+            self.dab_at(rect, pressure, hit, Vec3::ZERO);
         }
     }
 
@@ -994,26 +880,17 @@ impl App {
             last,
             pressure: last_pressure,
             carry,
-            dabbed,
         }) = self.drags[SCULPT]
         else {
             return;
         };
         let (to, pressure) = follow(last, last_pressure, to, pressure, self.tool.stabiliser);
-        // A strip still waiting to know its heading (with the stabiliser,
-        // the brush may not have moved at all).
-        if !dabbed && last.distance(to) < STRIP_HEADING {
-            return;
-        }
         let spacing = (self.tool.radius * SPACING).max(1.0);
         // The way the brush heads, in the view plane; brushes that follow
         // the stroke take its part along the surface.
         let (right, up) = self.cameras[SCULPT].right_up();
         let d = to - last;
         let direction = (right * d.x - up * d.y).normalize_or_zero();
-        if direction != Vec3::ZERO {
-            self.tool.heading = direction;
-        }
         let mut dabs = Vec::new();
         let carry = walk(
             last,
@@ -1026,7 +903,6 @@ impl App {
                 dabs.push((pos, p));
             },
         );
-        let dabbed = dabbed || !dabs.is_empty();
         for (pos, pressure) in dabs {
             if let Some(hit) = self.pick(rect, pos) {
                 self.dab_at(rect, pressure, hit, direction);
@@ -1036,7 +912,6 @@ impl App {
             last: to,
             pressure,
             carry,
-            dabbed,
         });
     }
 
@@ -1053,19 +928,14 @@ impl App {
         }
     }
 
-    /// One dab: pen pressure, through the touch curve, scales the tool's
-    /// strength, and its size if the tool asks for it.
+    /// One dab: pen pressure scales the tool's strength and size.
     fn dab_at(&mut self, rect: Rect, pressure: f32, hit: Hit, direction: Vec3) {
         let m = self.ctx.input(|i| i.modifiers.into());
         let tool = self.held_tool();
         let index = tool_index(tool);
-        let pressure = self.tool.touch.curve(pressure);
+        let pressure = pressure.clamp(0.0, 1.0);
         let strength = self.tool.strength[index] * pressure;
-        let size = if self.tool.size_pressure[index] {
-            MIN_PRESSURE_SIZE + (1.0 - MIN_PRESSURE_SIZE) * pressure
-        } else {
-            1.0
-        };
+        let size = MIN_PRESSURE_SIZE + (1.0 - MIN_PRESSURE_SIZE) * pressure;
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
         self.sculpt.set_falloff(self.tool.falloff[index]);
         self.sculpt.dab(Dab {
@@ -1076,7 +946,6 @@ impl App {
             invert: self.nav.inverts(m) || self.erasing(),
             symmetry: self.tool.symmetry,
             direction,
-            shape: self.held_shape(),
             buildup: self.tool.buildup,
         });
     }
@@ -1092,8 +961,7 @@ impl App {
     }
 
     /// The tool outline, while the pointer is over the clay view: a circle
-    /// (or a strip's square) lying on the clay under the brush, or a circle
-    /// on the screen where there is no clay. A fainter ring inside marks
+    /// lying on the clay under the brush, or a circle on the screen where there is no clay. A fainter ring inside marks
     /// where the brush works at half strength. The outline is dashed while
     /// the brush does its opposite action, and a held tool (Shift smooths)
     /// shows its icon. In a stabilised stroke the brush trails the pointer,
@@ -1117,7 +985,6 @@ impl App {
         let line = Stroke::new(1.0, ink);
         let painter = ui.painter().with_clip_rect(rect);
         let held = self.held_tool();
-        let shape = self.held_shape();
         let falloff = self.tool.falloff[tool_index(held)];
         let m = ui.input(|i| i.modifiers.into());
         let dashed = held != Brush::Mask && (self.nav.inverts(m) || self.erasing());
@@ -1147,7 +1014,6 @@ impl App {
             outline(ring, line);
             painter.line_segment(tick.map(|p| self.view_pos(rect, p)), line);
         };
-        let heading = self.tool.heading;
         let half = half_weight(falloff);
         let faint = Stroke::new(1.0, ink.gamma_multiply(0.45));
         let hit = self.pick(rect, brush);
@@ -1156,16 +1022,8 @@ impl App {
             hit.map(|hit| self.tool.radius * camera.world_per_point(hit.point, rect.height()));
         let on_clay = hit.zip(radius).and_then(|(hit, radius)| {
             let normal = self.sculpt.normal_at(&hit);
-            let full = surface_outline(camera, rect, hit.point, normal, radius, shape, heading)?;
-            let inner = surface_outline(
-                camera,
-                rect,
-                hit.point,
-                normal,
-                radius * half,
-                shape,
-                heading,
-            );
+            let full = surface_outline(camera, rect, hit.point, normal, radius)?;
+            let inner = surface_outline(camera, rect, hit.point, normal, radius * half);
             Some((full, inner))
         });
         match on_clay {
@@ -1199,8 +1057,6 @@ impl App {
                 other.point,
                 self.sculpt.normal_at(&other),
                 radius,
-                shape,
-                Vec3::new(-heading.x, heading.y, heading.z),
             )
         {
             let grey = theme::MIRROR_INK.gamma_multiply(0.6);
@@ -1293,59 +1149,22 @@ fn mirrored_hit(sculpt: &Sculpt, eye: Vec3, point: Vec3, radius: f32) -> Option<
 
 /// The brush outline on the clay, as `camera` sees it in a view of `rect`:
 /// a circle of `radius` (in the clay's units) around `centre`, lying
-/// square to `normal`, or for a strip a square turned along `heading`,
-/// and a short tick along the normal. In the rendered view's points;
-/// `None` if part of it is behind the camera.
+/// square to `normal`, and a short tick along the normal. In the rendered
+/// view's points; `None` if part of it is behind the camera.
 fn surface_outline(
     camera: &OrbitCamera,
     rect: Rect,
     centre: Vec3,
     normal: Vec3,
     radius: f32,
-    shape: Shape,
-    heading: Vec3,
 ) -> Option<(Vec<Pos2>, [Pos2; 2])> {
+    let (u, v) = normal.any_orthonormal_pair();
     let to_clip = camera.projection(rect.width() / rect.height()) * camera.view();
-    let points: Vec<Vec3> = match shape {
-        Shape::Round => {
-            let (u, v) = normal.any_orthonormal_pair();
-            (0..CURSOR_SEGMENTS)
-                .map(|i| {
-                    let a = i as f32 / CURSOR_SEGMENTS as f32 * std::f32::consts::TAU;
-                    u * a.cos() + v * a.sin()
-                })
-                .collect()
-        }
-        Shape::Strip => {
-            // As `Footprint` turns it in the sculpt.
-            let along = (heading - normal * heading.dot(normal))
-                .try_normalize()
-                .unwrap_or_else(|| normal.any_orthonormal_vector());
-            let across = normal.cross(along);
-            let side = CURSOR_SEGMENTS / 4;
-            let corners = [
-                (1.0, 1.0),
-                (-1.0, 1.0),
-                (-1.0, -1.0),
-                (1.0, -1.0),
-                (1.0, 1.0),
-            ];
-            corners
-                .windows(2)
-                .flat_map(|w| {
-                    let ((a0, b0), (a1, b1)) = (w[0], w[1]);
-                    (0..side).map(move |i| {
-                        let t = i as f32 / side as f32;
-                        (a0 + (a1 - a0) * t, b0 + (b1 - b0) * t)
-                    })
-                })
-                .map(|(a, b)| along * a + across * b)
-                .collect()
-        }
-    };
-    let ring = points
-        .into_iter()
-        .map(|d| project(to_clip, rect, centre + d * radius))
+    let ring = (0..CURSOR_SEGMENTS)
+        .map(|i| {
+            let a = i as f32 / CURSOR_SEGMENTS as f32 * std::f32::consts::TAU;
+            project(to_clip, rect, centre + (u * a.cos() + v * a.sin()) * radius)
+        })
         .collect::<Option<Vec<Pos2>>>()?;
     let tick = [
         project(to_clip, rect, centre)?,
@@ -1363,55 +1182,10 @@ mod tests {
     }
 
     #[test]
-    fn the_touch_curves_run_from_nothing_to_full_and_keep_order() {
-        for touch in Touch::ALL {
-            assert_eq!(touch.curve(0.0), 0.0);
-            assert_eq!(touch.curve(1.0), 1.0);
-            let mut last = 0.0;
-            for i in 1..=20 {
-                let p = touch.curve(i as f32 / 20.0);
-                assert!(p > last, "{touch:?}");
-                last = p;
-            }
-        }
-        // A light touch gets more from the same pressure, a firm one less.
-        let at = |t: Touch| t.curve(0.4);
-        assert!(at(Touch::Light) > at(Touch::Medium));
-        assert!(at(Touch::Medium) > at(Touch::Firm));
-    }
-
-    #[test]
     fn the_inner_ring_is_where_the_brush_works_at_half_strength() {
         for falloff in Falloff::ALL {
             let t = half_weight(falloff);
             assert!((falloff.weight(t, 1.0) - 0.5).abs() < 1e-3, "{falloff:?}");
-        }
-    }
-
-    #[test]
-    fn a_strip_outline_is_a_square_turned_along_the_stroke() {
-        let camera = OrbitCamera::default();
-        let rect = view();
-        let towards_eye = (camera.eye() - camera.target).normalize();
-        let (right, _) = camera.right_up();
-        let radius = 40.0 * camera.world_per_point(camera.target, rect.height());
-        let (ring, _) = surface_outline(
-            &camera,
-            rect,
-            camera.target,
-            towards_eye,
-            radius,
-            Shape::Strip,
-            right,
-        )
-        .unwrap();
-        // Facing the camera and heading right: a square 80 points wide,
-        // its sides level.
-        let centre = rect.center();
-        for p in &ring {
-            let d = *p - centre;
-            let edge = d.x.abs().max(d.y.abs());
-            assert!((edge - 40.0).abs() < 0.5, "{d:?}");
         }
     }
 
@@ -1427,8 +1201,6 @@ mod tests {
             camera.target,
             towards_eye,
             radius,
-            Shape::Round,
-            Vec3::ZERO,
         )
         .unwrap();
         let centre = rect.center();
@@ -1455,8 +1227,6 @@ mod tests {
             camera.target,
             up,
             radius,
-            Shape::Round,
-            Vec3::ZERO,
         )
         .unwrap();
         let (mut lo, mut hi) = (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN));

@@ -124,23 +124,6 @@ impl Falloff {
     }
 }
 
-/// The footprint of a dab of clay or flatten.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Shape {
-    /// A disc: the falloff runs out from the centre.
-    #[default]
-    Round,
-    /// A square turned to the stroke, like the flat of a clay tube or a
-    /// spatula: the falloff runs along the stroke and across it, so the
-    /// stroke lays a band with straight sides.
-    Strip,
-}
-
-impl Shape {
-    /// Every shape, in the order the panel lists them.
-    pub const ALL: [Shape; 2] = [Shape::Round, Shape::Strip];
-}
-
 /// How clay builds where one stroke passes again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Buildup {
@@ -177,67 +160,8 @@ pub struct Dab {
     pub symmetry: bool,
     /// Which way the stroke is heading, unit length; zero at its first dab.
     pub direction: Vec3,
-    /// Clay and flatten: a disc or a strip turned along `direction`.
-    pub shape: Shape,
     /// Clay: whether a stroke builds more where it passes again.
     pub buildup: Buildup,
-}
-
-impl Dab {
-    /// How far from its centre the dab reaches: a strip's corners lie
-    /// further out than its sides.
-    fn reach(&self) -> f32 {
-        match self.shape {
-            Shape::Round => self.radius,
-            Shape::Strip => self.radius * std::f32::consts::SQRT_2,
-        }
-    }
-}
-
-/// Where a dab weighs on the clay, laid on the plane with normal `n`.
-struct Footprint {
-    shape: Shape,
-    centre: Vec3,
-    radius: f32,
-    normal: Vec3,
-    /// A strip's axes in the plane: along the stroke and across it.
-    along: Vec3,
-    across: Vec3,
-}
-
-impl Footprint {
-    fn new(dab: Dab, n: Vec3) -> Footprint {
-        // The stroke's heading, laid on the plane; any heading at all
-        // before the stroke has one.
-        let along = tangent(dab.direction, n)
-            .try_normalize()
-            .unwrap_or_else(|| n.any_orthonormal_vector());
-        Footprint {
-            shape: dab.shape,
-            centre: dab.centre,
-            radius: dab.radius,
-            normal: n,
-            along,
-            across: n.cross(along),
-        }
-    }
-
-    /// How much of the dab point `p` gets, 0..1.
-    fn weight(&self, falloff: Falloff, p: Vec3) -> f32 {
-        match self.shape {
-            Shape::Round => falloff.weight(p.distance(self.centre), self.radius),
-            Shape::Strip => {
-                let d = p - self.centre;
-                // A square slab: clay a radius above or below the plane is
-                // another part of the form, not under the strip.
-                if d.dot(self.normal).abs() > self.radius {
-                    return 0.0;
-                }
-                falloff.weight(d.dot(self.along).abs(), self.radius)
-                    * falloff.weight(d.dot(self.across).abs(), self.radius)
-            }
-        }
-    }
 }
 
 /// One undoable change: the vertices a stroke touched, before and after.
@@ -974,7 +898,7 @@ impl Sculpt {
         self.bvh.vertices_in_sphere(
             &self.mesh,
             dab.centre,
-            dab.reach(),
+            dab.radius,
             &mut self.stamp,
             &mut found,
         );
@@ -1019,7 +943,6 @@ impl Sculpt {
         let Some((n, _)) = self.area_plane(found, dab) else {
             return;
         };
-        let footprint = Footprint::new(dab, n);
         // The plane goes through the point under the brush. (Through the
         // average position instead, it would sit below a curved surface and
         // lift the rim more than the centre.)
@@ -1038,11 +961,9 @@ impl Sculpt {
             if above >= height {
                 continue;
             }
-            let w = footprint.weight(self.falloff, p);
-            if w <= 0.0 {
-                continue;
-            }
-            let mut lift = (height - above).min(2.0 * height) * w * 0.3;
+            let mut lift = (height - above).min(2.0 * height)
+                * self.weight(p.distance(dab.centre), dab.radius)
+                * 0.3;
             if dab.buildup == Buildup::Layer {
                 lift = lift.min(layer - self.risen(v, n) * sign);
                 if lift <= 0.0 {
@@ -1069,7 +990,6 @@ impl Sculpt {
         let Some((n, origin)) = self.area_plane(found, dab) else {
             return;
         };
-        let footprint = Footprint::new(dab, n);
         for &v in found {
             if !self.faces(v, n) {
                 continue;
@@ -1077,7 +997,7 @@ impl Sculpt {
             let p = self.mesh.positions[v as usize];
             let above = (p - origin).dot(n);
             if (above > 0.0) != dab.invert && above != 0.0 {
-                let w = footprint.weight(self.falloff, p) * dab.strength * 0.3;
+                let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength * 0.3;
                 self.place(v, p - n * (above * w));
             }
         }
@@ -1330,7 +1250,6 @@ mod tests {
             invert: false,
             symmetry: false,
             direction: Vec3::ZERO,
-            shape: Default::default(),
             buildup: Default::default(),
         }
     }
@@ -1377,7 +1296,7 @@ mod tests {
 
     /// A clay stroke as the app makes it, across the top of the sphere:
     /// each dab centred where a ray from above meets the clay now.
-    fn clay_stroke(s: &mut Sculpt, xs: &[f32], shape: Shape, buildup: Buildup) {
+    fn clay_stroke(s: &mut Sculpt, xs: &[f32], buildup: Buildup) {
         s.begin_stroke();
         for &x in xs {
             let hit = s.raycast(Vec3::new(x, 0.0, 3.0), -Vec3::Z).unwrap();
@@ -1385,7 +1304,6 @@ mod tests {
                 strength: 0.5,
                 radius: 0.2,
                 direction: Vec3::X,
-                shape,
                 buildup,
                 ..dab(Brush::Clay, hit.point)
             });
@@ -1421,7 +1339,7 @@ mod tests {
                 s.set_falloff(falloff);
                 let start = height_at(&s, 0.0);
                 for _ in 0..strokes {
-                    clay_stroke(&mut s, xs, Shape::Round, buildup);
+                    clay_stroke(&mut s, xs, buildup);
                 }
                 height_at(&s, 0.0) - start
             };
@@ -1443,24 +1361,6 @@ mod tests {
             let piled = built(&there_and_back, Buildup::Accumulate, 1);
             assert!(piled > 2.0 * scrubbed, "{falloff:?}: {piled}");
         }
-    }
-
-    #[test]
-    fn a_strip_lays_a_band_with_straight_sides() {
-        let across = |shape: Shape| {
-            let mut s = Sculpt::new(Mesh::icosphere(5));
-            s.set_falloff(Falloff::Flat);
-            let start = [0.0, 0.16].map(|y| height_at(&s, y));
-            clay_stroke(&mut s, &path(), shape, Buildup::Layer);
-            let end = [0.0, 0.16].map(|y| height_at(&s, y));
-            [end[0] - start[0], end[1] - start[1]]
-        };
-        let (round, strip) = (across(Shape::Round), across(Shape::Strip));
-        // As high in the middle; at 0.8 of the radius to the side, the
-        // strip still holds most of it while the disc has rounded off.
-        assert!((round[0] - strip[0]).abs() < 0.05 * round[0]);
-        assert!(strip[1] > 0.7 * strip[0], "{strip:?}");
-        assert!(strip[1] > 2.0 * round[1], "{strip:?} {round:?}");
     }
 
     #[test]

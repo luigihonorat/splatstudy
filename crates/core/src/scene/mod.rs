@@ -959,7 +959,6 @@ mod tests {
                     invert: k == 1,
                     symmetry: true,
                     direction: Vec3::X,
-                    shape: Default::default(),
                     buildup: Default::default(),
                 });
                 s.refresh();
@@ -1069,7 +1068,6 @@ mod tests {
             invert: false,
             symmetry: true,
             direction: Vec3::ZERO,
-            shape: Default::default(),
             buildup: Default::default(),
         });
         live.end_stroke();
@@ -1168,7 +1166,6 @@ mod tests {
                 invert: false,
                 symmetry: false,
                 direction: Vec3::ZERO,
-                shape: Default::default(),
                 buildup: Default::default(),
             });
             live.end_stroke();
@@ -1227,7 +1224,6 @@ mod tests {
                 invert: false,
                 symmetry: true,
                 direction: Vec3::X,
-                shape: Default::default(),
                 buildup: Default::default(),
             });
             s.end_stroke();
@@ -1320,7 +1316,6 @@ mod tests {
                     invert: false,
                     symmetry: false,
                     direction: Vec3::X,
-                    shape: Default::default(),
                     buildup: Default::default(),
                 });
                 if i % 4 == 3 {
@@ -1415,7 +1410,6 @@ mod tests {
                     invert: false,
                     symmetry: false,
                     direction: Vec3::Y,
-                    shape: Default::default(),
                     buildup: Default::default(),
                 });
                 s.refresh();
@@ -1697,7 +1691,6 @@ mod tests {
                         invert: false,
                         symmetry: true,
                         direction: Vec3::Y,
-                        shape: Default::default(),
                         buildup: Default::default(),
                     });
                     if i % 4 == 3 {
@@ -1756,7 +1749,6 @@ mod tests {
                 invert: false,
                 symmetry: true,
                 direction: Vec3::X,
-                shape: Default::default(),
                 buildup: Default::default(),
             });
             s.end_stroke();
@@ -1831,7 +1823,6 @@ mod tests {
                 invert: false,
                 symmetry: false,
                 direction: Vec3::ZERO,
-                shape: Default::default(),
                 buildup: Default::default(),
             });
             resumed.end_stroke();
@@ -1989,7 +1980,6 @@ mod tests {
                     invert: false,
                     symmetry: true,
                     direction: Vec3::X,
-                    shape: Default::default(),
                     buildup: Default::default(),
                 });
                 s.refresh();

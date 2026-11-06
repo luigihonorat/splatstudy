@@ -16,7 +16,7 @@ use glam::Vec3;
 use super::subdivide::parents;
 use super::{
     Brush, Buildup, Bvh, Dab, Falloff, LayerOp, Layers, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh,
-    OLD_START_LEVEL, Resume, Sculpt, Shape,
+    OLD_START_LEVEL, Resume, Sculpt,
 };
 use crate::io::{ReadError, Reader, Writer};
 
@@ -254,12 +254,11 @@ impl Entry {
                 w.u8(tag::BEGIN);
             }
             Event::Dab(d) => {
-                // Bits 2 and 3 came later: older logs have neither, which
-                // reads back as a round dab that accumulates.
+                // Bit 2 came later: older logs don't have it, which reads
+                // back as clay that accumulates.
                 let flags = u8::from(d.invert)
                     | u8::from(d.symmetry) << 1
-                    | u8::from(d.shape == Shape::Strip) << 2
-                    | u8::from(d.buildup == Buildup::Layer) << 3;
+                    | u8::from(d.buildup == Buildup::Layer) << 2;
                 w.u8(tag::DAB)
                     .u8(d.brush as u8)
                     .vec3(d.centre)
@@ -335,7 +334,7 @@ impl Entry {
                     .ok_or_else(|| r.invalid("unknown brush"))?;
                 let (centre, radius, strength) = (r.vec3()?, r.f32()?, r.f32()?);
                 let flags = r.u8()?;
-                if flags > 15 {
+                if flags > 7 {
                     return Err(r.invalid("unknown dab flags"));
                 }
                 Event::Dab(Dab {
@@ -346,12 +345,7 @@ impl Entry {
                     invert: flags & 1 != 0,
                     symmetry: flags & 2 != 0,
                     direction: r.vec3()?,
-                    shape: if flags & 4 != 0 {
-                        Shape::Strip
-                    } else {
-                        Shape::Round
-                    },
-                    buildup: if flags & 8 != 0 {
+                    buildup: if flags & 4 != 0 {
                         Buildup::Layer
                     } else {
                         Buildup::Accumulate
@@ -773,10 +767,9 @@ mod tests {
                         invert: i % 3 == 2,
                         symmetry: true,
                         direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
-                        // Every footprint and build-up, so the log and the
-                        // replay carry them.
-                        shape: Shape::ALL[k % Shape::ALL.len()],
-                        buildup: Buildup::ALL[k / 2 % Buildup::ALL.len()],
+                        // Both build-ups, so the log and the replay carry
+                        // them.
+                        buildup: Buildup::ALL[k % Buildup::ALL.len()],
                     });
                     if i % 3 == 0 {
                         s.refresh();
@@ -845,7 +838,6 @@ mod tests {
                     invert,
                     symmetry: k == 1,
                     direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
-                    shape: Default::default(),
                     buildup: Default::default(),
                 });
                 if i % 2 == 0 {
@@ -1015,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dab_from_before_strips_reads_as_round_and_accumulating() {
+    fn a_dab_from_before_layers_reads_as_accumulating() {
         let dab = Dab {
             brush: Brush::Clay,
             centre: Vec3::Z,
@@ -1024,7 +1016,6 @@ mod tests {
             invert: true,
             symmetry: true,
             direction: Vec3::X,
-            shape: Shape::Strip,
             buildup: Buildup::Layer,
         };
         let bytes = |dab: Dab| {
@@ -1042,12 +1033,11 @@ mod tests {
         // brush, centre, radius and strength come before the flags.
         let mut old = bytes(dab);
         let flags = 8 + 1 + 1 + 12 + 4 + 4;
-        assert_eq!(old[flags], 15);
+        assert_eq!(old[flags], 7);
         old[flags] &= 3;
         assert_eq!(
             read(&old),
             Event::Dab(Dab {
-                shape: Shape::Round,
                 buildup: Buildup::Accumulate,
                 ..dab
             })
