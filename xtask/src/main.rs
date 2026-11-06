@@ -5,6 +5,9 @@
 //!   cargo xtask web [--dev]       build the browser version into dist/
 //!   cargo xtask serve [--port N]  serve dist/ on http://127.0.0.1:8080
 //!   cargo xtask notices OUT.html  third-party licence notices (needs cargo-about)
+//!   cargo xtask samples convert <folder> | thumbs
+//!                                 the bundled samples from their museums' files,
+//!                                 and the gallery's thumbnails (needs a GPU)
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -33,7 +36,11 @@ fn main() -> ExitCode {
             Some(out) => notices(Path::new(out)),
             None => Err("usage: cargo xtask notices OUT.html".into()),
         },
-        _ => Err("usage: cargo xtask web [--dev] | serve [--port N] | notices OUT.html".into()),
+        Some("samples") => samples(&args[1..]),
+        _ => Err(
+            "usage: cargo xtask web [--dev] | serve [--port N] | notices OUT.html | samples …"
+                .into(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -72,8 +79,10 @@ fn web(dev: bool) -> Result<(), String> {
     }
 
     let out_dir = if dev { "debug" } else { "web" };
-    let wasm = root
-        .join("target/wasm32-unknown-unknown")
+    // A worktree may build into another checkout's target folder.
+    let target = env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let wasm = target
+        .join("wasm32-unknown-unknown")
         .join(out_dir)
         .join("splatstudy_web.wasm");
     let dist = root.join("dist");
@@ -113,6 +122,23 @@ fn web(dev: bool) -> Result<(), String> {
         notices(&dist.join("licenses.html"))?;
     }
     report_sizes(&dist, &bg)
+}
+
+/// Makes the bundled samples or their thumbnails with the core's own
+/// loaders and renderer: `crates/core/examples/samples.rs` does the work,
+/// so this crate stays light for the web build.
+fn samples(args: &[String]) -> Result<(), String> {
+    let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .current_dir(root())
+        .args(["run", "-p", "splatstudy-core", "--example", "samples", "--"])
+        .args(args)
+        .status()
+        .map_err(|e| format!("cargo: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("samples failed".into())
+    }
 }
 
 /// Writes the licence notices every distributed build must carry: the Rust
