@@ -105,6 +105,27 @@ pub fn wireframe(painter: &Painter, rect: Rect, colour: Color32) {
     pen.ellipse((8.0, 8.0), 2.5, 6.5);
 }
 
+/// A ball half smooth, half faceted: a round left half, and on the right
+/// half an octagon's corners fanned from the centre into flat facets.
+pub fn flat_shading(painter: &Painter, rect: Rect, colour: Color32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let pen = Pen::new(painter, rect, colour);
+    let (c, r) = ((8.0, 8.0), 6.5);
+    pen.arc(c, r, FRAC_PI_2, 3.0 * FRAC_PI_2);
+    // The right half's corners, top to bottom, y down.
+    let corners: Vec<(f32, f32)> = (0..5)
+        .map(|k| {
+            let a = -FRAC_PI_2 + k as f32 * PI / 4.0;
+            (c.0 + r * a.cos(), c.1 + r * a.sin())
+        })
+        .collect();
+    pen.polyline(&corners, false);
+    pen.line(corners[0], corners[4]);
+    for &corner in &corners[1..4] {
+        pen.line(c, corner);
+    }
+}
+
 /// Where the light comes from, for the lightings in
 /// [`crate::render::clay::Lighting`] order: studio (above left), raking
 /// (low from the side) and top.

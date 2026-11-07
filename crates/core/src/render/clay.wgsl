@@ -6,6 +6,9 @@
 // key light's direction and wrap and how strong each part is. Lighting is in
 // view space so the light stays put while the sculpt turns. The clay's chalk
 // tints it blue and its mask darkens it; a silhouette shows neither.
+// Faceted, each triangle is lit by its own plane's normal, found from how
+// the position changes across the screen, rather than by the normals
+// smoothed over its corners.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -27,6 +30,8 @@ struct Uniforms {
     // The chalk's colour, linear RGB; w: how much of its light fully
     // masked clay keeps.
     layers: vec4<f32>,
+    // x: faceted (flat shading), each triangle lit as one plane.
+    shading: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -77,6 +82,11 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // The triangle's own plane, view space, facing the eye whichever side
+    // of it shows: across the screen x goes right and y goes down, so
+    // dpdy × dpdx points out of the screen. Taken before any branch, as
+    // derivatives must be.
+    let plane = cross(dpdy(in.position), dpdx(in.position));
     var base = u.base.rgb * in.color;
     let opacity = u.params.y;
     if u.params.x > 0.5 {
@@ -87,6 +97,10 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     var n = normalize(in.normal);
     if !front {
         n = -n;
+    }
+    // A plane seen edge on has no width on screen: keep the smooth normal.
+    if u.shading.x > 0.5 && dot(plane, plane) > 0.0 {
+        n = normalize(plane);
     }
     let v = select(normalize(-in.position), vec3<f32>(0.0, 0.0, 1.0), u.params.w > 0.5);
     let l = normalize(u.light.xyz);

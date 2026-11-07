@@ -40,7 +40,7 @@ struct Uniforms {
     /// xyz: towards the key light, view space; w: how far the key light
     /// wraps past the terminator.
     light: [f32; 4],
-    /// x: flat, y: opacity, z: use vertex colours, w: unused.
+    /// x: flat, y: opacity, z: use vertex colours, w: orthographic.
     params: [f32; 4],
     /// The strengths of the key light, the sky fill, the rim and the
     /// highlight.
@@ -52,6 +52,8 @@ struct Uniforms {
     /// The chalk's colour, linear RGB, and how much light fully masked
     /// clay keeps.
     layers: [f32; 4],
+    /// x: faceted; y, z, w: unused.
+    shading: [f32; 4],
 }
 
 /// How a mesh is shaded.
@@ -70,6 +72,9 @@ pub struct Look {
     pub vertex_colours: bool,
     /// Where the light comes from. Flat looks ignore it.
     pub lighting: Lighting,
+    /// Flat shading: each triangle lit as one plane, so the facets show,
+    /// rather than by its corners' normals smoothed across it.
+    pub faceted: bool,
 }
 
 impl Look {
@@ -81,12 +86,18 @@ impl Look {
             opacity: 1.0,
             vertex_colours: false,
             lighting: Lighting::Studio,
+            faceted: false,
         }
     }
 
     /// The same look, lit by `lighting`.
     pub const fn with_lighting(self, lighting: Lighting) -> Self {
         Self { lighting, ..self }
+    }
+
+    /// The same look, faceted or smooth.
+    pub const fn with_facets(self, faceted: bool) -> Self {
+        Self { faceted, ..self }
     }
 
     /// Filled flat with one colour, opaque: a silhouette.
@@ -688,6 +699,7 @@ impl ClayPass {
                 let [r, g, b, _] = super::linear(theme::CHALK);
                 [r, g, b, theme::MASK_SHADE]
             },
+            shading: [flag(look.faceted), 0.0, 0.0, 0.0],
         };
         let (buffer, _) = &self.slots[slot.index()][layer as usize];
         queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -962,5 +974,80 @@ mod tests {
         // Away from every edge, the clay is as it was.
         assert!(darker(0.1, -0.15).abs() <= 2, "{}", darker(0.1, -0.15));
         assert!(darker(-0.6, 0.2).abs() <= 2, "{}", darker(-0.6, 0.2));
+    }
+
+    #[test]
+    fn faceted_clay_lights_each_triangle_as_its_plane_facing_the_eye() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Some((device, queue)) =
+            pollster::block_on(instance.request_adapter(&Default::default()))
+                .ok()
+                .and_then(|a| pollster::block_on(a.request_device(&Default::default())).ok())
+        else {
+            eprintln!("no GPU adapter; skipping render test");
+            return;
+        };
+        // A tent facing the camera: two slopes meeting at a ridge along y,
+        // so the smoothed normals turn across each slope.
+        let positions = [(-1.0, 0.0), (0.0, 0.5), (1.0, 0.0)]
+            .iter()
+            .flat_map(|&(x, z)| [Vec3::new(x, -1.0, z), Vec3::new(x, 1.0, z)])
+            .collect();
+        let triangles = vec![[0, 2, 3], [0, 3, 1], [2, 4, 5], [2, 5, 3]];
+        let tent = Mesh::from_ordered(positions, triangles);
+        let size = [96, 96];
+        let target = ViewTarget::new(&device, size);
+        let clay = ClayPass::new(&device);
+        let gpu = GpuMesh::new(&device, &tent);
+        let render = |camera: &OrbitCamera, faceted: bool| {
+            let look = Look::lit(theme::CLAY).with_facets(faceted);
+            clay.prepare(&queue, Slot::SculptView, camera, 1.0, &look);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = target.begin_pass(&mut encoder, theme::VIEW_BG);
+                clay.draw(&mut pass, Slot::SculptView, &gpu);
+            }
+            let readback = Readback::copy(&device, &mut encoder, &target);
+            queue.submit([encoder.finish()]);
+            readback.map();
+            readback.wait(&device).expect("pixels")
+        };
+        let red = |pixels: &[u8], camera: &OrbitCamera, x: f32| {
+            let to_clip = camera.projection(1.0) * camera.view();
+            let z = 0.5 * (1.0 - x.abs());
+            let p = to_clip.project_point3(Vec3::new(x, 0.2, z));
+            let px = ((p.x * 0.5 + 0.5) * size[0] as f32) as usize;
+            let py = ((0.5 - p.y * 0.5) * size[1] as f32) as usize;
+            i32::from(pixels[(py * size[0] as usize + px) * 4])
+        };
+        for yaw in [0.0, 0.6, std::f32::consts::PI] {
+            // Head on, turned, and from behind, where the back faces show.
+            let camera = OrbitCamera {
+                yaw,
+                pitch: 0.0,
+                ..OrbitCamera::default()
+            };
+            let (smooth, faceted) = (render(&camera, false), render(&camera, true));
+            for (from, to) in [(-0.85, -0.15), (0.15, 0.85)] {
+                let across = |pixels: &[u8]| red(pixels, &camera, from) - red(pixels, &camera, to);
+                // Smooth, the light changes across a slope (head on, where
+                // the light falls on both alike); faceted, it is even over
+                // it from every side.
+                if yaw == 0.0 {
+                    assert!(across(&smooth).abs() > 4, "{}", across(&smooth));
+                }
+                assert!(
+                    across(&faceted).abs() <= 2,
+                    "yaw {yaw}: {}",
+                    across(&faceted)
+                );
+                // Where a slope's own corners are, its smoothed normal is
+                // its plane's: both agree, so the plane faces the eye as
+                // the smooth normal does, front or back.
+                let edge = |pixels: &[u8]| red(pixels, &camera, from.signum() * 0.97);
+                let gap = edge(&smooth) - edge(&faceted);
+                assert!(gap.abs() <= 3, "yaw {yaw}: {gap}");
+            }
+        }
     }
 }

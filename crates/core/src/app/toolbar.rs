@@ -29,6 +29,8 @@ pub(super) enum ViewOption {
     Perspective,
     /// The clay's edges, in the sculpt view.
     Wireframe,
+    /// The clay shaded flat, facet by facet, in the sculpt view; off, smooth.
+    FlatShading,
     /// The next lighting; its button opens the lightings.
     Lighting,
     Grid,
@@ -69,6 +71,7 @@ impl ViewOption {
             Tool => "",
             Perspective => "",
             Wireframe => "Shift+W",
+            FlatShading => "",
             Lighting => "B",
             Grid => "G",
             Plumb => "V",
@@ -102,6 +105,7 @@ impl ViewOption {
             Tool => tr.tools,
             Perspective => st.perspective,
             Wireframe => st.wireframe,
+            FlatShading => st.flat_shading,
             Lighting => st.lighting,
             Grid => tr.grid,
             Plumb => tr.plumb_line,
@@ -127,6 +131,7 @@ impl ViewOption {
             Tool => brush_icon(tool)(painter, rect, colour),
             Perspective => icons::perspective(painter, rect, colour),
             Wireframe => icons::wireframe(painter, rect, colour),
+            FlatShading => icons::flat_shading(painter, rect, colour),
             Lighting => {
                 let which = Light::ALL.iter().position(|&l| l == lighting);
                 icons::lighting(painter, rect, colour, which.unwrap_or(0));
@@ -183,7 +188,7 @@ fn option_groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
     if index == SCULPT {
         return vec![
             vec![Tool],
-            vec![Perspective, Wireframe, Lighting],
+            vec![Perspective, Wireframe, FlatShading, Lighting],
             vec![Grid, Plumb],
             vec![Silhouette, Difference, Ghost, Mirror],
             vec![Frame, Reset, Link],
@@ -300,6 +305,7 @@ impl App {
         match option {
             Perspective => !self.cameras[index].ortho,
             Wireframe => self.study.wireframe,
+            FlatShading => self.study.flat_shading,
             Grid => aids.grid,
             Plumb => aids.plumb,
             Silhouette => aids.silhouette,
@@ -329,6 +335,7 @@ impl App {
                 self.follow_camera(index);
             }
             Wireframe => self.study.wireframe ^= true,
+            FlatShading => self.study.flat_shading ^= true,
             Lighting => aids.lighting = aids.lighting.next(),
             Grid => aids.grid ^= true,
             Plumb => aids.plumb ^= true,
@@ -621,7 +628,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 18.0;
                         ui.label(RichText::new(label).font(fonts::regular(13.0)));
-                        // The perspective has no key.
+                        // The perspective and the flat shading have no key.
                         if !keys.is_empty() {
                             ui.label(RichText::new(keys).font(fonts::regular(13.0)).color(muted));
                         }
@@ -861,6 +868,41 @@ mod tests {
     }
 
     #[test]
+    fn flat_shading_sits_under_the_wireframe_and_is_kept_with_the_scene() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let wire = button_of(&h, ViewOption::Wireframe, SCULPT);
+        let flat = button_of(&h, ViewOption::FlatShading, SCULPT);
+        assert_eq!(flat.left(), wire.left());
+        assert_eq!(flat.top(), wire.bottom(), "right under the wireframe");
+        assert!(!ViewOption::FlatShading.per_view());
+        assert!(!h.app.sculpt_look().faceted, "smooth to start with");
+
+        click(&mut h, flat.center());
+        assert!(h.app.study.flat_shading);
+        assert!(h.app.option_on(ViewOption::FlatShading, SCULPT));
+        assert!(h.app.sculpt_look().faceted);
+        assert!(!h.app.study.wireframe, "the wireframe stays as it was");
+        assert_eq!(strokes(&h), 0, "the click is no stroke");
+
+        // Kept in the scene, like the wireframe.
+        let c = h.app.view_rects[SCULPT].center();
+        h.drag(c, c + egui::vec2(30.0, 0.0));
+        let saved = h.app.autosave_bytes().expect("worth keeping").scene;
+        h.app.new_scene();
+        h.app.study.flat_shading = false;
+        assert!(h.app.restore_autosave(&saved, None));
+        assert!(h.app.study.flat_shading && h.app.sculpt_look().faceted);
+
+        // Clicked again, smooth.
+        let flat = button_of(&h, ViewOption::FlatShading, SCULPT);
+        click(&mut h, flat.center());
+        assert!(!h.app.study.flat_shading && !h.app.sculpt_look().faceted);
+    }
+
+    #[test]
     fn a_picture_offers_only_what_applies_to_it() {
         let flat: Vec<ViewOption> = groups(REFERENCE, RefKind::Image).concat();
         assert_eq!(
@@ -889,6 +931,7 @@ mod tests {
             let options = groups(REFERENCE, kind).concat();
             for sculpt_only in [
                 ViewOption::Wireframe,
+                ViewOption::FlatShading,
                 ViewOption::Ghost,
                 ViewOption::Difference,
             ] {
