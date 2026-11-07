@@ -28,8 +28,13 @@ pub const DEFAULT_RESOLUTION: u32 = 160;
 const PASSES: usize = 2;
 
 /// The opacity a ray through the splats gathers before it counts as
-/// having reached the surface (see [`fusion::field`]): half, the median.
-pub const DEFAULT_THRESHOLD: f32 = 0.5;
+/// having reached the surface (see [`fusion::field`]). Well past half: a
+/// capture's fuzz (hair, a beard, floaters) gathers some opacity in front
+/// of the surface proper.
+pub const DEFAULT_THRESHOLD: f32 = 0.7;
+/// The thresholds offered. Lower, a fuzzy capture's haze counts as
+/// surface and the clay comes out spongy; 1 is never quite reached.
+pub const THRESHOLDS: std::ops::RangeInclusive<f32> = 0.3..=0.95;
 
 /// How much the clay from a reference is smoothed: passes of
 /// [`grid::Grid::blur`] over its field, each smoothing the shape by

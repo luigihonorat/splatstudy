@@ -979,7 +979,7 @@ impl App {
         );
         if splats {
             let threshold = &mut self.tool.threshold;
-            ui::slider(ui, m.threshold, threshold, 0.05..=0.95, |v| {
+            ui::slider(ui, m.threshold, threshold, voxel::THRESHOLDS, |v| {
                 format!("{:.0}%", v * 100.0)
             });
         }
