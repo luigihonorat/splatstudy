@@ -373,11 +373,13 @@ impl App {
                 if !ui.input(|i| i.pointer.button_pressed(button)) {
                     continue;
                 }
-                // The study aids' own handles (the plumb line's bob) take
-                // a left press first, but never one on the clay.
+                // The crop box's handles and the study aids' own (the
+                // plumb line's bob) take a left press first, but never one
+                // on the clay.
                 if ours == Button::Primary
                     && let Some(screen) = screen
-                    && self.study_press(rect, index, screen, m)
+                    && (self.crop_press(ui.ctx(), rect, index, screen, m)
+                        || self.study_press(rect, index, screen, m))
                 {
                     break;
                 }
