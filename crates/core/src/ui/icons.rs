@@ -105,27 +105,24 @@ pub fn wireframe(painter: &Painter, rect: Rect, colour: Color32) {
     pen.ellipse((8.0, 8.0), 2.5, 6.5);
 }
 
-/// A faceted ball: an octagon around a flat front face, its corners
-/// joined to the outline, as flat shading shows a coarse sphere.
+/// A ball half smooth, half faceted: a round left half, and on the right
+/// half an octagon's corners fanned from the centre into flat facets.
 pub fn flat_shading(painter: &Painter, rect: Rect, colour: Color32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
     let pen = Pen::new(painter, rect, colour);
-    let outline = [
-        (5.5, 1.5),
-        (10.5, 1.5),
-        (14.5, 5.5),
-        (14.5, 10.5),
-        (10.5, 14.5),
-        (5.5, 14.5),
-        (1.5, 10.5),
-        (1.5, 5.5),
-    ];
-    pen.polyline(&outline, true);
-    let face = [(5.5, 5.5), (10.5, 5.5), (10.5, 10.5), (5.5, 10.5)];
-    pen.polyline(&face, true);
-    // Each corner of the face to the two outline corners nearest it.
-    for (k, &corner) in face.iter().enumerate() {
-        pen.line(corner, outline[2 * k]);
-        pen.line(corner, outline[(2 * k + 7) % 8]);
+    let (c, r) = ((8.0, 8.0), 6.5);
+    pen.arc(c, r, FRAC_PI_2, 3.0 * FRAC_PI_2);
+    // The right half's corners, top to bottom, y down.
+    let corners: Vec<(f32, f32)> = (0..5)
+        .map(|k| {
+            let a = -FRAC_PI_2 + k as f32 * PI / 4.0;
+            (c.0 + r * a.cos(), c.1 + r * a.sin())
+        })
+        .collect();
+    pen.polyline(&corners, false);
+    pen.line(corners[0], corners[4]);
+    for &corner in &corners[1..4] {
+        pen.line(c, corner);
     }
 }
 
