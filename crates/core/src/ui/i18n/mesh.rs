@@ -39,7 +39,8 @@ pub struct MeshTr {
     pub off: &'static str,
     /// Heading of the brush falloff choices.
     pub falloff: &'static str,
-    /// Falloff shapes: a soft dome, a plateau like a clay tube, and a narrow peak.
+    /// Falloff shapes: a soft dome, a plateau like a clay tube, and a wider
+    /// plateau with a hard edge: full strength nearly to the rim, then a steep drop.
     pub falloff_smooth: &'static str,
     pub falloff_flat: &'static str,
     pub falloff_sharp: &'static str,

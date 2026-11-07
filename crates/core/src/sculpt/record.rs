@@ -405,8 +405,11 @@ fn falloff_byte(falloff: Falloff) -> u8 {
     match falloff {
         Falloff::Smooth => 0,
         Falloff::Linear => 1,
-        Falloff::Sharp => 2,
+        // The old sharp, a narrow peak, keeps its byte: the new sharp is
+        // another curve, so it takes a byte of its own.
+        Falloff::Peak => 2,
         Falloff::Flat => 3,
+        Falloff::Sharp => 4,
     }
 }
 
@@ -415,8 +418,9 @@ fn falloff_from_byte(byte: u8) -> Option<Falloff> {
     Some(match byte {
         0 => Falloff::Smooth,
         1 => Falloff::Linear,
-        2 => Falloff::Sharp,
+        2 => Falloff::Peak,
         3 => Falloff::Flat,
+        4 => Falloff::Sharp,
         _ => return None,
     })
 }
@@ -1153,8 +1157,9 @@ mod tests {
         let pinned = [
             (Falloff::Smooth, 0),
             (Falloff::Linear, 1),
-            (Falloff::Sharp, 2),
+            (Falloff::Peak, 2),
             (Falloff::Flat, 3),
+            (Falloff::Sharp, 4),
         ];
         for (falloff, byte) in pinned {
             let bytes = log_bytes(&[Event::Falloff(falloff)]);
@@ -1168,7 +1173,7 @@ mod tests {
             assert!(pinned.iter().any(|&(f, _)| f == falloff), "{falloff:?}");
         }
         let mut unknown = log_bytes(&[Event::Falloff(Falloff::Smooth)]);
-        *unknown.last_mut().unwrap() = 4;
+        *unknown.last_mut().unwrap() = 5;
         assert!(read_events(&unknown).is_err());
     }
 
@@ -1232,6 +1237,82 @@ mod tests {
                 Event::Falloff(Falloff::Flat),
             ]
         );
+    }
+
+    /// A few clay strokes with `falloff`, logged.
+    fn strokes_with(falloff: Falloff) -> Sculpt {
+        let mut s = Sculpt::new(Mesh::icosphere(4));
+        s.set_clock(1.0);
+        s.set_falloff(falloff);
+        s.begin_stroke();
+        for i in 0..6 {
+            s.set_clock(1.0 + i as f64 * 0.02);
+            s.dab(Dab {
+                brush: Brush::Clay,
+                centre: Vec3::new(i as f32 * 0.05, 0.1, 1.0).normalize(),
+                radius: 0.35,
+                strength: 0.8,
+                invert: false,
+                symmetry: false,
+                direction: if i == 0 { Vec3::ZERO } else { Vec3::X },
+                buildup: Buildup::Accumulate,
+            });
+            s.refresh();
+        }
+        s.end_stroke();
+        s
+    }
+
+    #[test]
+    fn an_old_sharp_falloff_replays_as_the_narrow_peak() {
+        // Timelapses from before sharp became a plateau store their sharp
+        // as 2: it reads as the old curve, (1 - t)³, bit for bit.
+        let old = log_bytes(&[Event::Falloff(Falloff::Peak)]);
+        assert_eq!(old.last(), Some(&2));
+        assert_eq!(read_events(&old).unwrap(), [Event::Falloff(Falloff::Peak)]);
+        assert_eq!(Falloff::Peak.weight(0.5, 1.0), 0.125);
+        assert_eq!(Falloff::Peak.weight(0.25, 2.0), 0.875 * 0.875 * 0.875);
+        assert_eq!(Falloff::Peak.weight(1.5, 1.0), 0.0);
+
+        // A session with it saved and reopened replays to the same clay,
+        // which the new sharp would not have made.
+        let live = strokes_with(Falloff::Peak);
+        let mut w = Writer::new();
+        write_log(&mut w, live.log());
+        write_checkpoints(&mut w, live.checkpoints());
+        let bytes = w.finish();
+        let mut r = Reader::new(&bytes);
+        let (log, checkpoints) = (read_log(&mut r).unwrap(), read_checkpoints(&mut r).unwrap());
+        assert!(log.iter().any(|e| e.event == Event::Falloff(Falloff::Peak)));
+        let reopened = Sculpt::with_history(saved(&live), None, log, checkpoints);
+        let mut replay = Replay::of(&reopened);
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_same(&replay, &live);
+        assert_ne!(
+            strokes_with(Falloff::Sharp).mesh.positions,
+            live.mesh.positions
+        );
+    }
+
+    #[test]
+    fn the_new_sharp_falloff_round_trips_with_its_own_byte() {
+        let live = strokes_with(Falloff::Sharp);
+        let mut w = Writer::new();
+        write_log(&mut w, live.log());
+        write_checkpoints(&mut w, live.checkpoints());
+        let bytes = w.finish();
+        let mut r = Reader::new(&bytes);
+        let (log, checkpoints) = (read_log(&mut r).unwrap(), read_checkpoints(&mut r).unwrap());
+        assert_eq!(log, live.log());
+        assert!(
+            log.iter()
+                .any(|e| e.event == Event::Falloff(Falloff::Sharp))
+        );
+        assert!(!log.iter().any(|e| e.event == Event::Falloff(Falloff::Peak)));
+        let reopened = Sculpt::with_history(saved(&live), None, log, checkpoints);
+        let mut replay = Replay::of(&reopened);
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_same(&replay, &live);
     }
 
     #[test]
