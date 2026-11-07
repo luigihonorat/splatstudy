@@ -97,10 +97,14 @@ pub enum Falloff {
     Flat,
     /// A narrow peak: most of the effect near the centre.
     Sharp,
+    /// A cone, the panel's second choice before flat took its place. Only
+    /// timelapses recorded with it replay it; the panel no longer lists it.
+    Linear,
 }
 
 impl Falloff {
-    /// Every falloff, in the order the panel lists them.
+    /// Every falloff, in the order the panel lists them. A log stores
+    /// each one by its own byte, not by this order (see `record`).
     pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Flat, Falloff::Sharp];
 
     /// The weight at `distance` from the centre of a brush of `radius`:
@@ -120,6 +124,7 @@ impl Falloff {
                 let s = 1.0 - t;
                 s * s * s
             }
+            Falloff::Linear => 1.0 - t,
         }
     }
 }
