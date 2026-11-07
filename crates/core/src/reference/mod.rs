@@ -150,16 +150,6 @@ pub struct Credit {
     pub url: String,
 }
 
-/// A soft round lump of material in the clay's space, for turning splats
-/// into clay.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Blob {
-    pub centre: Vec3,
-    pub radius: f32,
-    /// 0..1.
-    pub opacity: f32,
-}
-
 impl Reference {
     /// A reference as loaded: not yet placed, cropped or credited.
     pub fn new(source: Source, content: Content) -> Self {
@@ -170,10 +160,6 @@ impl Reference {
             crop: None,
             credit: Credit::default(),
         }
-    }
-
-    fn kept(&self, p: Vec3) -> bool {
-        self.crop.is_none_or(|crop| crop.contains(p))
     }
 
     /// A mesh reference cut by the crop box and closed with flat caps
@@ -198,27 +184,6 @@ impl Reference {
     /// [`world_mesh`](Self::world_mesh)'s positions and triangles.
     pub fn world_triangles(&self) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
         self.world_mesh().map(|c| (c.positions, c.triangles))
-    }
-
-    /// The splats inside the crop box as blobs in the clay's space, each
-    /// as large as its longest axis; empty for meshes and images.
-    pub fn world_blobs(&self) -> Vec<Blob> {
-        let Content::Splats(splats) = &self.content else {
-            return Vec::new();
-        };
-        let m = self.align.matrix();
-        splats
-            .positions
-            .iter()
-            .zip(&splats.scales)
-            .zip(&splats.colors)
-            .filter(|((p, _), _)| self.kept(**p))
-            .map(|((&p, &scale), &color)| Blob {
-                centre: m.transform_point3(p),
-                radius: scale.max_element() * self.align.scale,
-                opacity: f32::from(color[3]) / 255.0,
-            })
-            .collect()
     }
 }
 
@@ -262,16 +227,7 @@ mod tests {
             colors: vec![[255, 255, 255, 255], [255, 255, 255, 51]],
             ..Default::default()
         };
-        let mut reference = Reference::new(source(), Content::Splats(splats));
-        reference.align.scale = 2.0;
-        assert_eq!(reference.world_blobs().len(), 2);
-        reference.crop = Some(Aabb {
-            min: Vec3::splat(-1.0),
-            max: Vec3::splat(1.0),
-        });
-        let blobs = reference.world_blobs();
-        assert_eq!(blobs.len(), 1);
-        assert!((blobs[0].radius - 0.4).abs() < 1e-6);
+        let reference = Reference::new(source(), Content::Splats(splats));
         assert!(reference.world_triangles().is_none());
 
         let mesh = RefMesh {

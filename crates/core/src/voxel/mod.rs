@@ -3,19 +3,19 @@
 //! Voxels: rebuilding the clay as an even mesh from a grid (remeshing), and
 //! making clay from a reference.
 //!
-//! Both go through a grid of values that are negative inside the shape:
-//! the distance to a mesh's triangles ([`sdf`]), or how densely splats
-//! cover each spot ([`density`]). Surface nets ([`nets`]) then mesh its
-//! zero level.
+//! Both go through a grid of signed distances, negative inside the shape:
+//! to a mesh's triangles ([`sdf`]), or to the surface splats show from
+//! many sides ([`fusion`]). Surface nets ([`nets`]) then mesh its zero
+//! level.
 
-pub mod density;
+pub mod fusion;
 pub mod grid;
 pub mod nets;
 pub mod sdf;
 
 use glam::Vec3;
 
-use crate::reference::{Blob, Reference};
+use crate::reference::{Content, Reference};
 use crate::sculpt::Mesh;
 
 /// Remesh resolutions, in cells along the longest side of the shape.
@@ -23,12 +23,19 @@ pub const MIN_RESOLUTION: u32 = 32;
 pub const MAX_RESOLUTION: u32 = 256;
 pub const DEFAULT_RESOLUTION: u32 = 160;
 
-/// Smoothing passes after surface nets.
+/// Smoothing passes after surface nets, each pulled back onto the level:
+/// they even out the triangles and take off the grid's stair steps.
 const PASSES: usize = 2;
 
-/// Splat density that counts as material, relative to the densest parts
-/// of the shell (see [`density::field`]).
-pub const DEFAULT_THRESHOLD: f32 = 0.25;
+/// The opacity a ray through the splats gathers before it counts as
+/// having reached the surface (see [`fusion::field`]): half, the median.
+pub const DEFAULT_THRESHOLD: f32 = 0.5;
+
+/// How much the clay from a reference is smoothed: passes of
+/// [`grid::Grid::blur`] over its field, each smoothing the shape by
+/// about half a cell; 0 keeps it as found.
+pub const MAX_SMOOTHNESS: u32 = 10;
+pub const DEFAULT_SMOOTHNESS: u32 = 1;
 
 /// Holes in a reference mesh up to about twice this many cells wide are
 /// sealed (scans are often open).
@@ -53,40 +60,70 @@ pub fn from_triangles(
 ) -> Option<Mesh> {
     let resolution = resolution.clamp(MIN_RESOLUTION / 4, MAX_RESOLUTION);
     let mut field = sdf::signed_distance(positions, triangles, resolution, close)?;
-    mesh_level(&mut field, true)
+    mesh_level(&mut field)
 }
 
-/// Clay in the shape of the reference, `resolution` cells across: from a
-/// mesh's triangles, or from where the splats are dense enough
-/// (`threshold`, 0..1, see [`density::field`]). Only what is inside the
-/// crop box counts. `None` for an image, or if nothing is left.
-pub fn clay_from_reference(reference: &Reference, resolution: u32, threshold: f32) -> Option<Mesh> {
-    match reference.world_triangles() {
-        Some((positions, triangles)) => {
-            from_triangles(&positions, &triangles, resolution, REFERENCE_CLOSE)
+/// How to make clay from a reference.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FromReference {
+    /// Cells along the longest side.
+    pub resolution: u32,
+    /// For splats, the opacity (0..1) a ray gathers before it counts as
+    /// having reached the surface (see [`fusion::field`]).
+    pub threshold: f32,
+    /// How much the result is smoothed, 0..=[`MAX_SMOOTHNESS`].
+    pub smoothness: u32,
+}
+
+impl Default for FromReference {
+    fn default() -> Self {
+        Self {
+            resolution: DEFAULT_RESOLUTION,
+            threshold: DEFAULT_THRESHOLD,
+            smoothness: DEFAULT_SMOOTHNESS,
         }
-        None => from_blobs(&reference.world_blobs(), resolution, threshold),
     }
 }
 
-/// Clay from splats: see [`density::field`].
-pub fn from_blobs(blobs: &[Blob], resolution: u32, threshold: f32) -> Option<Mesh> {
-    let resolution = resolution.clamp(MIN_RESOLUTION / 4, MAX_RESOLUTION);
-    let mut field = density::field(blobs, resolution, threshold)?;
-    mesh_level(&mut field, false)
+/// Clay in the shape of the reference: from a mesh's triangles, or from
+/// the surface the splats show (see [`fusion::field`]). Only what is
+/// inside the crop box counts, closed flat where the box cuts it. `None`
+/// for an image, or if nothing is left.
+pub fn clay_from_reference(reference: &Reference, how: FromReference) -> Option<Mesh> {
+    let resolution = how.resolution.clamp(MIN_RESOLUTION / 4, MAX_RESOLUTION);
+    let smoothness = how.smoothness.min(MAX_SMOOTHNESS);
+    let mut field = match &reference.content {
+        Content::Splats(splats) => fusion::field(
+            splats,
+            &reference.align,
+            reference.crop,
+            resolution,
+            how.threshold,
+            smoothness,
+        )?,
+        _ => {
+            let (positions, triangles) = reference.world_triangles()?;
+            let mut field =
+                sdf::signed_distance(&positions, &triangles, resolution, REFERENCE_CLOSE)?;
+            for _ in 0..smoothness {
+                field.blur();
+            }
+            field
+        }
+    };
+    mesh_level(&mut field)
 }
 
 /// Meshes the zero level of `field`, keeps the largest piece and smooths
-/// it; `project` pulls the smoothed vertices back onto the level, for a
-/// field that is a true distance.
-fn mesh_level(field: &mut grid::Grid, project: bool) -> Option<Mesh> {
+/// it along itself, pulling the vertices back onto the level each pass.
+fn mesh_level(field: &mut grid::Grid) -> Option<Mesh> {
     nets::untangle(field);
     let (positions, triangles) = nets::surface_nets(field);
     let (mut positions, triangles) = nets::keep_largest(&positions, &triangles);
     if triangles.is_empty() {
         return None;
     }
-    nets::smooth(&mut positions, &triangles, PASSES, project.then_some(field));
+    nets::smooth(&mut positions, &triangles, PASSES, Some(field));
     Some(Mesh::new(positions, triangles))
 }
 
@@ -99,6 +136,14 @@ mod tests {
     use super::*;
     use crate::meshio::is_closed;
     use crate::reference::{Aabb, Content, RefMesh, Source, Splats};
+
+    /// The default way to make clay from a reference, at `resolution`.
+    pub(crate) fn at(resolution: u32) -> FromReference {
+        FromReference {
+            resolution,
+            ..Default::default()
+        }
+    }
 
     fn source() -> Source {
         Source {
@@ -135,7 +180,7 @@ mod tests {
             min: Vec3::splat(-20.0),
             max: Vec3::splat(20.0),
         });
-        let mesh = clay_from_reference(&reference, 48, DEFAULT_THRESHOLD).unwrap();
+        let mesh = clay_from_reference(&reference, at(48)).unwrap();
         assert!(is_closed(&mesh.triangles));
         for p in &mesh.positions {
             assert!((0.9..1.12).contains(&p.length()), "{p}");
@@ -163,7 +208,7 @@ mod tests {
         };
         let mut reference = Reference::new(source(), Content::Mesh(scan));
         reference.align.scale = 0.5;
-        let mesh = clay_from_reference(&reference, 48, DEFAULT_THRESHOLD).unwrap();
+        let mesh = clay_from_reference(&reference, at(48)).unwrap();
         assert!(is_closed(&mesh.triangles));
         let near = mesh
             .positions
@@ -199,7 +244,7 @@ mod tests {
             min: Vec3::splat(-2.0),
             max: Vec3::new(2.0, 0.0, 2.0),
         });
-        let mesh = clay_from_reference(&reference, 64, DEFAULT_THRESHOLD).unwrap();
+        let mesh = clay_from_reference(&reference, at(64)).unwrap();
         assert!(is_closed(&mesh.triangles));
         let flat: Vec<Vec3> = mesh
             .positions
