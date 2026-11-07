@@ -778,7 +778,7 @@ mod tests {
         click(&mut h, button.center());
         h.key(egui::Key::Escape, false);
         assert!(h.app.flyout.is_none());
-        // The pie takes its place.
+        // Space's size and strength take its place.
         click(&mut h, button.center());
         h.pointer(crate::PointerPhase::Move, rect.center());
         h.app.push_event(crate::InputEvent::Key {
@@ -787,7 +787,7 @@ mod tests {
             repeat: false,
         });
         h.frames(1);
-        assert!(h.app.pie_open() && h.app.flyout.is_none());
+        assert!(h.app.popup_open() && !h.app.pie_open() && h.app.flyout.is_none());
     }
 
     #[test]
