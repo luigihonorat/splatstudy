@@ -70,6 +70,11 @@ pub enum Brush {
     /// Paints the mask, which holds the clay still under every other
     /// brush; the opposite action takes it off.
     Mask,
+    /// Blurs the mask: each vertex's mask relaxes towards the average of
+    /// its neighbours', as Smooth does to the clay, which stays still. Not
+    /// a tool of its own, so not in [`Brush::ALL`]: Ctrl + Shift and a
+    /// stroke, whatever the tool, in ZBrush style.
+    BlurMask,
 }
 
 impl Brush {
@@ -233,6 +238,8 @@ pub struct Sculpt {
     moved: Vec<u32>,
     affected: Vec<u32>,
     smoothed: Vec<Vec3>,
+    /// The new mask values a blur dab computes before it sets them.
+    blurred: Vec<(u32, f32)>,
     dirty_pages: Vec<bool>,
     // The open stroke: first-touch positions of every vertex it moved.
     stroke_open: bool,
@@ -354,6 +361,7 @@ impl Sculpt {
             moved: Vec::new(),
             affected: Vec::new(),
             smoothed: Vec::new(),
+            blurred: Vec::new(),
             dirty_pages: vec![true; n.div_ceil(PAGE)],
             stroke_open: false,
             touched: Stamp::new(n),
@@ -985,6 +993,7 @@ impl Sculpt {
                 Brush::Crease => self.crease(&found, moving, dab),
                 Brush::Pinch => self.pinch(&found, moving, dab),
                 Brush::Mask => self.mask(&found, moving, dab),
+                Brush::BlurMask => self.blur_mask(&found, moving, dab),
                 Brush::Move => {}
             }
             self.wipe_chalk(from, dab);
@@ -1171,6 +1180,47 @@ impl Sculpt {
                 self.dirty_pages[v as usize / PAGE] = true;
             }
         }
+    }
+
+    /// Blurs the mask under the brush: each vertex's relaxes towards the
+    /// average of its neighbours', by the dab's weight on it, as `smooth`
+    /// relaxes the positions. The clay doesn't move. Only the side facing
+    /// the brush, as for the mask brush.
+    fn blur_mask(&mut self, area: &[u32], found: &[u32], dab: Dab) {
+        // Nothing masked: nothing to blur.
+        if self.mesh.layers.mask.is_empty() {
+            return;
+        }
+        let Some((n, _)) = self.area_plane(area, dab) else {
+            return;
+        };
+        // Every new value first, then set: the result doesn't depend on
+        // the order of the vertices.
+        let mut blurred = std::mem::take(&mut self.blurred);
+        blurred.clear();
+        let mask = &self.mesh.layers.mask;
+        for &v in found {
+            let ring = self.mesh.neighbours.of(v);
+            if ring.is_empty() || !self.faces(v, n) {
+                continue;
+            }
+            let old = mask.get(v as usize);
+            let average =
+                ring.iter().map(|&u| mask.get(u as usize)).sum::<f32>() / ring.len() as f32;
+            let p = self.mesh.positions[v as usize];
+            let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength;
+            let new = (old + (average - old) * w).clamp(0.0, 1.0);
+            if new != old {
+                blurred.push((v, new));
+            }
+        }
+        let count = self.mesh.positions.len();
+        for &(v, new) in &blurred {
+            self.touch(v);
+            self.mesh.layers.mask.set(v as usize, new, count);
+            self.dirty_pages[v as usize / PAGE] = true;
+        }
+        self.blurred = blurred;
     }
 
     /// Move brush, at the start of a stroke: takes hold of the surface
@@ -1973,6 +2023,61 @@ mod tests {
             panic!("a stroke step");
         };
         assert!(edit.before.is_empty() && !edit.layers_before.is_empty());
+    }
+
+    #[test]
+    fn the_mask_blur_softens_the_mask_moves_nothing_and_undoes() {
+        let mut s = sculpt();
+        let original = s.mesh.positions.clone();
+        // On no mask at all, it does nothing, not even an undo step.
+        stroke(&mut s, Brush::BlurMask, Vec3::new(-0.1, 0.0, 1.0), 3);
+        assert!(s.mesh.layers.mask.is_empty());
+        assert!(!s.can_undo());
+        // A hard edge down the front: the +X half masked.
+        let n = original.len();
+        for (v, p) in original.iter().enumerate() {
+            if p.x > 0.0 {
+                s.mesh.layers.mask.set(v, 1.0, n);
+            }
+        }
+        let hard = s.mesh.layers.clone();
+        // How far each vertex near the brush is from its neighbours' average.
+        let roughness = |s: &Sculpt| {
+            (0..n as u32)
+                .filter(|&v| original[v as usize].distance(Vec3::Z) < 0.2)
+                .map(|v| {
+                    let mask = &s.mesh.layers.mask;
+                    let ring = s.mesh.neighbours.of(v);
+                    let average =
+                        ring.iter().map(|&u| mask.get(u as usize)).sum::<f32>() / ring.len() as f32;
+                    (mask.get(v as usize) - average).abs()
+                })
+                .sum::<f32>()
+        };
+        let before = roughness(&s);
+        stroke(&mut s, Brush::BlurMask, Vec3::new(-0.1, 0.0, 1.0), 3);
+        assert_eq!(s.mesh.positions, original, "the clay stays");
+        assert!(roughness(&s) < before * 0.7, "{before} → {}", roughness(&s));
+        let mask = &s.mesh.layers.mask;
+        let soft = (0..n).filter(|&v| mask.get(v) > 0.0 && mask.get(v) < 1.0);
+        assert!(soft.count() > 5, "a soft edge");
+        for (v, p) in original.iter().enumerate() {
+            assert!((0.0..=1.0).contains(&mask.get(v)));
+            // Only under the brush.
+            if p.distance(Vec3::Z) > 0.45 {
+                assert_eq!(mask.get(v), hard.mask.get(v), "vertex {v}");
+            }
+        }
+        let blurred = s.mesh.layers.clone();
+        // One undo step, which keeps the mask alone.
+        let Some(Step::Move(edit)) = s.undo.last() else {
+            panic!("a stroke step");
+        };
+        assert!(edit.before.is_empty() && !edit.layers_before.is_empty());
+        s.undo();
+        assert_eq!(s.mesh.layers, hard);
+        s.redo();
+        assert_eq!(s.mesh.layers, blurred);
     }
 
     #[test]
