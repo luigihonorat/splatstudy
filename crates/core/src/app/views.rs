@@ -322,6 +322,7 @@ impl App {
             }
         }
         self.tool_pie_ui(ui);
+        self.quick_settings_ui(ui);
     }
 
     /// The point of the rendered sculpt view under `pos`, a point of the
@@ -375,7 +376,7 @@ impl App {
         let mut started = false;
         if self.drags[index].is_none()
             && response.hovered()
-            && !self.pie_open()
+            && !self.popup_open()
             && self.flyout.is_none()
             && !on_toolbar
         {

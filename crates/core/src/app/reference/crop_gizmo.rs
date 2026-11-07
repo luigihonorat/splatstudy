@@ -364,7 +364,7 @@ impl App {
         let pointer = pointer?;
         let toolbar = self.toolbar_areas(self.view_rects)[REFERENCE];
         let busy = self.drags[REFERENCE].is_some()
-            || self.pie_open()
+            || self.popup_open()
             || self.flyout.is_some()
             || self.study.measure.drawing.is_some()
             || self.study.plumb_drag.is_some()
