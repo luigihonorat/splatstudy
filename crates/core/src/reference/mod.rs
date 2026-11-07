@@ -9,6 +9,7 @@
 //! lives in. The two views can then share one camera, the ghost lines up
 //! with the clay, and clay made from the reference comes out the right size.
 
+pub mod clip;
 pub mod fit;
 pub mod harmonics;
 pub mod load;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec3};
 
+pub use clip::Cropped;
 pub use harmonics::Harmonics;
 
 /// A loaded reference.
@@ -174,25 +176,28 @@ impl Reference {
         self.crop.is_none_or(|crop| crop.contains(p))
     }
 
-    /// A mesh reference's triangles inside the crop box, in the clay's
-    /// space; `None` for splats and images.
-    pub fn world_triangles(&self) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+    /// A mesh reference cut by the crop box and closed with flat caps
+    /// where the cut is closed (see [`clip`]), in the clay's space; `None`
+    /// for splats and images.
+    pub fn world_mesh(&self) -> Option<Cropped> {
         let Content::Mesh(mesh) = &self.content else {
             return None;
         };
+        let mut cropped = match self.crop {
+            Some(crop) => clip::crop(mesh, crop),
+            None => Cropped::whole(mesh),
+        };
+        // Scaled by a positive amount and turned: windings stay.
         let m = self.align.matrix();
-        let positions = mesh
-            .positions
-            .iter()
-            .map(|&p| m.transform_point3(p))
-            .collect();
-        let triangles = mesh
-            .triangles
-            .iter()
-            .filter(|t| t.iter().all(|&i| self.kept(mesh.positions[i as usize])))
-            .copied()
-            .collect();
-        Some((positions, triangles))
+        for p in &mut cropped.positions {
+            *p = m.transform_point3(*p);
+        }
+        Some(cropped)
+    }
+
+    /// [`world_mesh`](Self::world_mesh)'s positions and triangles.
+    pub fn world_triangles(&self) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+        self.world_mesh().map(|c| (c.positions, c.triangles))
     }
 
     /// The splats inside the crop box as blobs in the clay's space, each
@@ -279,7 +284,16 @@ mod tests {
             min: Vec3::splat(-1.0),
             max: Vec3::splat(1.0),
         });
-        let (_, triangles) = reference.world_triangles().unwrap();
-        assert_eq!(triangles, vec![[0, 1, 2]]);
+        // The triangle inside is kept whole; the one across the box's
+        // side is cut at it.
+        let (positions, triangles) = reference.world_triangles().unwrap();
+        assert_eq!(triangles[0], [0, 1, 2]);
+        assert_eq!(triangles.len(), 2);
+        assert!(
+            triangles
+                .iter()
+                .flatten()
+                .all(|&i| positions[i as usize].x <= 1.0)
+        );
     }
 }

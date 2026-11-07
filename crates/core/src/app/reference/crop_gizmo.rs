@@ -654,6 +654,55 @@ mod tests {
         assert_eq!(h.app.cameras[REFERENCE], camera);
     }
 
+    /// When the mesh shown was built, and for which placement and crop.
+    fn built(
+        app: &App,
+    ) -> (
+        f64,
+        (crate::reference::Alignment, Option<crate::reference::Aabb>),
+    ) {
+        match &app.reference.drawn {
+            Some(super::super::Drawn::Mesh {
+                built_at,
+                built_for,
+                mesh: Some(_),
+                ..
+            }) => (*built_at, *built_for),
+            _ => panic!("no mesh shown"),
+        }
+    }
+
+    #[test]
+    fn a_dragged_crop_cuts_the_mesh_now_and_then_and_when_let_go() {
+        use crate::PointerPhase::{Down, Move, Up};
+        let Some(mut h) = cropped_cube() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let g = gizmo_of(&h.app);
+        let at = g.screen(g.place(Handle::Face(1))).unwrap();
+        let d = g.face_axis(1).unwrap();
+        h.pointer(Move, at);
+        h.pointer(Down, at);
+        // A fifth of a second of moves, a frame each.
+        let mut builds = Vec::new();
+        for k in 1..=12 {
+            h.pointer(Move, at - d * (0.2 * k as f32 / 12.0));
+            builds.push(built(&h.app).0);
+        }
+        builds.dedup();
+        assert!((1..=3).contains(&builds.len()), "{builds:?}");
+        // Held still, it catches up.
+        h.frames(8);
+        let r = h.app.reference.current.as_ref().unwrap();
+        assert_eq!(built(&h.app).1.1, r.crop);
+        // Let go: fitted, and built for the fit.
+        h.pointer(Up, at - d * 0.2);
+        h.frames(1);
+        let r = h.app.reference.current.as_ref().unwrap();
+        assert_eq!(built(&h.app).1, (r.align, r.crop));
+    }
+
     #[test]
     fn the_handles_show_only_with_the_crop_group() {
         let Some(mut h) = cropped_cube() else {

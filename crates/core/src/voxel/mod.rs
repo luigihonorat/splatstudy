@@ -174,6 +174,51 @@ mod tests {
     }
 
     #[test]
+    fn clay_from_a_cropped_hollow_cast_is_solid_at_the_cut() {
+        // A hollow ball, walls from radius 0.6 to 1, cut in half: the clay
+        // fills the ring the cut leaves and keeps the hollow open.
+        let outer = Mesh::icosphere(4);
+        let inner = Mesh::icosphere(3);
+        let mut positions = outer.positions.clone();
+        let mut triangles = outer.triangles.clone();
+        let n = positions.len() as u32;
+        positions.extend(inner.positions.iter().map(|p| *p * 0.6));
+        triangles.extend(
+            inner
+                .triangles
+                .iter()
+                .map(|&[a, b, c]| [a + n, c + n, b + n]),
+        );
+        let cast = RefMesh {
+            positions,
+            triangles,
+            colors: None,
+        };
+        let mut reference = Reference::new(source(), Content::Mesh(cast));
+        reference.crop = Some(Aabb {
+            min: Vec3::splat(-2.0),
+            max: Vec3::new(2.0, 0.0, 2.0),
+        });
+        let mesh = clay_from_reference(&reference, 64, DEFAULT_THRESHOLD).unwrap();
+        assert!(is_closed(&mesh.triangles));
+        let flat: Vec<Vec3> = mesh
+            .positions
+            .iter()
+            .copied()
+            .filter(|p| p.y.abs() < 0.01)
+            .collect();
+        let ring = |lo: f32, hi: f32| {
+            flat.iter()
+                .filter(|p| (lo..hi).contains(&p.length()))
+                .count()
+        };
+        // Across the wall's cut, not only at its two edges...
+        assert!(ring(0.7, 0.9) > 20, "{}", ring(0.7, 0.9));
+        // ...and nothing across the hollow.
+        assert_eq!(ring(0.0, 0.5), 0);
+    }
+
+    #[test]
     fn a_remeshed_sphere_stays_round_and_closed() {
         let sphere = Mesh::icosphere(4);
         let resolution = 48;
