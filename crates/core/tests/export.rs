@@ -571,6 +571,7 @@ mod job {
         let mut encoder = FakeEncoder::default();
         let mut job = Job::new(
             &device,
+            &queue,
             settings,
             replay,
             [OrbitCamera::default(); 2],
@@ -620,6 +621,7 @@ mod job {
         let new_job = |sink| {
             Job::new(
                 &device,
+                &queue,
                 settings(),
                 replay(),
                 [OrbitCamera::default(); 2],
@@ -677,6 +679,7 @@ mod job {
         let timeline = settings.timeline(replay.duration());
         let mut job = Job::new(
             &device,
+            &queue,
             settings,
             replay,
             [OrbitCamera::default(); 2],
@@ -747,6 +750,7 @@ mod job {
         let timeline = settings.timeline(replay.duration());
         let mut job = Job::new(
             &device,
+            &queue,
             settings,
             replay,
             [OrbitCamera::default(); 2],

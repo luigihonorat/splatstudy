@@ -310,6 +310,7 @@ impl Job {
     #[allow(clippy::too_many_arguments)]
     pub fn new<'e>(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         settings: Settings,
         replay: Replay,
         cameras: [OrbitCamera; 2],
@@ -327,7 +328,10 @@ impl Job {
         let timeline = settings.timeline(duration);
         Ok(Job {
             compositor: Compositor::new(device, size, settings.layout),
-            gpu_mesh: GpuMesh::new(device, &replay.sculpt.mesh),
+            // Through the queue, in pieces: the start can be a fine clay
+            // (a copy without its timelapse), and a buffer that size
+            // mapped at creation can fail in the browser.
+            gpu_mesh: GpuMesh::upload(device, queue, &replay.sculpt.mesh),
             settings,
             replay,
             cameras,

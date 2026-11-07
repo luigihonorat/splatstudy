@@ -9,6 +9,7 @@
 
 use egui::{Align2, RichText, Stroke, TextureId};
 
+use super::playback::playback_length;
 use super::study::ReferenceLook;
 use super::{App, Request, WEB};
 use crate::camera::OrbitCamera;
@@ -20,7 +21,7 @@ use crate::export::{
 };
 use crate::reference::{Aabb, Alignment, Content, Credit, Reference};
 use crate::render::Slot;
-use crate::sculpt::{Checkpoint, Mesh, Replay};
+use crate::sculpt::Replay;
 use crate::ui::{self, menu, theme};
 
 /// Session seconds per video second, as in the timelapse panel.
@@ -228,10 +229,7 @@ impl App {
         if !force && key == self.export.duration_for {
             return;
         }
-        // Only the times matter here, so a tiny start mesh will do.
-        let tiny = Mesh::icosphere(0);
-        let start = Checkpoint::start(&tiny);
-        self.export.duration = Replay::new(vec![start], log.to_vec()).duration();
+        self.export.duration = playback_length(log);
         self.export.duration_for = key;
     }
 
@@ -353,6 +351,13 @@ impl App {
             ..reference_look
         });
         self.export.looks = Some([reference_look, ghost_look]);
+        // Started from the timelapse: its clay goes before the export's is
+        // made, and comes back when the export is over. A fine clay held
+        // three times at once (live, watched, exported) could run a
+        // browser tab out of memory.
+        if let Some(playback) = &mut self.playback {
+            playback.suspend();
+        }
         let replay = Replay::of(&self.sculpt);
         let reference = self.scene_reference();
         let card = EndCard {
@@ -381,6 +386,7 @@ impl App {
         let name = format!("{}-timelapse", self.scene_stem());
         let job = Job::new(
             &self.device,
+            &self.queue,
             settings,
             replay,
             self.cameras,
@@ -844,5 +850,74 @@ mod tests {
         app.start_export(Sink::Zip(Zip::new()), ZIP_SHORT_SIDE, ZIP_FPS);
         assert!(app.export.duration > second + 0.9);
         app.cancel_export();
+    }
+
+    #[test]
+    fn an_export_from_the_timelapse_lets_go_of_its_clay_until_it_ends() {
+        let Some((mut app, view)) = app() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let mut time = 0.0;
+        let mut frame = |app: &mut App| {
+            time += 1.0 / 60.0;
+            app.frame(time, &view, [1280, 720], 1.0);
+        };
+        for k in 0..4 {
+            stroke(&mut app, 1.0 + 5.0 * k as f64, 1.0);
+        }
+        app.start_playback();
+        frame(&mut app);
+        // Paused halfway through.
+        let p = app.playback.as_mut().expect("watching");
+        let duration = p.played.as_ref().expect("its clay").replay.duration();
+        p.playing = false;
+        p.head = duration / 2.0;
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+
+        // Exported from the timelapse: only the export's copy of the clay.
+        app.start_export(Sink::Zip(Zip::new()), ZIP_SHORT_SIDE, ZIP_FPS);
+        assert!(app.export.job.is_some());
+        let p = app.playback.as_ref().expect("still watching");
+        assert!(p.played.is_none());
+        assert_eq!(p.head, duration / 2.0);
+        assert!(!p.playing);
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+        assert!(app.exporting());
+        assert!(app.playback.as_ref().unwrap().played.is_none());
+
+        // Over: the timelapse is back where it was, paused.
+        app.cancel_export();
+        for _ in 0..3 {
+            frame(&mut app);
+        }
+        let p = app.playback.as_ref().expect("still watching");
+        let played = p.played.as_ref().expect("its clay again");
+        assert_eq!(p.head, duration / 2.0);
+        assert!(!p.playing);
+        assert!(played.replay.position() <= p.head);
+        assert!(played.replay.position() > 0.0);
+    }
+
+    #[test]
+    fn the_timelapse_opened_during_an_export_waits_for_it() {
+        let Some((mut app, view)) = app() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        stroke(&mut app, 1.0, 1.5);
+        app.start_export(Sink::Zip(Zip::new()), ZIP_SHORT_SIDE, ZIP_FPS);
+        app.start_playback();
+        let p = app.playback.as_ref().expect("watching");
+        assert!(p.played.is_none());
+        assert_eq!(p.head, 0.0);
+        app.cancel_export();
+        app.frame(1.0, &view, [1280, 720], 1.0);
+        let p = app.playback.as_ref().expect("watching");
+        assert!(p.played.is_some());
     }
 }

@@ -376,7 +376,7 @@ impl App {
         if !self.study.wireframe || self.study.views[SCULPT].silhouette {
             return;
         }
-        let (gpu, mesh) = match &self.playback {
+        let (gpu, mesh) = match self.playback.as_ref().and_then(|p| p.played.as_ref()) {
             Some(p) => (&p.gpu_mesh, &p.replay.sculpt.mesh),
             None => (&self.gpu_mesh, &self.sculpt.mesh),
         };
@@ -1496,8 +1496,9 @@ pub(super) mod tests {
 
         h.app.start_playback();
         h.frames(3);
-        let playback = h.app.playback.as_ref().expect("playing");
-        assert_eq!(playback.replay.sculpt.mesh.quads.len(), quads);
+        let played = h.app.playback.as_ref().and_then(|p| p.played.as_ref());
+        let played = played.expect("playing");
+        assert_eq!(played.replay.sculpt.mesh.quads.len(), quads);
         // Over the silhouette it stays off.
         h.app.study.views[SCULPT].silhouette = true;
         h.frames(1);
