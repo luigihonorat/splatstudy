@@ -160,6 +160,37 @@ pub fn plumb(painter: &Painter, rect: Rect, colour: Color32) {
     pen.polyline(&[(8.5, 9.5), (11.0, 12.5), (8.5, 15.0), (6.0, 12.5)], true);
 }
 
+/// A sculptor's calipers: two bowed legs from a hinge, their tips turned
+/// in to meet a span.
+pub fn calipers(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.circle((8.0, 2.5), 1.5);
+    // Each leg a quadratic curve out from the hinge and back in.
+    let leg = |side: f32| -> Vec<(f32, f32)> {
+        let (from, bow, to) = (
+            (8.0 + side, 4.0),
+            (8.0 + 8.0 * side, 8.0),
+            (8.0 + 2.5 * side, 14.5),
+        );
+        (0..=10)
+            .map(|i| {
+                let t = i as f32 / 10.0;
+                let u = 1.0 - t;
+                (
+                    u * u * from.0 + 2.0 * u * t * bow.0 + t * t * to.0,
+                    u * u * from.1 + 2.0 * u * t * bow.1 + t * t * to.1,
+                )
+            })
+            .collect()
+    };
+    for side in [-1.0, 1.0] {
+        let mut points = leg(side);
+        // The tip, turned in.
+        points.push((8.0 + 1.0 * side, 14.5));
+        pen.polyline(&points, false);
+    }
+}
+
 /// A form filled flat: only its outline counts.
 pub fn silhouette(painter: &Painter, rect: Rect, colour: Color32) {
     let pen = Pen::new(painter, rect, colour);

@@ -521,7 +521,11 @@ impl App {
             ViewOption::Silhouette,
             ViewOption::Plumb,
             ViewOption::Grid,
+            ViewOption::Calipers,
         ] {
+            if option == ViewOption::Calipers && !self.calipers_fit(index) {
+                continue;
+            }
             self.option_item(ui, option, index);
         }
         menu::submenu(ui, st.grid_divisions, |ui| {
@@ -663,6 +667,9 @@ impl App {
         screen: Pos2,
         m: Modifiers,
     ) -> bool {
+        if self.caliper_press(rect, index, screen, m) {
+            return true;
+        }
         if self.on_bob(rect, index, screen) {
             self.study.plumb_drag = Some(index);
             return true;
@@ -730,6 +737,7 @@ impl App {
             }
         }
         self.measure_ui(ui, rects, pointer, held);
+        self.calipers_ui(ui, rects);
         self.silhouette_match(ui, rects);
     }
 
@@ -780,23 +788,12 @@ impl App {
                 continue;
             };
             let [a, b] = ends.map(|at| self.view_pos_in(index, rect, from_heights(rect, at)));
-            painter.line_segment([a, b], line);
-            // Ticks across both ends, as on a ruler.
-            let across = (b - a).normalized().rot90() * 5.0;
-            for end in [a, b] {
-                painter.line_segment([end - across, end + across], line);
-            }
+            guides::ruler(&painter, [a, b], line);
             let label = if index == REFERENCE { Some(1.0) } else { ratio };
             if let Some(value) = label.filter(|_| a.distance(b) >= MEASURE_MIN) {
                 // Beside the middle, on the side away from the view's centre.
-                let middle = a + (b - a) / 2.0;
-                let side = if across.dot(middle - rect.center()) >= 0.0 {
-                    across
-                } else {
-                    -across
-                };
                 painter.text(
-                    middle + side.normalized() * 16.0,
+                    guides::label_at([a, b], rect.center(), 16.0),
                     Align2::CENTER_CENTER,
                     format!("{value:.2}"),
                     fonts::regular(13.0),

@@ -12,6 +12,7 @@
 //! - `reference`: the reference and its panel
 //! - `gallery`: the bundled casts to choose a reference from
 //! - `study`: comparison aids (camera link, silhouette, ghost, guides, timer)
+//! - `calipers`: lengths set between two points, over both views
 //! - `toolbar`: each view's toolbar of view options
 //! - `background`: each view's background colour, and the window that
 //!   picks it
@@ -26,6 +27,7 @@
 //!   so a part grows without touching them.
 
 mod background;
+mod calipers;
 mod export;
 mod files;
 mod gallery;
@@ -192,6 +194,7 @@ pub struct App {
     reference: reference::ReferenceState,
     #[allow(dead_code)] // until the study part fills it
     study: study::StudyState,
+    calipers: calipers::CaliperState,
     #[allow(dead_code)] // until the files part fills it
     files: files::FileState,
     #[allow(dead_code)] // until the export part fills it
@@ -266,6 +269,7 @@ impl App {
             playback: None,
             reference: Default::default(),
             study: Default::default(),
+            calipers: Default::default(),
             files: Default::default(),
             export: Default::default(),
             shot: Default::default(),
