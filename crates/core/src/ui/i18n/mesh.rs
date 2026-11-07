@@ -37,14 +37,12 @@ pub struct MeshTr {
     pub stabiliser: &'static str,
     /// The stabiliser's value when it is at zero.
     pub off: &'static str,
-    /// Heading of the brush falloff choices.
+    /// The falloff slider, from a soft dome (0) to a hard edge: full
+    /// strength nearly to the rim, then a steep drop.
     pub falloff: &'static str,
-    /// Falloff shapes: a soft dome, a plateau like a clay tube, and a wider
-    /// plateau with a hard edge: full strength nearly to the rim, then a steep drop.
-    pub falloff_smooth: &'static str,
-    pub falloff_flat: &'static str,
-    pub falloff_sharp: &'static str,
-    /// The mirror across X: its on / off switch, after its label.
+    /// Clay: fill the hollows first, leaving their rims; on / off after it.
+    pub fill: &'static str,
+    /// The on / off switches, after their label: the mirror across X.
     pub switch_on: &'static str,
     pub switch_off: &'static str,
     pub symmetry_x: &'static str,
@@ -121,9 +119,7 @@ pub const JA: MeshTr = MeshTr {
     stabiliser: "手ぶれ補正",
     off: "オフ",
     falloff: "減衰",
-    falloff_smooth: "なめらか",
-    falloff_flat: "平ら",
-    falloff_sharp: "鋭い",
+    fill: "穴埋め",
     switch_on: "オン",
     switch_off: "オフ",
     symmetry_x: "X 軸対称",
@@ -175,9 +171,7 @@ pub const EN: MeshTr = MeshTr {
     stabiliser: "stabiliser",
     off: "off",
     falloff: "falloff",
-    falloff_smooth: "smooth",
-    falloff_flat: "flat",
-    falloff_sharp: "sharp",
+    fill: "fill",
     switch_on: "on",
     switch_off: "off",
     symmetry_x: "symmetry x",
@@ -229,9 +223,7 @@ pub const FR: MeshTr = MeshTr {
     stabiliser: "stabilisateur",
     off: "aucun",
     falloff: "atténuation",
-    falloff_smooth: "douce",
-    falloff_flat: "plate",
-    falloff_sharp: "vive",
+    fill: "remplissage",
     switch_on: "oui",
     switch_off: "non",
     symmetry_x: "symétrie x",

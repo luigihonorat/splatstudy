@@ -960,6 +960,7 @@ mod tests {
                     symmetry: true,
                     direction: Vec3::X,
                     buildup: Default::default(),
+                    fill: false,
                 });
                 s.refresh();
             }
@@ -1069,6 +1070,7 @@ mod tests {
             symmetry: true,
             direction: Vec3::ZERO,
             buildup: Default::default(),
+            fill: false,
         });
         live.end_stroke();
         live.refresh();
@@ -1167,6 +1169,7 @@ mod tests {
                 symmetry: false,
                 direction: Vec3::ZERO,
                 buildup: Default::default(),
+                fill: false,
             });
             live.end_stroke();
             live.refresh();
@@ -1225,6 +1228,7 @@ mod tests {
                 symmetry: true,
                 direction: Vec3::X,
                 buildup: Default::default(),
+                fill: false,
             });
             s.end_stroke();
             s.refresh();
@@ -1317,6 +1321,7 @@ mod tests {
                     symmetry: false,
                     direction: Vec3::X,
                     buildup: Default::default(),
+                    fill: false,
                 });
                 if i % 4 == 3 {
                     s.refresh();
@@ -1411,6 +1416,7 @@ mod tests {
                     symmetry: false,
                     direction: Vec3::Y,
                     buildup: Default::default(),
+                    fill: false,
                 });
                 s.refresh();
             }
@@ -1692,6 +1698,7 @@ mod tests {
                         symmetry: true,
                         direction: Vec3::Y,
                         buildup: Default::default(),
+                        fill: false,
                     });
                     if i % 4 == 3 {
                         s.refresh();
@@ -1750,6 +1757,7 @@ mod tests {
                 symmetry: true,
                 direction: Vec3::X,
                 buildup: Default::default(),
+                fill: false,
             });
             s.end_stroke();
             s.refresh();
@@ -1824,6 +1832,7 @@ mod tests {
                 symmetry: false,
                 direction: Vec3::ZERO,
                 buildup: Default::default(),
+                fill: false,
             });
             resumed.end_stroke();
             resumed.refresh();
@@ -1981,6 +1990,7 @@ mod tests {
                     symmetry: true,
                     direction: Vec3::X,
                     buildup: Default::default(),
+                    fill: false,
                 });
                 s.refresh();
             }

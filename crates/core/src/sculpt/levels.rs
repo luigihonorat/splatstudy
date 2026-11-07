@@ -699,6 +699,7 @@ mod tests {
             symmetry: true,
             direction: Vec3::X,
             buildup: Default::default(),
+            fill: false,
         }
     }
 

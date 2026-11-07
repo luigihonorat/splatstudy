@@ -15,8 +15,8 @@ use glam::Vec3;
 
 use super::subdivide::parents;
 use super::{
-    Brush, Buildup, Bvh, Dab, Falloff, LayerOp, Layers, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh,
-    OLD_START_LEVEL, Resume, Sculpt,
+    Brush, Buildup, Bvh, Dab, Falloff, LayerOp, Layers, Levels, MAX_HARDNESS, MAX_TRIANGLES,
+    MAX_VERTICES, Mesh, OLD_START_LEVEL, Resume, Sculpt,
 };
 use crate::io::{ReadError, Reader, Writer};
 
@@ -266,7 +266,7 @@ impl Entry {
                 let larger = matches!(self.event, Event::Dab(_)) && d.symmetry;
                 // Bit 4 came later still: the mask blur is stored as the
                 // Smooth brush with it, smoothing the mask instead of the
-                // clay. Older logs never set it.
+                // clay. Older logs never set it, nor bit 5, clay's fill.
                 let (brush, on_mask) = match d.brush {
                     Brush::BlurMask => (Brush::Smooth, true),
                     brush => (brush, false),
@@ -275,7 +275,8 @@ impl Entry {
                     | u8::from(d.symmetry) << 1
                     | u8::from(d.buildup == Buildup::Layer) << 2
                     | u8::from(larger) << 3
-                    | u8::from(on_mask) << 4;
+                    | u8::from(on_mask) << 4
+                    | u8::from(d.fill) << 5;
                 w.u8(tag::DAB)
                     .u8(brush as u8)
                     .vec3(d.centre)
@@ -351,7 +352,7 @@ impl Entry {
                     .ok_or_else(|| r.invalid("unknown brush"))?;
                 let (centre, radius, strength) = (r.vec3()?, r.f32()?, r.f32()?);
                 let flags = r.u8()?;
-                if flags > 31 {
+                if flags > 63 {
                     return Err(r.invalid("unknown dab flags"));
                 }
                 // Bit 4: the Smooth brush on the mask (see `write`).
@@ -373,6 +374,7 @@ impl Entry {
                     } else {
                         Buildup::Accumulate
                     },
+                    fill: flags & 32 != 0,
                 };
                 if dab.symmetry && flags & 8 == 0 {
                     Event::SummedDab(dab)
@@ -424,8 +426,13 @@ fn falloff_byte(falloff: Falloff) -> u8 {
         Falloff::Peak => 2,
         Falloff::Flat => 3,
         Falloff::Sharp => 4,
+        // The slider's falloffs: 16 and up, one byte for each step.
+        Falloff::Hard(hardness) => HARD_BYTES + hardness.min(MAX_HARDNESS),
     }
 }
+
+/// The byte of the softest falloff on the slider, [`Falloff::Hard`]`(0)`.
+const HARD_BYTES: u8 = 16;
 
 /// The falloff a log's byte stands for (see [`falloff_byte`]).
 fn falloff_from_byte(byte: u8) -> Option<Falloff> {
@@ -435,6 +442,7 @@ fn falloff_from_byte(byte: u8) -> Option<Falloff> {
         2 => Falloff::Peak,
         3 => Falloff::Flat,
         4 => Falloff::Sharp,
+        b if (HARD_BYTES..=HARD_BYTES + MAX_HARDNESS).contains(&b) => Falloff::Hard(b - HARD_BYTES),
         _ => return None,
     })
 }
@@ -856,6 +864,7 @@ mod tests {
                         // Both build-ups, so the log and the replay carry
                         // them.
                         buildup: Buildup::ALL[k % Buildup::ALL.len()],
+                        fill: k % 3 == 1,
                     });
                     if i % 3 == 0 {
                         s.refresh();
@@ -925,6 +934,7 @@ mod tests {
                     symmetry: k == 1,
                     direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
                     buildup: Default::default(),
+                    fill: false,
                 });
                 if i % 2 == 0 {
                     s.refresh();
@@ -998,6 +1008,7 @@ mod tests {
                 symmetry,
                 direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
                 buildup: Default::default(),
+                fill: false,
             });
             if i % 2 == 0 {
                 s.refresh();
@@ -1068,6 +1079,7 @@ mod tests {
             symmetry: true,
             direction: Vec3::X,
             buildup: Buildup::Layer,
+            fill: false,
         };
         let bytes = log_bytes(&[Event::Dab(dab)]);
         // From the end: the direction after the flags, and the centre,
@@ -1099,12 +1111,13 @@ mod tests {
                 assert!(read.is_err(), "{brush:?}");
             }
         }
-        // It has no brush byte of its own, and the bits above are unknown.
+        // It has no brush byte of its own, and the bits above clay's fill
+        // (bit 5) are unknown.
         let mut unknown = old;
         unknown[brush_at] = Brush::ALL.len() as u8;
         assert!(read_events(&unknown).is_err());
         let mut high = bytes;
-        high[flags_at] |= 32;
+        high[flags_at] |= 64;
         assert!(read_events(&high).is_err());
     }
 
@@ -1219,6 +1232,35 @@ mod tests {
     }
 
     #[test]
+    fn a_clay_dab_keeps_its_fill_and_older_ones_read_without() {
+        let dab = Dab {
+            brush: Brush::Clay,
+            centre: Vec3::Z,
+            radius: 0.2,
+            strength: 0.5,
+            invert: false,
+            symmetry: false,
+            direction: Vec3::X,
+            buildup: Buildup::Layer,
+            fill: true,
+        };
+        let mut w = Writer::new();
+        Entry {
+            time: 1.0,
+            event: Event::Dab(dab),
+        }
+        .write(&mut w);
+        let mut bytes = w.finish();
+        let read = |bytes: &[u8]| Entry::read(&mut Reader::new(bytes)).unwrap().event;
+        assert_eq!(read(&bytes), Event::Dab(dab));
+        // Time, tag, brush, centre, radius and strength, then the flags.
+        let flags = 8 + 1 + 1 + 12 + 4 + 4;
+        assert_eq!(bytes[flags], 4 | 32);
+        bytes[flags] = 4;
+        assert_eq!(read(&bytes), Event::Dab(Dab { fill: false, ..dab }));
+    }
+
+    #[test]
     fn a_dab_from_before_layers_reads_as_accumulating() {
         let dab = Dab {
             brush: Brush::Clay,
@@ -1229,6 +1271,7 @@ mod tests {
             symmetry: true,
             direction: Vec3::X,
             buildup: Buildup::Layer,
+            fill: false,
         };
         let bytes = |dab: Dab| {
             let mut w = Writer::new();
@@ -1252,6 +1295,7 @@ mod tests {
             read(&old),
             Event::SummedDab(Dab {
                 buildup: Buildup::Accumulate,
+                fill: false,
                 ..dab
             })
         );
@@ -1312,9 +1356,18 @@ mod tests {
         for falloff in Falloff::ALL {
             assert!(pinned.iter().any(|&(f, _)| f == falloff), "{falloff:?}");
         }
-        let mut unknown = log_bytes(&[Event::Falloff(Falloff::Smooth)]);
-        *unknown.last_mut().unwrap() = 5;
-        assert!(read_events(&unknown).is_err());
+        // The slider's falloffs: one byte each, from 16 up.
+        for h in 0..=MAX_HARDNESS {
+            let falloff = Falloff::Hard(h);
+            let bytes = log_bytes(&[Event::Falloff(falloff)]);
+            assert_eq!(bytes.last(), Some(&(16 + h)), "{falloff:?}");
+            assert_eq!(read_events(&bytes).unwrap(), [Event::Falloff(falloff)]);
+        }
+        for byte in [5, 15, 16 + MAX_HARDNESS + 1] {
+            let mut unknown = log_bytes(&[Event::Falloff(Falloff::Smooth)]);
+            *unknown.last_mut().unwrap() = byte;
+            assert!(read_events(&unknown).is_err(), "{byte}");
+        }
     }
 
     #[test]
@@ -1330,6 +1383,7 @@ mod tests {
             symmetry: false,
             direction: Vec3::ZERO,
             buildup: Buildup::Accumulate,
+            fill: false,
         };
         let old = [Event::Falloff(Falloff::Linear), Event::Dab(dab)];
         assert_eq!(read_events(&log_bytes(&old)).unwrap(), old);
@@ -1341,6 +1395,7 @@ mod tests {
         // on their dabs: there, 1 was flat.
         let layered = Dab {
             buildup: Buildup::Layer,
+            fill: false,
             ..dab
         };
         let flat = |events: &[Event]| {
@@ -1396,6 +1451,7 @@ mod tests {
                 symmetry: false,
                 direction: if i == 0 { Vec3::ZERO } else { Vec3::X },
                 buildup: Buildup::Accumulate,
+                fill: false,
             });
             s.refresh();
         }
