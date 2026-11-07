@@ -1026,6 +1026,34 @@ mod tests {
     }
 
     #[test]
+    fn a_blurred_mask_goes_down_the_levels_as_a_painted_one_and_replays() {
+        let mut s = Sculpt::new(Mesh::icosphere(2));
+        let n = s.mesh.positions.len();
+        stroke(&mut s, Brush::Mask, Vec3::new(0.2, 0.3, 0.9), 0.4);
+        assert!(s.subdivide());
+        let painted = s.mesh.layers.clone();
+        // Blurred at the top, the mask comes down to the base's vertices.
+        stroke(&mut s, Brush::BlurMask, Vec3::new(0.0, 0.3, 0.9), 0.4);
+        let blurred = s.mesh.layers.clone();
+        assert_ne!(blurred, painted);
+        assert!((0..n).any(|v| blurred.mask.get(v) != painted.mask.get(v)));
+        assert!(s.change_level(false));
+        for v in 0..n {
+            assert_eq!(s.mesh.layers.mask.get(v), blurred.mask.get(v));
+        }
+        // Blurred below, then up again: the vertices from below keep theirs.
+        stroke(&mut s, Brush::BlurMask, Vec3::new(0.3, 0.2, 0.9), 0.4);
+        let below = s.mesh.layers.clone();
+        assert!(s.change_level(true));
+        for v in 0..n {
+            assert_eq!(s.mesh.layers.mask.get(v), below.mask.get(v));
+        }
+        let mut replay = Replay::of(&s);
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_same(&replay.sculpt, &s);
+    }
+
+    #[test]
     fn replay_through_level_changes_is_bit_exact() {
         let live = session();
         assert!(live.levels().is_some());

@@ -93,6 +93,9 @@ pub struct MeshTr {
     pub invert_mask: &'static str,
     /// Object menu: no clay masked any more.
     pub clear_mask: &'static str,
+    /// Ctrl + Shift and a stroke, in ZBrush style: the mask under the
+    /// brush softened, the clay left as it is.
+    pub blur_mask: &'static str,
     /// Object menu: the clay covered in a blue tint, like a carpenter's
     /// chalk line, which sculpting wipes off; and that tint taken off.
     pub add_chalk: &'static str,
@@ -148,6 +151,7 @@ pub const JA: MeshTr = MeshTr {
     mask: "マスク",
     invert_mask: "マスクを反転",
     clear_mask: "マスクを消す",
+    blur_mask: "マスクをぼかす",
     add_chalk: "チョークを塗る",
     remove_chalk: "チョークを消す",
 };
@@ -201,6 +205,7 @@ pub const EN: MeshTr = MeshTr {
     mask: "mask",
     invert_mask: "invert mask",
     clear_mask: "clear mask",
+    blur_mask: "blur mask",
     add_chalk: "add chalk",
     remove_chalk: "remove chalk",
 };
@@ -254,6 +259,7 @@ pub const FR: MeshTr = MeshTr {
     mask: "masque",
     invert_mask: "inverser le masque",
     clear_mask: "effacer le masque",
+    blur_mask: "flouter le masque",
     add_chalk: "ajouter la craie",
     remove_chalk: "enlever la craie",
 };

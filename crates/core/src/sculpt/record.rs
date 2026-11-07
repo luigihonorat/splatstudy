@@ -264,12 +264,20 @@ impl Entry {
                 // which reads back as clay that accumulates and symmetric
                 // dabs that add up where they overlap.
                 let larger = matches!(self.event, Event::Dab(_)) && d.symmetry;
+                // Bit 4 came later still: the mask blur is stored as the
+                // Smooth brush with it, smoothing the mask instead of the
+                // clay. Older logs never set it.
+                let (brush, on_mask) = match d.brush {
+                    Brush::BlurMask => (Brush::Smooth, true),
+                    brush => (brush, false),
+                };
                 let flags = u8::from(d.invert)
                     | u8::from(d.symmetry) << 1
                     | u8::from(d.buildup == Buildup::Layer) << 2
-                    | u8::from(larger) << 3;
+                    | u8::from(larger) << 3
+                    | u8::from(on_mask) << 4;
                 w.u8(tag::DAB)
-                    .u8(d.brush as u8)
+                    .u8(brush as u8)
                     .vec3(d.centre)
                     .f32(d.radius)
                     .f32(d.strength)
@@ -343,9 +351,15 @@ impl Entry {
                     .ok_or_else(|| r.invalid("unknown brush"))?;
                 let (centre, radius, strength) = (r.vec3()?, r.f32()?, r.f32()?);
                 let flags = r.u8()?;
-                if flags > 15 {
+                if flags > 31 {
                     return Err(r.invalid("unknown dab flags"));
                 }
+                // Bit 4: the Smooth brush on the mask (see `write`).
+                let brush = match (brush, flags & 16 != 0) {
+                    (brush, false) => brush,
+                    (Brush::Smooth, true) => Brush::BlurMask,
+                    _ => return Err(r.invalid("a brush that can't work on the mask")),
+                };
                 let dab = Dab {
                     brush,
                     centre,
@@ -966,6 +980,132 @@ mod tests {
         let mut w = Writer::new();
         write_log(&mut w, live.log());
         assert_eq!(read_log(&mut Reader::new(&w.finish())).unwrap(), live.log());
+    }
+
+    /// A stroke of `brush` down the front, at `x`, one second after the
+    /// last.
+    fn mask_stroke(s: &mut Sculpt, brush: Brush, x: f32, symmetry: bool, clock: &mut f64) {
+        *clock += 1.0;
+        s.set_clock(*clock);
+        s.begin_stroke();
+        for i in 0..6 {
+            s.dab(Dab {
+                brush,
+                centre: Vec3::new(x, 0.05 * i as f32 - 0.1, 0.95).normalize(),
+                radius: 0.2,
+                strength: 0.7,
+                invert: false,
+                symmetry,
+                direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
+                buildup: Default::default(),
+            });
+            if i % 2 == 0 {
+                s.refresh();
+            }
+        }
+        s.end_stroke();
+    }
+
+    #[test]
+    fn a_mask_blur_stroke_replays_to_the_same_mask_bit_for_bit() {
+        let mut live = Sculpt::new(Mesh::icosphere(4));
+        let mut clock = 0.0;
+        mask_stroke(&mut live, Brush::Mask, 0.2, false, &mut clock);
+        let painted = live.mesh.layers.clone();
+        let positions = live.mesh.positions.clone();
+        // Over the mask's edge, at two falloffs, the second with symmetry.
+        live.set_falloff(Falloff::Sharp);
+        mask_stroke(&mut live, Brush::BlurMask, 0.3, false, &mut clock);
+        assert_ne!(live.mesh.layers, painted, "the blur changed nothing");
+        live.set_falloff(Falloff::Smooth);
+        mask_stroke(&mut live, Brush::BlurMask, 0.1, true, &mut clock);
+        assert_eq!(live.mesh.positions, positions, "the blur moved the clay");
+        let blurred = live.mesh.layers.clone();
+        // One undo step a stroke, as the mask brush's.
+        live.undo();
+        live.undo();
+        assert_eq!(live.mesh.layers, painted);
+        live.redo();
+        live.redo();
+        assert_eq!(live.mesh.layers, blurred);
+        // Sculpting on, held back by the blurred mask.
+        mask_stroke(&mut live, Brush::Inflate, 0.2, false, &mut clock);
+
+        // The log saves and reads back as it was...
+        let mut w = Writer::new();
+        write_log(&mut w, live.log());
+        let log = read_log(&mut Reader::new(&w.finish())).unwrap();
+        assert_eq!(log, live.log());
+        let blurs = log
+            .iter()
+            .filter(|e| matches!(e.event, Event::Dab(dab) if dab.brush == Brush::BlurMask));
+        assert_eq!(blurs.count(), 12);
+        // ...and replays to the same mask and clay, bit for bit, also
+        // scrubbing back and forth.
+        let mut replay = Replay::new(live.checkpoints().to_vec(), log);
+        assert!(replay.seek(f64::INFINITY, usize::MAX));
+        assert_same(&replay, &live);
+        let steps = 7;
+        for k in (0..=steps).rev() {
+            let time = replay.duration() * k as f64 / steps as f64;
+            let mut fresh = Replay::of(&live);
+            assert!(fresh.seek(time, usize::MAX));
+            assert!(replay.seek(time, usize::MAX));
+            assert_same(&replay, &fresh.sculpt);
+        }
+        while !replay.seek(f64::INFINITY, 5) {}
+        assert_same(&replay, &live);
+    }
+
+    #[test]
+    fn a_mask_blur_is_logged_as_a_smooth_dab_on_the_mask() {
+        let dab = Dab {
+            brush: Brush::BlurMask,
+            centre: Vec3::Z,
+            radius: 0.2,
+            strength: 0.5,
+            invert: false,
+            symmetry: true,
+            direction: Vec3::X,
+            buildup: Buildup::Layer,
+        };
+        let bytes = log_bytes(&[Event::Dab(dab)]);
+        // From the end: the direction after the flags, and the centre,
+        // radius and strength between the brush and the flags.
+        let n = bytes.len();
+        let (brush_at, flags_at) = (n - 12 - 1 - 4 - 4 - 12 - 1, n - 12 - 1);
+        assert_eq!(bytes[brush_at], Brush::Smooth as u8);
+        assert_eq!(bytes[flags_at], 16 | 8 | 4 | 2);
+        assert_eq!(read_events(&bytes).unwrap(), [Event::Dab(dab)]);
+        // Without the bit, as every older log wrote dabs: a smooth dab.
+        let mut old = bytes.clone();
+        old[flags_at] &= 15;
+        let smooth = Dab {
+            brush: Brush::Smooth,
+            ..dab
+        };
+        assert_eq!(read_events(&old).unwrap(), [Event::Dab(smooth)]);
+        // The panel's brushes keep their bytes and never set the bit; on
+        // any but smooth, it is an error.
+        for brush in Brush::ALL {
+            let mut bytes = log_bytes(&[Event::Dab(Dab { brush, ..dab })]);
+            assert_eq!(bytes[brush_at], brush as u8, "{brush:?}");
+            assert_eq!(bytes[flags_at] & 16, 0, "{brush:?}");
+            bytes[flags_at] |= 16;
+            let read = read_events(&bytes);
+            if brush == Brush::Smooth {
+                assert_eq!(read.unwrap(), [Event::Dab(dab)]);
+            } else {
+                assert!(read.is_err(), "{brush:?}");
+            }
+        }
+        // It has no brush byte of its own, and the bits above are unknown.
+        let mut unknown = old;
+        unknown[brush_at] = Brush::ALL.len() as u8;
+        assert!(read_events(&unknown).is_err());
+        let mut high = bytes;
+        high[flags_at] |= 32;
+        assert!(read_events(&high).is_err());
     }
 
     #[test]

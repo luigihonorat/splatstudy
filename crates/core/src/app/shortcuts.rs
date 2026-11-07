@@ -87,6 +87,11 @@ impl App {
                     .iter()
                     .map(|&(brush, _, _)| (brush_name(tr, brush), brush_keys(brush)))
                     .collect();
+                // Held over any tool, as Shift smooths: in ZBrush style,
+                // where Ctrl masks.
+                if self.nav == NavStyle::ZBrush {
+                    rows.push((tr.mesh.blur_mask, self.keys("Shift")));
+                }
                 rows.extend([
                     (tr.mesh.tool_pie, TOOL_PIE_KEY.name().to_owned()),
                     (tr.invert, self.nav.invert_key().to_owned()),

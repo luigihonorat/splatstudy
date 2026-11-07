@@ -370,6 +370,29 @@ pub fn mask_tool(painter: &Painter, rect: Rect, colour: Color32) {
     }
 }
 
+/// Mask blur: the mask's circle and hatching, without the middle line;
+/// each hatch line runs on past the middle as a short dash, a soft edge.
+pub fn blur_mask_tool(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    let (c, r) = ((8.0, 8.0), 6.5);
+    pen.circle(c, r);
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    for k in [-6.0f32, -3.0, 0.0, 3.0] {
+        let reach = (r * r - k * k).max(0.0).sqrt();
+        // As in `mask_tool`: from the circle to the middle, at t = -k.
+        let at = |t: f32| (c.0 + (k + t) * s, c.1 + (k - t) * s);
+        let to = reach.min(-k);
+        if to > -reach {
+            pen.line(at(-reach), at(to));
+        }
+        // Then, after a gap, a dash, as far as the circle allows.
+        let (from, to) = (-k + 1.5, (-k + 3.0).min(reach));
+        if from < to {
+            pen.line(at(from), at(to));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
