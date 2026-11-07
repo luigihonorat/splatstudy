@@ -24,7 +24,9 @@ use crate::input::FilePurpose;
 use crate::reference::fit::{self, percentile_box};
 use crate::reference::load;
 use crate::reference::samples::Sample;
-use crate::reference::{Aabb, Alignment, Content, Credit, RefMesh, Reference, Source, UpAxis};
+use crate::reference::{
+    Aabb, Alignment, Content, Credit, Cropped, RefMesh, Reference, Source, UpAxis, clip,
+};
 use crate::render::Slot;
 use crate::render::clay::{ClayPass, GpuMesh, Look};
 use crate::render::splat::{SplatLook, SplatPass};
@@ -54,6 +56,12 @@ pub(super) struct ReferenceState {
     /// The egui pass in which the crop group was last drawn open: its
     /// handles show over the view in that pass.
     crop_shown: Option<u64>,
+    /// The egui pass in which a crop slider was last being dragged.
+    crop_sliding: Option<u64>,
+    /// A mesh reference cut by its crop box and capped, in the file's
+    /// coordinates, for the box it was cut by: fitting after a crop moves
+    /// the mesh but needn't cut it again.
+    mesh_crop: Option<(Aabb, Cropped)>,
     image_view: ImageView,
     /// Splats show only their base colour, the same from every side, even
     /// when the file has view-dependent colour. Off by default; kept from
@@ -71,6 +79,10 @@ enum Drawn {
         coloured: bool,
         /// The placement the vertices were moved into.
         built_for: (Alignment, Option<Aabb>),
+        /// When, by the frame clock.
+        built_at: f64,
+        /// The mesh's triangles before the crop: how long it takes to build.
+        size: usize,
     },
     Image(egui::TextureHandle),
 }
@@ -223,26 +235,64 @@ fn mesh_fits(limits: &wgpu::Limits, mesh: &RefMesh) -> bool {
     vertices.max(indices) <= limits.max_buffer_size
 }
 
-/// A mesh reference moved into the clay's space, with normals for shading.
-fn place_mesh(device: &wgpu::Device, r: &Reference) -> Drawn {
+/// While a crop is dragged, a mesh reference is cut again at most this
+/// often (seconds), so the frames between are free...
+const RECUT_EVERY: f64 = 0.1;
+
+/// ...and only if it has at most this many triangles (the samples have
+/// 400 000): cutting, capping and building a mesh takes about 15–30 ms
+/// for those on a desktop, but 60–110 ms for 1.6 million, too long for a
+/// frame, so larger ones are cut when let go. The box's lines follow the
+/// pointer meanwhile.
+const RECUT_LIVE: usize = 500_000;
+
+/// A mesh reference moved into the clay's space, cut by the crop box and
+/// closed, with normals for shading: flat on the caps. `cache` keeps the
+/// cut, in file coordinates, for the box it was made for.
+fn place_mesh(
+    device: &wgpu::Device,
+    r: &Reference,
+    cache: &mut Option<(Aabb, Cropped)>,
+    now: f64,
+) -> Drawn {
     let built_for = (r.align, r.crop);
-    let colors = match &r.content {
-        Content::Mesh(m) => m.colors.as_deref(),
-        _ => None,
-    };
-    let Some((positions, triangles)) = r.world_triangles().filter(|(_, t)| !t.is_empty()) else {
+    let Content::Mesh(whole) = &r.content else {
         return Drawn::Mesh {
             mesh: None,
             coloured: false,
             built_for,
+            built_at: now,
+            size: 0,
         };
     };
+    let cut = match r.crop {
+        None => {
+            *cache = None;
+            None
+        }
+        Some(crop) => {
+            if cache.as_ref().is_none_or(|(b, _)| *b != crop) {
+                *cache = Some((crop, clip::crop(whole, crop).with_flat_caps()));
+            }
+            cache.as_ref().map(|(_, cut)| cut)
+        }
+    };
+    let (positions, triangles, colors) = match cut {
+        Some(cut) => (&cut.positions, &cut.triangles, cut.colors.as_deref()),
+        None => (&whole.positions, &whole.triangles, whole.colors.as_deref()),
+    };
+    let mesh = (!triangles.is_empty()).then(|| {
+        // Scaled by a positive amount and turned: windings stay.
+        let m = r.align.matrix();
+        let positions: Vec<Vec3> = positions.iter().map(|&p| m.transform_point3(p)).collect();
+        GpuMesh::from_triangles(device, &positions, triangles, colors)
+    });
     Drawn::Mesh {
-        mesh: Some(GpuMesh::from_triangles(
-            device, &positions, &triangles, colors,
-        )),
-        coloured: colors.is_some(),
+        coloured: mesh.is_some() && colors.is_some(),
+        mesh,
         built_for,
+        built_at: now,
+        size: whole.triangles.len(),
     }
 }
 
@@ -303,7 +353,12 @@ impl App {
                 if self.reference.mesh_pass.is_none() {
                     self.reference.mesh_pass = Some(ClayPass::new(&self.device));
                 }
-                place_mesh(&self.device, &reference)
+                place_mesh(
+                    &self.device,
+                    &reference,
+                    &mut self.reference.mesh_crop,
+                    self.now,
+                )
             }
             Content::Image(image) => {
                 let size = [image.size[0] as usize, image.size[1] as usize];
@@ -328,17 +383,45 @@ impl App {
         state.drawn = None;
         state.crop = CropSliders::default();
         state.crop_drag = None;
+        state.mesh_crop = None;
         self.dirty = true;
     }
 
-    /// Moves a mesh reference's vertices again after its placement changed.
+    /// Moves a mesh reference's vertices again after its placement or
+    /// crop changed: while the crop is dragged, now and then and only if
+    /// the mesh is small enough (see [`RECUT_EVERY`]), else once let go.
     pub(super) fn refresh_mesh(&mut self) {
         let state = &mut self.reference;
-        if let (Some(r), Some(Drawn::Mesh { built_for, .. })) = (&state.current, &state.drawn)
-            && *built_for != (r.align, r.crop)
-        {
-            state.drawn = Some(place_mesh(&self.device, r));
+        let (
+            Some(r),
+            Some(Drawn::Mesh {
+                built_for,
+                built_at,
+                size,
+                ..
+            }),
+        ) = (&state.current, &state.drawn)
+        else {
+            return;
+        };
+        if *built_for == (r.align, r.crop) {
+            return;
         }
+        let dragging =
+            state.crop_drag.is_some() || state.crop_sliding == Some(self.ctx.cumulative_pass_nr());
+        if dragging {
+            if *size > RECUT_LIVE {
+                return;
+            }
+            let wait = RECUT_EVERY - (self.now - built_at);
+            if wait > 0.0 {
+                // Catch up even if the pointer stops while held.
+                self.ctx
+                    .request_repaint_after(std::time::Duration::from_secs_f64(wait));
+                return;
+            }
+        }
+        state.drawn = Some(place_mesh(&self.device, r, &mut state.mesh_crop, self.now));
     }
 
     /// The reference panel, in groups that fold away: the reference
@@ -504,6 +587,9 @@ impl App {
             if response.changed() {
                 state.crop.set_side(i, side);
                 r.crop = state.crop.to_box(r.align.up);
+            }
+            if response.dragged() && !response.drag_stopped() {
+                state.crop_sliding = Some(ui.ctx().cumulative_pass_nr());
             }
             // Re-fit once the side is let go, not while it moves.
             if response.drag_stopped() || response.clicked() {
