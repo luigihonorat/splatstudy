@@ -22,7 +22,8 @@
 //!    at once.
 //! 3. `autosave_bytes` gives `None` when there is nothing worth keeping (a
 //!    new scene): the shell then drops what it kept.
-//! 4. If storing fails, it tells the app once through
+//! 4. If storing fails for good (a full disk, no storage, failures that
+//!    a retry doesn't mend), it tells the app once through
 //!    `App::autosave_trouble` and stops autosaving.
 
 use std::future::Future;
