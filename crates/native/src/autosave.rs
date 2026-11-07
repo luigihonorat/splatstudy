@@ -7,15 +7,16 @@
 //! says so once and goes on without autosave.
 //!
 //! A restore that crashes the app would crash it again at every start, so
-//! a `restoring` file marks a restore under way until its first frame is
-//! drawn. Found at start, the restore is only offered.
+//! a `restoring` file marks a restore under way, from the moment the app
+//! opens it (the reference file read) until its first frame is drawn, or
+//! the app quits normally. Found at start, the restore is only offered.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use splatstudy_core::App;
-use splatstudy_core::scene::autosave::{Autosave as Bytes, Pace, Trouble};
-use splatstudy_core::scene::{self, BlobKey};
+use splatstudy_core::scene::BlobKey;
+use splatstudy_core::scene::autosave::{self, Autosave as Bytes, Pace, Trouble};
 
 const SCENE: &str = "autosave.splatstudy";
 const PREFIX: &str = "autosave-";
@@ -42,19 +43,18 @@ pub struct Autosave {
 /// it came with its reference; `None` if nothing was restored.
 fn restore_from(app: &mut App, folder: &Path) -> Option<bool> {
     let scene = std::fs::read(folder.join(SCENE)).ok()?;
-    let flag = folder.join(RESTORING);
-    if let Err(e) = std::fs::write(&flag, b"") {
-        log::warn!("could not write {}: {e}", flag.display());
-    }
-    let key = scene::reference_key(&scene).ok().flatten();
-    let reference = key.and_then(|key| crate::files::read(&blob_path(folder, key)).ok());
-    let with_reference = reference.is_some();
-    if app.restore_autosave(&scene, reference) {
-        Some(with_reference)
-    } else {
-        let _ = std::fs::remove_file(&flag);
-        None
-    }
+    let path = folder.join(RESTORING);
+    let flag = |on: bool| {
+        if !on {
+            let _ = std::fs::remove_file(&path);
+        } else if let Err(e) = std::fs::write(&path, b"") {
+            log::warn!("could not write {}: {e}", path.display());
+        }
+    };
+    let read = |key| std::future::ready(crate::files::read(&blob_path(folder, key)).ok());
+    let open = |scene: &[u8], reference| app.restore_autosave(scene, reference);
+    let key = pollster::block_on(autosave::restore(&scene, read, flag, open))?;
+    Some(key.is_some())
 }
 
 impl Autosave {
@@ -112,6 +112,12 @@ impl Autosave {
     /// once when the app is `leaving`. Call it after every frame and once
     /// before quitting. Also restores the autosave when the user asks.
     pub fn tick(&mut self, app: &mut App, leaving: bool) {
+        // Quitting normally after a restore, before its first frame (the
+        // window closed while a big scene opened): it didn't crash the
+        // app, so the next start restores it again.
+        if leaving {
+            self.frame_drawn();
+        }
         if app.take_restore_request() {
             match crate::config::folder().and_then(|folder| restore_from(app, &folder)) {
                 Some(_) => {

@@ -5,10 +5,14 @@
 //!
 //! A shell drives it like this:
 //!
-//! 1. At start, unless told not to, it reads the saved scene, asks
-//!    [`reference_key`](super::reference_key) which reference file goes
-//!    with it, fetches that file, and hands both to
-//!    `App::restore_autosave`.
+//! 1. At start, unless told not to, it reads the saved scene and opens it
+//!    through [`restore`]: that asks [`reference_key`](super::reference_key)
+//!    which reference file goes with it, has the shell fetch that file,
+//!    and hands both to `App::restore_autosave`. A restore that crashed
+//!    the app would crash it again at every start, so the shell keeps a
+//!    flag (a file, a localStorage key) while one is under way, until a
+//!    frame shows it or the app leaves normally; found at start, the
+//!    restore is only offered (`App::offer_restore`).
 //! 2. It watches `App::scene_revision` after every frame, through a
 //!    [`Pace`]. About two seconds after the last change, or once the
 //!    store is half a minute behind (someone sculpting without a pause),
@@ -21,6 +25,7 @@
 //! 4. If storing fails, it tells the app once through
 //!    `App::autosave_trouble` and stops autosaving.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use super::BlobKey;
@@ -46,6 +51,42 @@ pub enum Trouble {
     Full,
     /// The reference file doesn't fit; the clay is still saved.
     ReferenceTooBig,
+}
+
+/// Opens a stored `scene`: `read` fetches the reference file it names,
+/// which can take seconds for a big splat, then `open` opens both in the
+/// app (`App::restore_autosave`). The restore is flagged under way
+/// (`flag(true)`) only after the file is read, just around `open` and
+/// the first frame: a reload or a closed window while reading leaves no
+/// flag, so the next start restores again instead of only offering, which
+/// would let the first change replace the session. A failed `open` drops
+/// the flag at once (`flag(false)`); otherwise the shell drops it once a
+/// frame is drawn.
+///
+/// `None` if the scene didn't open; otherwise the key of the reference
+/// file, when it came back too.
+pub async fn restore<R>(
+    scene: &[u8],
+    read: impl FnOnce(BlobKey) -> R,
+    mut flag: impl FnMut(bool),
+    open: impl FnOnce(&[u8], Option<Arc<[u8]>>) -> bool,
+) -> Option<Option<BlobKey>>
+where
+    R: Future<Output = Option<Arc<[u8]>>>,
+{
+    let key = super::reference_key(scene).ok().flatten();
+    let reference = match key {
+        Some(key) => read(key).await,
+        None => None,
+    };
+    let found = key.filter(|_| reference.is_some());
+    flag(true);
+    if open(scene, reference) {
+        Some(found)
+    } else {
+        flag(false);
+        None
+    }
 }
 
 /// Seconds without a change before saving.
@@ -101,7 +142,116 @@ impl Pace {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
     use super::*;
+    use crate::reference::{Content, RefImage, Reference, Source};
+    use crate::scene::SceneWriter;
+
+    /// An autosave naming a reference file stored apart, and that file.
+    fn stored() -> (Vec<u8>, Arc<[u8]>) {
+        let file: Arc<[u8]> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let reference = Reference::new(
+            Source {
+                name: "cast.png".into(),
+                bytes: file.clone(),
+            },
+            Content::Image(RefImage::default()),
+        );
+        let mut w = SceneWriter::new();
+        w.reference_by_key(&reference, BlobKey::of(&file));
+        (w.finish(), file)
+    }
+
+    /// A read that never finishes: the page goes before it does.
+    struct Slow;
+
+    impl Future for Slow {
+        type Output = Option<Arc<[u8]>>;
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    fn run<F: Future>(future: F) -> Poll<F::Output> {
+        pin!(future)
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[test]
+    fn a_reload_while_the_reference_is_read_leaves_no_restore_flag() {
+        let (scene, _) = stored();
+        let flagged = Cell::new(false);
+        let opened = Cell::new(false);
+        let restoring = restore(
+            &scene,
+            |_| Slow,
+            |on| flagged.set(on),
+            |_, _| {
+                opened.set(true);
+                true
+            },
+        );
+        // The page goes while the file is still being read.
+        assert!(run(restoring).is_pending());
+        assert!(!opened.get());
+        assert!(!flagged.get(), "the next start would only offer it");
+    }
+
+    #[test]
+    fn the_restore_is_flagged_from_the_open_until_a_frame() {
+        let (scene, file) = stored();
+        let flags = std::cell::RefCell::new(Vec::new());
+        let restored = run(restore(
+            &scene,
+            |key| {
+                assert!(key.matches(&file));
+                std::future::ready(Some(file.clone()))
+            },
+            |on| flags.borrow_mut().push(on),
+            |_, reference| {
+                // Flagged while the app opens it, which may crash it.
+                assert_eq!(*flags.borrow(), [true]);
+                assert!(reference.is_some());
+                true
+            },
+        ));
+        assert_eq!(restored, Poll::Ready(Some(Some(BlobKey::of(&file)))));
+        // Still flagged: the shell drops it once a frame is drawn.
+        assert_eq!(*flags.borrow(), [true]);
+    }
+
+    #[test]
+    fn a_scene_that_does_not_open_drops_the_flag() {
+        let (scene, _) = stored();
+        let flags = std::cell::RefCell::new(Vec::new());
+        let restored = run(restore(
+            &scene,
+            |_| std::future::ready(None),
+            |on| flags.borrow_mut().push(on),
+            |_, reference| {
+                assert!(reference.is_none());
+                false
+            },
+        ));
+        assert_eq!(restored, Poll::Ready(None));
+        assert_eq!(*flags.borrow(), [true, false]);
+    }
+
+    #[test]
+    fn without_its_file_the_scene_opens_with_no_key() {
+        let (scene, _) = stored();
+        let restored = run(restore(
+            &scene,
+            |_| std::future::ready(None),
+            |_| {},
+            |_, _| true,
+        ));
+        assert_eq!(restored, Poll::Ready(Some(None)));
+    }
 
     #[test]
     fn a_save_waits_for_a_quiet_moment() {

@@ -19,7 +19,11 @@
 //!
 //! A restore that crashes the tab would crash it again on every reload, so
 //! a flag in localStorage marks a restore under way until its first frame
-//! is drawn. Found at start, the restore is only offered.
+//! is drawn, or the page leaves normally. Found at start, the restore is
+//! only offered. The flag is set only once the reference file is read
+//! (see [`autosave::restore`]): that read takes seconds for a big splat,
+//! and someone reloading meanwhile would otherwise find the session only
+//! offered, and then replaced by the first change.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,8 +31,8 @@ use std::sync::Arc;
 
 use js_sys::Uint8Array;
 use splatstudy_core::App;
-use splatstudy_core::scene::autosave::{Autosave as Bytes, Pace, Trouble};
-use splatstudy_core::scene::{self, BlobKey};
+use splatstudy_core::scene::BlobKey;
+use splatstudy_core::scene::autosave::{self, Autosave as Bytes, Pace, Trouble};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::Storage;
@@ -320,8 +324,8 @@ async fn read_scene() -> Option<Vec<u8>> {
 }
 
 /// The reference file a stored scene names, if it is stored.
-async fn read_reference(key: Option<BlobKey>) -> Option<Arc<[u8]>> {
-    match idb_blob(&key?.name()).await {
+async fn read_reference(key: BlobKey) -> Option<Arc<[u8]>> {
+    match idb_blob(&key.name()).await {
         Ok(v) => {
             let view = v.dyn_into::<Uint8Array>().ok()?;
             let bytes = to_arc(&view);
@@ -341,23 +345,27 @@ async fn read_reference(key: Option<BlobKey>) -> Option<Arc<[u8]>> {
 type Visit<'a> = dyn FnMut(&mut dyn FnMut(&mut App)) + 'a;
 
 /// Opens a stored scene in `app`, with its reference. Flags the restore
-/// until a frame is drawn. The reference's key when it came back too, or
-/// `None` when the scene didn't read.
+/// from the moment the app opens it until a frame is drawn. The
+/// reference's key when it came back too, or `None` when the scene didn't
+/// read.
 async fn restore_scene(scene: &[u8], with_app: &mut Visit<'_>) -> Option<Option<String>> {
-    set(RESTORING, "1");
-    let key = scene::reference_key(scene).ok().flatten();
-    let reference = read_reference(key).await;
-    let with_reference = reference.is_some();
-    let mut reference = Some(reference);
-    let mut restored = false;
-    with_app(&mut |app| restored = app.restore_autosave(scene, reference.take().flatten()));
-    if !restored {
-        remove(RESTORING);
-        return None;
-    }
+    let flag = |on| {
+        if on {
+            set(RESTORING, "1");
+        } else {
+            remove(RESTORING);
+        }
+    };
+    let open = |scene: &[u8], reference: Option<Arc<[u8]>>| {
+        let mut reference = Some(reference);
+        let mut restored = false;
+        with_app(&mut |app| restored = app.restore_autosave(scene, reference.take().flatten()));
+        restored
+    };
+    let key = autosave::restore(scene, read_reference, flag, open).await?;
     AWAIT_FRAME.set(true);
     log::info!("restored the autosave ({} bytes)", scene.len());
-    Some(key.filter(|_| with_reference).map(|key| key.name()))
+    Some(key.map(|key| key.name()))
 }
 
 /// Opens the scene [`begin_restore`] read in `app`. Returns the URL
@@ -526,6 +534,14 @@ impl Autosave {
     }
 
     fn poll_app(&self, app: &mut App, leaving: bool) {
+        // The page goes normally after a restore, before its first frame
+        // (someone reloading while a big scene opened): the restore didn't
+        // crash the tab, so the next start restores it again rather than
+        // only offering it. A crash never gets here: the tab is gone, or
+        // the shell stays borrowed after a trap and `poll` can't reach it.
+        if leaving {
+            frame_drawn();
+        }
         let mut st = self.state.borrow_mut();
         if let Some(trouble) = st.trouble.take() {
             app.autosave_trouble(trouble);
