@@ -6,7 +6,8 @@
 //!
 //! The thumbnails (about 100 KiB in all) are built into the app. A cast is
 //! downloaded from the web app's site the first time it is chosen and kept
-//! in the app's folder, under `samples/`, so it opens offline from then on.
+//! in the user's cache folder (see [`folder`]), so it opens offline from
+//! then on.
 //! A download goes to a temporary file that is renamed only once complete,
 //! so a partial one is never taken for the cast.
 
@@ -69,9 +70,42 @@ pub fn thumbnail(sample: &Sample) -> Arc<[u8]> {
         .map_or_else(|| Arc::from([]), |(_, png)| Arc::from(*png))
 }
 
-/// Where the casts are kept: `samples/` in the app's folder.
+/// Where the casts are kept: `splatstudy/samples` in the OS's cache folder
+/// for the user, which never roams with a Windows profile.
 pub fn folder() -> Option<PathBuf> {
-    crate::config::folder().map(|f| f.join("samples"))
+    cache_folder(OS, |name| std::env::var_os(name))
+}
+
+/// The OS this is built for, as far as the cache folder goes.
+#[derive(Clone, Copy)]
+enum Os {
+    Windows,
+    Mac,
+    /// Linux and the other Unix-likes: the XDG folders.
+    Xdg,
+}
+
+const OS: Os = if cfg!(windows) {
+    Os::Windows
+} else if cfg!(target_os = "macos") {
+    Os::Mac
+} else {
+    Os::Xdg
+};
+
+/// The casts' folder on `os`, from the environment `var` reads:
+/// `%LOCALAPPDATA%\splatstudy\samples` on Windows,
+/// `~/Library/Caches/splatstudy/samples` on macOS, and
+/// `$XDG_CACHE_HOME/splatstudy/samples` (by default `~/.cache/…`) elsewhere.
+/// Only absolute paths count, as the XDG rules say.
+fn cache_folder(os: Os, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let path = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let cache = match os {
+        Os::Windows => path("LOCALAPPDATA")?,
+        Os::Mac => path("HOME")?.join("Library").join("Caches"),
+        Os::Xdg => path("XDG_CACHE_HOME").or_else(|| Some(path("HOME")?.join(".cache")))?,
+    };
+    Some(cache.join("splatstudy").join("samples"))
 }
 
 /// The cast's copy in `folder`, if a complete one is there. Downloads in
@@ -236,6 +270,58 @@ mod tests {
         ] {
             assert_eq!(asked(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn casts_are_kept_in_the_users_local_cache_folder() {
+        // Any absolute folder will do as the user's.
+        let root = std::env::temp_dir();
+        let env = |vars: &[(&'static str, PathBuf)]| {
+            let vars = vars.to_vec();
+            move |name: &str| {
+                vars.iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, p)| p.clone().into_os_string())
+            }
+        };
+        let tail = |p: PathBuf| p.join("splatstudy").join("samples");
+        let local = root.join("Local");
+        let home = root.join("home");
+        let xdg = root.join("xdg-cache");
+        assert_eq!(
+            cache_folder(
+                Os::Windows,
+                env(&[("LOCALAPPDATA", local.clone()), ("HOME", home.clone())])
+            ),
+            Some(tail(local))
+        );
+        assert_eq!(
+            cache_folder(Os::Mac, env(&[("HOME", home.clone())])),
+            Some(tail(home.join("Library").join("Caches")))
+        );
+        assert_eq!(
+            cache_folder(
+                Os::Xdg,
+                env(&[("XDG_CACHE_HOME", xdg.clone()), ("HOME", home.clone())])
+            ),
+            Some(tail(xdg))
+        );
+        assert_eq!(
+            cache_folder(Os::Xdg, env(&[("HOME", home.clone())])),
+            Some(tail(home.join(".cache")))
+        );
+        // A relative XDG folder is ignored; nothing set, no folder (the
+        // shell then uses the temporary one).
+        let relative = PathBuf::from("relative");
+        assert_eq!(
+            cache_folder(
+                Os::Xdg,
+                env(&[("XDG_CACHE_HOME", relative), ("HOME", home.clone())])
+            ),
+            Some(tail(home.join(".cache")))
+        );
+        assert_eq!(cache_folder(Os::Windows, env(&[("HOME", home)])), None);
+        assert_eq!(cache_folder(Os::Xdg, env(&[])), None);
     }
 
     #[test]

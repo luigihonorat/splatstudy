@@ -306,7 +306,7 @@ impl Files {
                 bytes: gallery::thumbnail(sample),
             }),
             Some(Wanted::Cast(sample)) => {
-                // Without the app's folder, kept in the temporary one.
+                // Without a cache folder, kept in the temporary one.
                 let folder = gallery::folder()
                     .unwrap_or_else(|| std::env::temp_dir().join("splatstudy-samples"));
                 self.inbox.cast_later(folder, sample, purpose);
