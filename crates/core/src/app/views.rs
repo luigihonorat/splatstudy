@@ -20,6 +20,9 @@ const DOLLY_WHEEL: f32 = 0.0015;
 /// How far, in points, a Ctrl press on the background may move and still
 /// be a tap that inverts the mask.
 const MASK_TAP: f32 = 4.0;
+/// How far, in points, on either side of the 1-point divider a press
+/// grabs it to resize the views.
+const DIVIDER_GRAB: f32 = 6.0;
 
 /// Preset viewpoints: label, numpad digit, yaw and pitch. Right and left
 /// are the viewer's, as seen in the front view. Front and back share 5:
@@ -192,22 +195,6 @@ impl App {
         let study = &self.study;
         let (rects, divider) = layout(area, self.split, study.layout, study.swapped);
 
-        // The divider between the two views, draggable.
-        if let Some(x) = divider {
-            let handle = Rect::from_x_y_ranges(x - 4.0..=x + 4.0, area.y_range());
-            let handle = ui.interact(handle, ui.scope_id().with("split"), Sense::drag());
-            if handle.dragged()
-                && let Some(pos) = handle.interact_pointer_pos()
-            {
-                let t = (pos.x - area.left()) / area.width();
-                let t = if self.study.swapped { 1.0 - t } else { t };
-                self.split = t.clamp(0.2, 0.8);
-            }
-            if handle.hovered() || handle.dragged() {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-            }
-        }
-
         self.view_rects = rects;
         // The view the pointer is over: the view menu switches its aids.
         let hover = ui.input(|i| i.pointer.hover_pos());
@@ -225,6 +212,24 @@ impl App {
         for index in [SCULPT, REFERENCE] {
             if shown(rects[index]) {
                 self.view_input(ui, rects[index], index, on_toolbar(index));
+            }
+        }
+
+        // The divider between the two views, draggable. Added after the
+        // views, so it lies over their edges and takes the press there.
+        if let Some(x) = divider {
+            let reach = x - DIVIDER_GRAB..=x + 1.0 + DIVIDER_GRAB;
+            let handle = Rect::from_x_y_ranges(reach, area.y_range());
+            let handle = ui.interact(handle, ui.scope_id().with("split"), Sense::drag());
+            if handle.dragged()
+                && let Some(pos) = handle.interact_pointer_pos()
+            {
+                let t = (pos.x - area.left()) / area.width();
+                let t = if self.study.swapped { 1.0 - t } else { t };
+                self.split = t.clamp(0.2, 0.8);
+            }
+            if handle.hovered() || handle.dragged() {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
         }
 
@@ -574,6 +579,31 @@ mod tests {
         assert_eq!(mirror_x(rect, mirrored, true), pos);
         assert_eq!(mirror_x(rect, rect.center(), true), rect.center());
         assert_eq!(mirror_x(rect, pos, false), pos);
+    }
+
+    #[test]
+    fn a_press_beside_the_divider_resizes_the_views_and_sculpts_nothing() {
+        use super::super::study::tests::Harness;
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let strokes = |h: &Harness| h.app.sculpt.log().len();
+        for side in [-1.0, 1.0] {
+            let before = (h.app.split, strokes(&h));
+            let x = h.app.view_rects[SCULPT].right();
+            let y = h.app.view_rects[SCULPT].center().y;
+            // Most of the grab's width away, over either view's edge.
+            let from = egui::pos2(x + 0.5 + side * (DIVIDER_GRAB - 1.0), y);
+            h.drag(from, from + egui::vec2(60.0, 0.0));
+            assert!(
+                h.app.split > before.0,
+                "{side}: {} after {}",
+                h.app.split,
+                before.0
+            );
+            assert_eq!(strokes(&h), before.1, "{side}: the press sculpted");
+        }
     }
 
     #[test]
