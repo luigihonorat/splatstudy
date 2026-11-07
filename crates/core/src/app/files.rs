@@ -938,10 +938,11 @@ mod tests {
         let b = &mut other.app;
         b.start_playback();
         other.frames(3);
-        let playback = other.app.playback.as_ref().expect("plays");
-        assert_eq!(playback.replay.duration(), 0.0);
+        let played = other.app.playback.as_ref().and_then(|p| p.played.as_ref());
+        let played = played.expect("plays");
+        assert_eq!(played.replay.duration(), 0.0);
         assert_eq!(
-            playback.replay.sculpt.mesh.positions,
+            played.replay.sculpt.mesh.positions,
             h.app.sculpt.mesh.positions
         );
         other.app.playback = None;

@@ -361,10 +361,10 @@ impl App {
         // uploading.
         self.sync_clay();
         let resized = self.fit_views(ppp);
-        if let Some(playback) = &mut self.playback {
-            let sculpt = &mut playback.replay.sculpt;
+        if let Some(played) = self.playback.as_mut().and_then(|p| p.played.as_mut()) {
+            let sculpt = &mut played.replay.sculpt;
             for range in sculpt.take_dirty() {
-                playback.gpu_mesh.write(&self.queue, &sculpt.mesh, range);
+                played.gpu_mesh.write(&self.queue, &sculpt.mesh, range);
             }
         } else {
             for range in self.sculpt.take_dirty() {
@@ -490,9 +490,11 @@ impl App {
         let aspect = size[0] as f32 / size[1].max(1) as f32;
         self.clay
             .prepare(&self.queue, slot, camera, aspect, &self.sculpt_look());
+        // The timelapse's clay; the live one while an export holds it back.
         let mesh = self
             .playback
             .as_ref()
+            .and_then(|p| p.played.as_ref())
             .map_or(&self.gpu_mesh, |p| &p.gpu_mesh);
         self.clay.draw(pass, slot, mesh);
         if aids {
