@@ -194,6 +194,7 @@ fn falloff_name(tr: &Tr, falloff: Falloff) -> &'static str {
         Falloff::Sharp => tr.mesh.falloff_sharp,
         // Old timelapses only: never in the panel, which lists `ALL`.
         Falloff::Linear => tr.mesh.falloff_smooth,
+        Falloff::Peak => tr.mesh.falloff_sharp,
     }
 }
 

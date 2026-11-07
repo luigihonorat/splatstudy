@@ -95,12 +95,21 @@ pub enum Falloff {
     /// A plateau, like a clay tube: full over the inner half, then a soft
     /// shoulder down to the rim.
     Flat,
-    /// A narrow peak: most of the effect near the centre.
+    /// A wider plateau than flat, with a stiffer shoulder: full out to
+    /// [`SHARP_PLATEAU`] of the radius, then a steep, smooth drop to the rim.
     Sharp,
     /// A cone, the panel's second choice before flat took its place. Only
     /// timelapses recorded with it replay it; the panel no longer lists it.
     Linear,
+    /// A narrow peak, most of the effect near the centre: the panel's
+    /// "sharp" until sharp became a stiffer plateau. Only timelapses
+    /// recorded with it replay it; the panel no longer lists it.
+    Peak,
 }
+
+/// How far out, as a share of the radius, [`Falloff::Sharp`] stays at
+/// full strength.
+pub const SHARP_PLATEAU: f32 = 0.65;
 
 impl Falloff {
     /// Every falloff, in the order the panel lists them. A log stores
@@ -121,10 +130,25 @@ impl Falloff {
                 s * s * (3.0 - 2.0 * s)
             }
             Falloff::Sharp => {
+                // Smootherstep over the outer band: steeper in its middle
+                // than flat's smoothstep, and it meets the plateau and the
+                // rim with no change in slope or curvature, so no ring.
+                let s = ((1.0 - t) / (1.0 - SHARP_PLATEAU)).min(1.0);
+                let rise = |x: f32| x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+                // The curve is symmetric about its middle; the upper half
+                // worked out from the plateau's side, so rounding can't
+                // lift it above 1 or make it climb again.
+                if s < 0.5 {
+                    rise(s)
+                } else {
+                    1.0 - rise(1.0 - s)
+                }
+            }
+            Falloff::Linear => 1.0 - t,
+            Falloff::Peak => {
                 let s = 1.0 - t;
                 s * s * s
             }
-            Falloff::Linear => 1.0 - t,
         }
     }
 }
@@ -1358,16 +1382,70 @@ mod tests {
 
     #[test]
     fn falloffs_run_from_full_at_the_centre_to_nothing_at_the_rim() {
-        for falloff in Falloff::ALL {
-            assert_eq!(falloff.weight(0.0, 1.0), 1.0);
-            assert_eq!(falloff.weight(1.0, 1.0), 0.0);
-            assert_eq!(falloff.weight(2.0, 1.0), 0.0);
+        let every = Falloff::ALL
+            .into_iter()
+            .chain([Falloff::Linear, Falloff::Peak]);
+        for falloff in every {
+            assert_eq!(falloff.weight(0.0, 1.0), 1.0, "{falloff:?}");
+            assert_eq!(falloff.weight(1.0, 1.0), 0.0, "{falloff:?}");
+            assert_eq!(falloff.weight(2.0, 1.0), 0.0, "{falloff:?}");
+            // Never stronger further out.
+            let mut last = 1.0;
+            for i in 0..=2000 {
+                let w = falloff.weight(i as f32 / 2000.0, 1.0);
+                assert!(
+                    w <= last && w >= 0.0,
+                    "{falloff:?} at {i}: {w} after {last}"
+                );
+                last = w;
+            }
         }
-        // Flat holds its full weight over the inner half; sharp drops first.
+        // Flat holds its full weight over the inner half; the old sharp
+        // peak drops first.
         assert_eq!(Falloff::Flat.weight(0.5, 1.0), 1.0);
         let at = |f: Falloff| f.weight(0.4, 1.0);
         assert!(at(Falloff::Flat) > at(Falloff::Smooth));
-        assert!(at(Falloff::Smooth) > at(Falloff::Sharp));
+        assert!(at(Falloff::Smooth) > at(Falloff::Peak));
+    }
+
+    #[test]
+    fn sharp_is_a_wider_plateau_than_flat_with_a_steeper_shoulder() {
+        let (sharp, flat) = (Falloff::Sharp, Falloff::Flat);
+        // Full out to the plateau's edge, wherever the brush is.
+        for i in 0..=100 {
+            let t = SHARP_PLATEAU * i as f32 / 100.0;
+            assert_eq!(sharp.weight(t * 0.3, 0.3), 1.0, "{t}");
+        }
+        assert!(sharp.weight(SHARP_PLATEAU + 0.01, 1.0) < 1.0);
+        // Still full where flat has begun to fade, and above it out to
+        // the last tenth, where both are nearly nothing and sharp eases
+        // out more softly: it keeps its strength longer.
+        assert!(flat.weight(0.6, 1.0) < 1.0);
+        for i in 1..=90 {
+            let t = i as f32 / 100.0;
+            assert!(sharp.weight(t, 1.0) >= flat.weight(t, 1.0), "{t}");
+        }
+        // Then drops more steeply: its steepest slope is well above flat's.
+        let steepest = |f: Falloff| {
+            (0..1000)
+                .map(|i| {
+                    let t = i as f32 / 1000.0;
+                    (f.weight(t, 1.0) - f.weight(t + 0.001, 1.0)) / 0.001
+                })
+                .fold(0.0f32, f32::max)
+        };
+        assert!(steepest(sharp) > 1.5 * steepest(flat));
+        // It eases into and out of the drop, more gently even than flat:
+        // almost level just past the plateau's edge and just inside the
+        // rim, so no ring shows where the shoulder starts or ends.
+        let h = 0.01;
+        let slope = |f: Falloff, t: f32| (f.weight(t, 1.0) - f.weight(t + h, 1.0)) / h;
+        let (into, out) = (slope(sharp, SHARP_PLATEAU), slope(sharp, 1.0 - h));
+        assert!(into < 0.05 && into < slope(flat, 0.5), "{into}");
+        assert!(out < 0.05 && out < slope(flat, 1.0 - h), "{out}");
+        // Half strength halfway down the shoulder.
+        let middle = (1.0 + SHARP_PLATEAU) / 2.0;
+        assert!((sharp.weight(middle, 1.0) - 0.5).abs() < 1e-5);
     }
 
     /// A clay stroke as the app makes it, across the top of the sphere:
