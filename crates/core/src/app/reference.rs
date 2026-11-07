@@ -689,7 +689,8 @@ impl App {
             );
             self.crop_handles(ui, &painter, rect);
         }
-        if let Some(covered) = paint_credit(&painter, rect, &r.credit) {
+        let ink = theme::view_inks(self.view_background(REFERENCE)).text;
+        if let Some(covered) = paint_credit(&painter, rect, &r.credit, ink) {
             let tr = self.lang.tr();
             let c = &r.credit;
             ui.interact(
@@ -921,13 +922,12 @@ fn credit_lines(c: &Credit, fits: impl Fn(&str) -> bool) -> Vec<[String; 2]> {
 
 /// The credit along the bottom of the reference view, cut short with an
 /// ellipsis rather than running off its right edge. Returns what it covers.
-fn paint_credit(painter: &egui::Painter, rect: Rect, c: &Credit) -> Option<Rect> {
+fn paint_credit(painter: &egui::Painter, rect: Rect, c: &Credit, ink: Color32) -> Option<Rect> {
     let font = fonts::regular(12.0);
     let width = (rect.width() - 2.0 * CREDIT_MARGIN.x).max(0.0);
-    let measure = |text: String| painter.layout_no_wrap(text, font.clone(), theme::VIEW_TEXT);
+    let measure = |text: String| painter.layout_no_wrap(text, font.clone(), ink);
     let cut = |text: String, max: f32| {
-        let mut job =
-            egui::text::LayoutJob::simple_singleline(text, font.clone(), theme::VIEW_TEXT);
+        let mut job = egui::text::LayoutJob::simple_singleline(text, font.clone(), ink);
         job.wrap = egui::text::TextWrapping::truncate_at_width(max.max(0.0));
         painter.layout_job(job)
     };
@@ -945,8 +945,8 @@ fn paint_credit(painter: &egui::Painter, rect: Rect, c: &Credit) -> Option<Rect>
         covered = covered
             .union(Rect::from_min_size(head_pos, head.size()))
             .union(Rect::from_min_size(tail_pos, tail.size()));
-        painter.galley(head_pos, head, theme::VIEW_TEXT);
-        painter.galley(tail_pos, tail, theme::VIEW_TEXT);
+        painter.galley(head_pos, head, ink);
+        painter.galley(tail_pos, tail, ink);
         bottom = top - 2.0;
     }
     covered.is_positive().then_some(covered)

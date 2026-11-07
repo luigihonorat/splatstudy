@@ -315,7 +315,7 @@ impl App {
     }
 
     /// Draws the handles over the crop box: the one pointed at or dragged
-    /// larger and in [`theme::VIEW_INK`], with the face it moves outlined.
+    /// larger and in the view's bright ink, with the face it moves outlined.
     pub(super) fn crop_handles(&self, ui: &egui::Ui, painter: &egui::Painter, rect: Rect) {
         let Some(gizmo) = self.crop_gizmo(ui.ctx(), rect) else {
             return;
@@ -327,7 +327,8 @@ impl App {
         if active.is_some() && self.reference.crop_drag.is_none() {
             ui.ctx().set_cursor_icon(CursorIcon::Grab);
         }
-        let ink = Stroke::new(1.0, theme::VIEW_INK);
+        let bright = theme::view_inks(self.view_background(REFERENCE)).ink;
+        let ink = Stroke::new(1.0, bright);
         if let Some(Handle::Face(i)) = active {
             let outline = gizmo.face_outline(i);
             if outline.len() == 4 {
@@ -343,7 +344,7 @@ impl App {
         for (handle, at) in handles {
             match handle {
                 _ if Some(handle) == active => {
-                    painter.circle_filled(at, ACTIVE_RADIUS, theme::VIEW_INK);
+                    painter.circle_filled(at, ACTIVE_RADIUS, bright);
                 }
                 Handle::Face(_) => {
                     painter.circle_filled(at, FACE_RADIUS, theme::CROP_LINE);
