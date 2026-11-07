@@ -37,6 +37,9 @@
 //!   kept some (see [`Layers::write`]). Readers from before it open the
 //!   clay without them; they can't read a log with the mask tool or
 //!   layer edits either, so they open it without its timelapse.
+//! - `CALI`: the calipers, and whether each view shows them (see
+//!   [`Calipers::write`]); none when there is nothing to keep. Readers from
+//!   before it open the scene without them. They are never in the log.
 //!
 //! A copy saved without its timelapse has no `CKPT` or `LOG_`, and its
 //! `LEVL` and `QUAD` hold only the clay's: it opens as the clay is, and a
@@ -53,6 +56,7 @@ pub mod reference;
 
 use std::sync::Arc;
 
+use crate::calipers::Calipers;
 use crate::camera::OrbitCamera;
 use crate::io::{ReadError, Reader, Writer};
 use crate::reference::Reference;
@@ -79,8 +83,9 @@ pub const REFERENCE_BY_KEY: u32 = tag(b"REFH");
 pub const LEVELS: u32 = tag(b"LEVL");
 pub const QUADS: u32 = tag(b"QUAD");
 pub const LAYERS: u32 = tag(b"LAYR");
+pub const CALIPERS: u32 = tag(b"CALI");
 /// The chunks this version reads; others are skipped without inflating.
-const KNOWN: [u32; 9] = [
+const KNOWN: [u32; 10] = [
     MESH,
     CHECKPOINTS,
     LOG,
@@ -90,6 +95,7 @@ const KNOWN: [u32; 9] = [
     LEVELS,
     QUADS,
     LAYERS,
+    CALIPERS,
 ];
 
 const DEFLATED: u32 = 1;
@@ -115,6 +121,8 @@ pub struct Scene {
     pub log: Vec<Entry>,
     pub reference: Option<SavedReference>,
     pub view: Option<View>,
+    /// The calipers; `None` in files without any.
+    pub calipers: Option<Calipers>,
     /// The log or checkpoints were damaged and left out: the clay opens
     /// as it is, without its timelapse.
     pub history_damaged: bool,
@@ -440,6 +448,16 @@ impl SceneWriter {
         self.chunk(VIEW, false, &w.finish())
     }
 
+    /// The calipers; no chunk when there is nothing to keep.
+    pub fn calipers(&mut self, calipers: &Calipers) -> &mut Self {
+        if calipers.is_default() {
+            return self;
+        }
+        let mut w = Writer::new();
+        calipers.write(&mut w);
+        self.chunk(CALIPERS, false, &w.finish())
+    }
+
     pub fn finish(self) -> Vec<u8> {
         self.out.finish()
     }
@@ -600,6 +618,7 @@ impl Scene {
         let mut log = Vec::new();
         let mut reference = None;
         let mut view = None;
+        let mut calipers = None;
         let mut levels = None;
         let mut quads = None;
         let mut layers = None;
@@ -641,6 +660,11 @@ impl Scene {
                     }
                 },
                 VIEW => view = Some(read_view(&mut r)?),
+                // Damaged, only they are lost.
+                CALIPERS => match Calipers::read(&mut r) {
+                    Ok(read) => calipers = Some(read),
+                    Err(err) => damaged("calipers", err),
+                },
                 LEVELS => levels = Some(chunk.payload),
                 QUADS => quads = Some(chunk.payload),
                 LAYERS => layers = Some(chunk.payload),
@@ -693,6 +717,7 @@ impl Scene {
             log,
             reference,
             view,
+            calipers,
             history_damaged,
             reference_damaged,
         })
@@ -1598,6 +1623,40 @@ mod tests {
         assert_eq!(scene.mesh.positions.len(), live.mesh.positions.len());
         assert!(scene.log.is_empty());
         assert!(scene.view.is_none());
+    }
+
+    #[test]
+    fn calipers_come_back_and_scenes_without_them_still_open() {
+        use crate::calipers::Calipers;
+        let live = session();
+        let mut calipers = Calipers::default();
+        calipers.add([glam::Vec3::ZERO, glam::Vec3::new(0.1, 0.9, -0.2)]);
+        calipers.add([glam::Vec3::X, glam::Vec3::NEG_X]);
+        calipers.list[0].visible = false;
+        calipers.shown = [true, false];
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh).view(&view()).calipers(&calipers);
+        let scene = Scene::read(&w.finish()).expect("reads");
+        assert_eq!(scene.calipers, Some(calipers));
+        assert_eq!(scene.view, Some(view()));
+
+        // Nothing to keep: no chunk, as in scenes from before calipers.
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh).calipers(&Calipers::default());
+        let bytes = w.finish();
+        assert!(!bytes.windows(4).any(|t| t == b"CALI"));
+        assert_eq!(Scene::read(&bytes).unwrap().calipers, None);
+        let scene = Scene::read(&save(&live, &view())).unwrap();
+        assert_eq!(scene.calipers, None);
+
+        // Damaged calipers are left out; the rest opens.
+        let mut w = SceneWriter::new();
+        w.mesh(&live.mesh)
+            .view(&view())
+            .chunk(CALIPERS, false, b"not calipers");
+        let scene = Scene::read(&w.finish()).expect("the clay opens");
+        assert_eq!(scene.calipers, None);
+        assert_eq!(scene.view, Some(view()));
     }
 
     #[test]

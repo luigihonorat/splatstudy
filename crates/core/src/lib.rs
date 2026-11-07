@@ -8,6 +8,7 @@
 //! touches the platform directly; time arrives as an argument.
 
 mod app;
+pub mod calipers;
 pub mod camera;
 pub mod export;
 pub mod input;
