@@ -177,6 +177,38 @@ impl Grid {
         }
     }
 
+    /// The value at any point, interpolated between the eight nodes around
+    /// it (clamped to the grid): [`Grid::sample`] without the gradient.
+    pub fn value_at(&self, p: Vec3) -> f32 {
+        let max = IVec3::new(
+            self.dims[0] as i32 - 2,
+            self.dims[1] as i32 - 2,
+            self.dims[2] as i32 - 2,
+        );
+        let g = (p - self.origin) / self.step;
+        let cell = g
+            .floor()
+            .as_ivec3()
+            .clamp(IVec3::ZERO, max.max(IVec3::ZERO));
+        let f = (g - cell.as_vec3()).clamp(Vec3::ZERO, Vec3::ONE);
+        let c = cell.as_uvec3();
+        let at = self.index(c.x as usize, c.y as usize, c.z as usize);
+        let (sx, sy, sz) = (1, self.dims[0], self.dims[0] * self.dims[1]);
+        let v = &self.values;
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let y0 = lerp(
+            lerp(v[at], v[at + sx], f.x),
+            lerp(v[at + sy], v[at + sx + sy], f.x),
+            f.y,
+        );
+        let y1 = lerp(
+            lerp(v[at + sz], v[at + sx + sz], f.x),
+            lerp(v[at + sy + sz], v[at + sx + sy + sz], f.x),
+            f.y,
+        );
+        lerp(y0, y1, f.z)
+    }
+
     /// The value and its gradient at any point, interpolated between the
     /// eight nodes around it (clamped to the grid).
     pub fn sample(&self, p: Vec3) -> (f32, Vec3) {

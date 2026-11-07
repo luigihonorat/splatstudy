@@ -20,7 +20,7 @@ use crate::sculpt::Mesh;
 
 /// Remesh resolutions, in cells along the longest side of the shape.
 pub const MIN_RESOLUTION: u32 = 32;
-pub const MAX_RESOLUTION: u32 = 256;
+pub const MAX_RESOLUTION: u32 = 384;
 pub const DEFAULT_RESOLUTION: u32 = 160;
 
 /// Smoothing passes after surface nets, each pulled back onto the level:

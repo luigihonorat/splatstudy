@@ -83,6 +83,11 @@ const PAD: usize = 4;
 const DENSE: f32 = 24.0;
 /// ...but never coarser than this many cells across.
 const MIN_FUSED: u32 = 48;
+/// Splats around a node, per pixel-sized cell they are in, from which the
+/// finely fused field starts to count there (see [`sharpness`])...
+const SHARP_FROM: f32 = 3.0;
+/// ...and from which it counts alone.
+const SHARP: f32 = 8.0;
 /// Gaps in the solid up to about twice this many nodes wide are closed.
 const CLOSE: usize = 2;
 /// How much a view that sees through a node counts towards it being
@@ -158,9 +163,16 @@ struct Depths {
 /// (hair, a beard, a poorly seen side) comes out as a sponge of holes; a
 /// small crop box at a high resolution asks for just that. So the views
 /// are fused no finer than where [`DENSE`] splats share each pixel-sized
-/// cell, sealed and filled there, and the field is then resampled to
-/// `resolution`: the mesh is as fine as asked, and smooth where the splats
-/// say no more.
+/// cell on average, sealed and filled there, and the field is then
+/// resampled to `resolution`: the mesh is as fine as asked, and smooth
+/// where the splats say no more.
+///
+/// Splats are not spread evenly, though: a face or a hand is sampled more
+/// densely than a beard or a poorly seen back. So where the field had to be
+/// fused coarser, it is fused as finely as asked too, and the two are
+/// blended node by node by how densely the splats around sample the surface
+/// (see [`sharpness`]): the fine detail where they are dense, the coarse
+/// field where they are thin.
 pub fn field(
     splats: &Splats,
     align: &Alignment,
@@ -202,10 +214,37 @@ pub fn field(
     if coarse.dims == g.dims {
         g = coarse;
     } else {
-        for at in 0..g.len() {
-            let [i, j, k] = g.coords(at);
-            g.values[at] = coarse.sample(g.point(i, j, k)).0;
-        }
+        // Where the splats are dense enough, the field fused as finely as
+        // asked; where they are thin or fuzzy, the coarser one; in
+        // between, a blend (see [`sharpness`]).
+        let mut sharp = fused(splats, align, (min, max), resolution, level)?;
+        sharp.blur();
+        // Worked out on the coarse grid: it changes slowly.
+        let blend = Grid {
+            origin: coarse.origin,
+            step: coarse.step,
+            dims: coarse.dims,
+            values: sharpness(&coarse, &inside, g.step * PIXEL),
+        };
+
+        let [nx, ny, _] = g.dims;
+        let (origin, step) = (g.origin, g.step);
+        let layers: Vec<(usize, &mut [f32], &[f32])> = g
+            .values
+            .chunks_mut(nx * ny)
+            .zip(sharp.values.chunks(nx * ny))
+            .enumerate()
+            .map(|(k, (out, fine))| (k, out, fine))
+            .collect();
+        parallel_mut(layers, |(k, out, fine)| {
+            for (at, v) in out.iter_mut().enumerate() {
+                let p = origin + Vec3::new((at % nx) as f32, (at / nx) as f32, *k as f32) * step;
+                let a = blend.value_at(p);
+                *v = a * fine[at] + (1.0 - a) * coarse.value_at(p);
+            }
+        });
+
+        settle(&mut g, truncation, 1);
     }
     for _ in 0..smoothness {
         g.blur();
@@ -215,6 +254,82 @@ pub fn field(
     }
     settle(&mut g, truncation, 0);
     Some(g)
+}
+
+/// How far to trust the finely fused field at each node of `g`, 0..1:
+/// fully where [`SHARP`] of the splats at `centres` share each cell `cell`
+/// across around it (counting the cells that have any), not at all from
+/// [`SHARP_FROM`] down, smoothly in between, and not where there are none.
+/// Lower than [`DENSE`]: that is an average, over thin parts too.
+fn sharpness(g: &Grid, centres: &[Vec3], cell: f32) -> Vec<f32> {
+    let [nx, ny, nz] = g.dims;
+    let mut count = vec![0f32; g.len()];
+    let mut occupied = vec![0f32; g.len()];
+    for w in centres {
+        let c = ((*w - g.origin) / g.step).round();
+        if c.cmpge(Vec3::ZERO).all() && c.x < nx as f32 && c.y < ny as f32 && c.z < nz as f32 {
+            let at = g.index(c.x as usize, c.y as usize, c.z as usize);
+            count[at] += 1.0;
+            occupied[at] = 1.0;
+        }
+    }
+    // Summed over a block of nodes about two pixels wide.
+    let radius = (2.0 * PIXEL).round() as usize;
+    for values in [&mut count, &mut occupied] {
+        box_sum(g, values, radius);
+    }
+    // Per pixel-sized cell, as `DENSE` counts them.
+    let per_cell = (cell / g.step).powi(2);
+    let mut sharp: Vec<f32> = count
+        .iter()
+        .zip(&occupied)
+        .map(|(&c, &o)| {
+            if o <= 0.0 {
+                return 0.0;
+            }
+            let density = c / o * per_cell;
+            ((density - SHARP_FROM) / (SHARP - SHARP_FROM)).clamp(0.0, 1.0)
+        })
+        .collect();
+    let mut smooth = Grid {
+        origin: g.origin,
+        step: g.step,
+        dims: g.dims,
+        values: std::mem::take(&mut sharp),
+    };
+    smooth.blur();
+    smooth.blur();
+    smooth.values
+}
+
+/// Each value replaced by the sum of those within `radius` nodes along
+/// each axis (a box).
+fn box_sum(g: &Grid, values: &mut [f32], radius: usize) {
+    let steps = [1, g.dims[0], g.dims[0] * g.dims[1]];
+    let mut line = Vec::new();
+    let mut sums = Vec::new();
+    for axis in 0..3 {
+        let n = g.dims[axis];
+        let stride = steps[axis];
+        let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+        for u in 0..g.dims[a] {
+            for v in 0..g.dims[b] {
+                let start = u * steps[a] + v * steps[b];
+                line.clear();
+                line.extend((0..n).map(|t| values[start + t * stride]));
+                sums.clear();
+                sums.push(0.0);
+                for &x in &line {
+                    sums.push(sums.last().unwrap() + x);
+                }
+                for t in 0..n {
+                    let lo = t.saturating_sub(radius);
+                    let hi = (t + radius + 1).min(n);
+                    values[start + t * stride] = sums[hi] - sums[lo];
+                }
+            }
+        }
+    }
 }
 
 /// The finest resolution, up to `resolution`, that splats at `centres`
@@ -248,9 +363,58 @@ fn fused(
     resolution: u32,
     level: f32,
 ) -> Option<Grid> {
+    let seen = observe(splats, align, (min, max), resolution, level)?;
+    let mut g = Grid::around(min, max, resolution, PAD, 0.0)?;
+    fuse(
+        &mut g,
+        &seen.frame,
+        &seen.views,
+        &seen.maps,
+        seen.truncation,
+    );
+    Some(g)
+}
+
+/// What the views around a region saw.
+struct Seen {
+    frame: Frame,
+    views: Vec<View>,
+    /// Weighed (see [`weigh`]).
+    maps: Vec<Depths>,
+    truncation: f32,
+}
+
+/// The splats drawn from [`VIEWS`] directions around the region from
+/// `min` to `max`, with pixels about [`PIXEL`] cells of a grid
+/// `resolution` cells across.
+fn observe(
+    splats: &Splats,
+    align: &Alignment,
+    (min, max): (Vec3, Vec3),
+    resolution: u32,
+    level: f32,
+) -> Option<Seen> {
+    observe_from(
+        splats,
+        align,
+        (min, max),
+        resolution,
+        level,
+        directions(VIEWS),
+    )
+}
+
+fn observe_from(
+    splats: &Splats,
+    align: &Alignment,
+    (min, max): (Vec3, Vec3),
+    resolution: u32,
+    level: f32,
+    views: Vec<View>,
+) -> Option<Seen> {
     let m = align.matrix();
     let turn = Mat3::from_mat4(m);
-    let mut g = Grid::around(min, max, resolution, PAD, 0.0)?;
+    let g = Grid::around(min, max, resolution, PAD, 0.0)?;
     let step = g.step;
     let far = g.point(g.dims[0] - 1, g.dims[1] - 1, g.dims[2] - 1);
     let frame = {
@@ -334,7 +498,6 @@ fn fused(
     }
     drop(placed);
 
-    let views = directions(VIEWS);
     // Each thread draws some views and adds up what it saw of each splat.
     let drawn = parallel(&views, |views| {
         let mut sides = vec![[0f32; 2]; world.len()];
@@ -370,8 +533,76 @@ fn fused(
     for (map, view) in maps.iter_mut().zip(&views) {
         weigh(map, &frame, view, &normals, &outer, truncation);
     }
-    fuse(&mut g, &frame, &views, &maps, truncation);
-    Some(g)
+    Some(Seen {
+        frame,
+        views,
+        maps,
+        truncation,
+    })
+}
+
+/// Where the views see the surface: for each pixel whose ray met it from
+/// outside, inside the crop box, the ray (from where the view starts, and
+/// its direction) and how far along it the surface is; from views turned
+/// by `turn` radians about the vertical from those [`field`] uses. For
+/// measuring how close the clay comes to the splats.
+#[doc(hidden)]
+pub fn surface_points(
+    splats: &Splats,
+    align: &Alignment,
+    crop: Option<Aabb>,
+    resolution: u32,
+    level: f32,
+    turn: f32,
+) -> Vec<(Vec3, Vec3, f32)> {
+    let m = align.matrix();
+    let kept = |p: Vec3| crop.is_none_or(|c| c.contains(p));
+    let (mut min, mut max) = (Vec3::MAX, Vec3::MIN);
+    for (i, &p) in splats.positions.iter().enumerate() {
+        let w = m.transform_point3(p);
+        if f32::from(splats.colors[i][3]) / 255.0 > MIN_OPACITY
+            && w.is_finite()
+            && w.abs().max_element() <= REACH
+            && kept(p)
+        {
+            min = min.min(w);
+            max = max.max(w);
+        }
+    }
+    let spin = Mat3::from_rotation_y(turn);
+    let views = directions(VIEWS)
+        .into_iter()
+        .map(|v| View {
+            right: spin * v.right,
+            up: spin * v.up,
+            forward: spin * v.forward,
+        })
+        .collect();
+    let level = level.clamp(*super::THRESHOLDS.start(), *super::THRESHOLDS.end());
+    let seen = observe_from(splats, align, (min, max), resolution, level, views);
+    let Some(seen) = seen else {
+        return Vec::new();
+    };
+    let to_file = m.inverse();
+    let f = &seen.frame;
+    let mut points = Vec::new();
+    for (view, map) in seen.views.iter().zip(&seen.maps) {
+        for (p, (&d, &w)) in map.depth.iter().zip(&map.weight).enumerate() {
+            // Only where the surface is crisp: not haze, hair or a faint side.
+            if !d.is_finite() || w <= 0.0 || map.fuzz[p] > seen.truncation * 1.001 {
+                continue;
+            }
+            let (x, y) = ((p % f.size) as f32 + 0.5, (p / f.size) as f32 + 0.5);
+            let origin = f.centre
+                + view.right * (x * f.pixel - f.radius)
+                + view.up * (f.radius - y * f.pixel)
+                - view.forward * f.near;
+            if kept(to_file.transform_point3(origin + view.forward * d)) {
+                points.push((origin, view.forward, d));
+            }
+        }
+    }
+    points
 }
 
 /// The Morton code of a cell (21 bits per axis): the bits of its
@@ -1320,7 +1551,7 @@ mod tests {
     #[test]
     fn a_thin_capture_at_a_fine_resolution_has_no_holes() {
         // A ball under a fuzz of small faint splats, like hair, asked for
-        // at the finest resolution: fused as finely, rays slip between
+        // at a fine resolution: fused as finely, rays slip between
         // the splats and the fuzz comes out as a sponge.
         let mut surface = sphere(5000, Vec3::ZERO, 0.8);
         for (i, (p, n)) in sphere(40_000, Vec3::ZERO, 1.0).into_iter().enumerate() {
@@ -1332,7 +1563,7 @@ mod tests {
             c[3] = 50;
         }
         let how = crate::voxel::FromReference {
-            resolution: crate::voxel::MAX_RESOLUTION,
+            resolution: 256,
             ..Default::default()
         };
         let mesh = clay_from_reference(&reference(splats), how).unwrap();
@@ -1341,6 +1572,64 @@ mod tests {
         // Somewhere in the fuzz, nothing inside the ball.
         for p in &mesh.positions {
             assert!((0.76..0.95).contains(&p.length()), "{p}");
+        }
+    }
+
+    #[test]
+    fn the_fine_field_counts_where_the_splats_are_dense() {
+        // One side of a ball sampled densely, the other thinly.
+        let centres: Vec<Vec3> = sphere(400_000, Vec3::ZERO, 0.8)
+            .into_iter()
+            .map(|(p, _)| p)
+            .filter(|p| p.x > 0.0 || rand_like(*p) < 0.05)
+            .collect();
+        let g = Grid::around(Vec3::splat(-1.0), Vec3::splat(1.0), 96, PAD, 0.0).unwrap();
+        let sharp = sharpness(&g, &centres, 2.0 / 192.0 * PIXEL);
+        let at = |p: Vec3| {
+            let c = ((p - g.origin) / g.step).round();
+            sharp[g.index(c.x as usize, c.y as usize, c.z as usize)]
+        };
+        assert!(
+            at(Vec3::new(0.8, 0.0, 0.0)) > 0.9,
+            "{}",
+            at(Vec3::new(0.8, 0.0, 0.0))
+        );
+        assert!(
+            at(Vec3::new(-0.8, 0.0, 0.0)) < 0.1,
+            "{}",
+            at(Vec3::new(-0.8, 0.0, 0.0))
+        );
+        // Nowhere near a splat: the coarse field.
+        assert_eq!(at(Vec3::ZERO), 0.0);
+    }
+
+    #[test]
+    fn a_ball_half_densely_half_thinly_sampled_stays_one_solid_piece() {
+        // Dense small bumps on one side, a thin fuzz on the other, at the
+        // fine resolution: both fields are fused and blended.
+        let mut surface: Vec<(Vec3, Vec3)> = sphere(60_000, Vec3::ZERO, 0.8)
+            .into_iter()
+            .filter(|(p, _)| p.x > 0.0)
+            .map(|(p, n)| {
+                let bump = (p * 60.0).to_array().map(f32::sin);
+                (p + n * 0.01 * bump[0] * bump[1], n)
+            })
+            .collect();
+        for (i, (p, n)) in sphere(8000, Vec3::ZERO, 1.0).into_iter().enumerate() {
+            if p.x <= 0.0 {
+                let depth = rand_like(p * 5.0 + Vec3::splat(i as f32 * 1e-3));
+                surface.push((p * (0.8 + 0.05 * depth), n));
+            }
+        }
+        let how = crate::voxel::FromReference {
+            resolution: 256,
+            ..Default::default()
+        };
+        let mesh = clay_from_reference(&reference(discs(&surface, 0.01, 200)), how).unwrap();
+        let (manifold, pieces, genus) = topology(&mesh);
+        assert!(manifold && pieces == 1 && genus == 0, "genus {genus}");
+        for p in &mesh.positions {
+            assert!((0.75..0.88).contains(&p.length()), "{p}");
         }
     }
 
