@@ -31,6 +31,8 @@ use crate::render::splat::{SplatLook, SplatPass};
 use crate::sculpt::Vertex;
 use crate::ui::{self, fonts, menu, theme};
 
+mod crop_gizmo;
+
 /// Files that open as a reference (lowercase, no dot).
 pub(super) const REFERENCE_EXTENSIONS: &[&str] =
     &["ply", "splat", "spz", "obj", "stl", "png", "jpg", "jpeg"];
@@ -47,6 +49,11 @@ pub(super) struct ReferenceState {
     /// the clay's in the same slot.
     mesh_pass: Option<ClayPass>,
     crop: CropSliders,
+    /// The crop handle being dragged in the reference view.
+    crop_drag: Option<crop_gizmo::CropDrag>,
+    /// The egui pass in which the crop group was last drawn open: its
+    /// handles show over the view in that pass.
+    crop_shown: Option<u64>,
     image_view: ImageView,
     /// Splats show only their base colour, the same from every side, even
     /// when the file has view-dependent colour. Off by default; kept from
@@ -152,6 +159,19 @@ impl CropSliders {
             max: r.min + Vec3::new(ri, t, f) * s,
         };
         Some(transform_box(turn.inverse(), upright_box))
+    }
+
+    /// Moves side `i` to `value`: within the range, and each side short
+    /// of its opposite.
+    fn set_side(&mut self, i: usize, value: f32) {
+        let (lo, hi) = (i & !1, i | 1);
+        let sides = &mut self.sides;
+        sides[i] = value.clamp(0.0, 1.0);
+        if i == lo {
+            sides[lo] = sides[lo].min(sides[hi] - 0.01);
+        } else {
+            sides[hi] = sides[hi].max(sides[lo] + 0.01);
+        }
     }
 
     /// Sets the sliders to show `crop` (file coordinates).
@@ -307,6 +327,7 @@ impl App {
         state.current = None;
         state.drawn = None;
         state.crop = CropSliders::default();
+        state.crop_drag = None;
         self.dirty = true;
     }
 
@@ -450,6 +471,8 @@ impl App {
     fn reference_crop(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         let state = &mut self.reference;
+        // Its handles show over the view while the group is open.
+        state.crop_shown = Some(ui.ctx().cumulative_pass_nr());
         let Some(r) = state.current.as_mut() else {
             return;
         };
@@ -474,18 +497,12 @@ impl App {
             tr.refs.crop_front,
         ];
         for (i, label) in labels.into_iter().enumerate() {
-            let sides = &mut state.crop.sides;
-            let response = ui::slider(ui, label, &mut sides[i], 0.0..=1.0, |v| {
+            let mut side = state.crop.sides[i];
+            let response = ui::slider(ui, label, &mut side, 0.0..=1.0, |v| {
                 format!("{:.0}%", v * 100.0)
             });
             if response.changed() {
-                // Each side stays short of its opposite.
-                let (lo, hi) = (i & !1, i | 1);
-                if i == lo {
-                    sides[lo] = sides[lo].min(sides[hi] - 0.01);
-                } else {
-                    sides[hi] = sides[hi].max(sides[lo] + 0.01);
-                }
+                state.crop.set_side(i, side);
                 r.crop = state.crop.to_box(r.align.up);
             }
             // Re-fit once the side is let go, not while it moves.
@@ -569,6 +586,7 @@ impl App {
             };
             painter.image(texture, shown, uv, Color32::WHITE);
         }
+        self.crop_follow(ui);
         let Some(r) = &self.reference.current else {
             return;
         };
@@ -583,6 +601,7 @@ impl App {
                 crop,
                 self.study.views[REFERENCE].mirror,
             );
+            self.crop_handles(ui, &painter, rect);
         }
         if let Some(covered) = paint_credit(&painter, rect, &r.credit) {
             let tr = self.lang.tr();
@@ -863,15 +882,7 @@ fn crop_box(
                 if i & 2 == 0 { crop.min.y } else { crop.max.y },
                 if i & 4 == 0 { crop.min.z } else { crop.max.z },
             );
-            let clip = view_proj * p.extend(1.0);
-            (clip.w > 1e-4).then(|| {
-                let ndc = clip.truncate() / clip.w;
-                let x = if mirror { -ndc.x } else { ndc.x };
-                Pos2::new(
-                    rect.left() + (x + 1.0) / 2.0 * rect.width(),
-                    rect.top() + (1.0 - ndc.y) / 2.0 * rect.height(),
-                )
-            })
+            crop_gizmo::project(view_proj, rect, mirror, p)
         })
         .collect();
     let stroke = Stroke::new(1.0, theme::CROP_LINE);
