@@ -11,7 +11,7 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +19,10 @@ use sdl3::EventSubsystem;
 use sdl3::dialog::{self, DialogError, DialogFileFilter};
 use sdl3::event::EventSender;
 use sdl3::video::Window;
+use splatstudy_core::reference::samples::Sample;
 use splatstudy_core::{App, FilePurpose, InputEvent, Request};
+
+use crate::gallery::{self, Wanted};
 
 /// The custom event that wakes the main loop.
 struct Wake;
@@ -88,6 +91,39 @@ impl Inbox {
             inbox.push(InputEvent::File {
                 purpose,
                 name,
+                bytes,
+            });
+        });
+    }
+
+    /// Opens a gallery cast on a worker thread, downloading it into
+    /// `folder` first unless it is there already, and delivers it; empty
+    /// if it couldn't be had, so the app says the download failed.
+    fn cast_later(&self, folder: PathBuf, sample: &'static Sample, purpose: FilePurpose) {
+        let inbox = self.clone();
+        let ticket = purpose
+            .supersedes()
+            .then(|| LATEST.fetch_add(1, Ordering::SeqCst) + 1);
+        std::thread::spawn(move || {
+            let cast = gallery::cast(&folder, sample).and_then(|path| read(&path));
+            // Kept for next time even when a newer file took its place.
+            if ticket.is_some_and(|t| LATEST.load(Ordering::SeqCst) != t) {
+                log::info!("{} was replaced by a newer file", sample.file);
+                return;
+            }
+            let bytes = match cast {
+                Ok(bytes) => {
+                    log::info!("opened {}: {} bytes", sample.file, bytes.len());
+                    bytes
+                }
+                Err(e) => {
+                    log::error!("could not download {}: {e}", sample.file);
+                    Arc::from([])
+                }
+            };
+            inbox.push(InputEvent::File {
+                purpose,
+                name: sample.file.to_owned(),
                 bytes,
             });
         });
@@ -259,18 +295,31 @@ impl Files {
         }
     }
 
-    /// Samples ship next to the executable on desktop, if at all.
+    /// The gallery's samples, by their path next to the web page: the
+    /// thumbnails are built in, the casts downloaded once and kept (see
+    /// `gallery`). Nothing else is fetched.
     fn fetch(&self, url: &str, purpose: FilePurpose) {
-        let relative = Path::new(url);
-        let plain = relative
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)));
-        let base = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(Path::to_owned));
-        match base {
-            Some(base) if plain => self.inbox.read_later(base.join(relative), purpose),
-            _ => log::error!("cannot fetch {url} on desktop"),
+        match gallery::wanted(url) {
+            Some(Wanted::Thumbnail(sample)) => self.inbox.push(InputEvent::File {
+                purpose,
+                name: format!("{}.png", sample.id),
+                bytes: gallery::thumbnail(sample),
+            }),
+            Some(Wanted::Cast(sample)) => {
+                // Without the app's folder, kept in the temporary one.
+                let folder = gallery::folder()
+                    .unwrap_or_else(|| std::env::temp_dir().join("splatstudy-samples"));
+                self.inbox.cast_later(folder, sample, purpose);
+            }
+            None => {
+                log::error!("{url} is not in the gallery: not fetched");
+                let name = url.rsplit('/').next().unwrap_or(url).to_owned();
+                self.inbox.push(InputEvent::File {
+                    purpose,
+                    name,
+                    bytes: Arc::from([]),
+                });
+            }
         }
     }
 }

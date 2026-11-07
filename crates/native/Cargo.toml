@@ -19,6 +19,11 @@ pollster.workspace = true
 # SDL3 for pen pressure on every desktop OS; built from source (needs CMake).
 sdl3 = { version = "0.21", features = ["raw-window-handle", "build-from-source-static"] }
 wgpu = { workspace = true, features = ["dx12", "vulkan", "metal"] }
+# Downloading the gallery's casts from the web app: rustls with ring,
+# trusting the OS's root certificates (no OpenSSL anywhere).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider"] }
 
 # The window icon on macOS and Linux, decoded from assets/icon.png.
 [target.'cfg(not(windows))'.dependencies]
