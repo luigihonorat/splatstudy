@@ -3,37 +3,46 @@
 //! Autosave on desktop: the same bytes as in the browser, as files in the
 //! app's folder (SDL's pref path). `autosave.splatstudy` is the scene, its
 //! reference named by a content key; `autosave-<key>.ref` is that
-//! reference file, written once per file. Failing is never fatal: the app
-//! says so once and goes on without autosave.
+//! reference file, written once per file. Failing is never fatal: a
+//! failed write is tried again at the next change (a file held a moment by
+//! an antivirus or an indexer makes a rename fail on Windows); a full disk,
+//! or a few failures in a row, and the app says so once and goes on
+//! without autosave.
 //!
 //! A restore that crashes the app would crash it again at every start, so
-//! a `restoring` file marks a restore under way until its first frame is
-//! drawn. Found at start, the restore is only offered.
+//! a `restoring` file marks a restore under way, from the moment the app
+//! opens it (the reference file read) until its first frame is drawn, or
+//! the app quits normally. Found at start, the restore is only offered.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use splatstudy_core::App;
-use splatstudy_core::scene::autosave::{Autosave as Bytes, Trouble};
-use splatstudy_core::scene::{self, BlobKey};
+use splatstudy_core::scene::BlobKey;
+use splatstudy_core::scene::autosave::{self, Autosave as Bytes, Pace, Trouble};
 
 const SCENE: &str = "autosave.splatstudy";
 const PREFIX: &str = "autosave-";
 const SUFFIX: &str = ".ref";
 /// There while a restore is under way, until a frame shows it.
 const RESTORING: &str = "restoring";
-/// Time without a change before saving.
-const QUIET: Duration = Duration::from_secs(2);
+/// Failed writes in a row before autosave stops.
+const MAX_FAILURES: u32 = 3;
 
 fn blob_path(folder: &Path, key: BlobKey) -> PathBuf {
     folder.join(format!("{PREFIX}{}{SUFFIX}", key.name()))
 }
 
 pub struct Autosave {
-    /// `None` once writing failed, or when there is no folder.
+    /// `None` once autosave stopped, or when there is no folder.
     folder: Option<PathBuf>,
-    seen: u64,
-    changed_at: Instant,
+    /// Failed writes in a row, and the revision the last one was of: it
+    /// isn't tried again until the scene changes (or the app quits).
+    failures: u32,
+    failed: Option<u64>,
+    /// When to save; its clock counts seconds from `started`.
+    pace: Pace,
+    started: Instant,
     stored: u64,
     /// A restore was done; the `restoring` file goes once a frame shows it.
     await_frame: bool,
@@ -43,19 +52,18 @@ pub struct Autosave {
 /// it came with its reference; `None` if nothing was restored.
 fn restore_from(app: &mut App, folder: &Path) -> Option<bool> {
     let scene = std::fs::read(folder.join(SCENE)).ok()?;
-    let flag = folder.join(RESTORING);
-    if let Err(e) = std::fs::write(&flag, b"") {
-        log::warn!("could not write {}: {e}", flag.display());
-    }
-    let key = scene::reference_key(&scene).ok().flatten();
-    let reference = key.and_then(|key| crate::files::read(&blob_path(folder, key)).ok());
-    let with_reference = reference.is_some();
-    if app.restore_autosave(&scene, reference) {
-        Some(with_reference)
-    } else {
-        let _ = std::fs::remove_file(&flag);
-        None
-    }
+    let path = folder.join(RESTORING);
+    let flag = |on: bool| {
+        if !on {
+            let _ = std::fs::remove_file(&path);
+        } else if let Err(e) = std::fs::write(&path, b"") {
+            log::warn!("could not write {}: {e}", path.display());
+        }
+    };
+    let read = |key| std::future::ready(crate::files::read(&blob_path(folder, key)).ok());
+    let open = |scene: &[u8], reference| app.restore_autosave(scene, reference);
+    let key = pollster::block_on(autosave::restore(&scene, read, flag, open))?;
+    Some(key.is_some())
 }
 
 impl Autosave {
@@ -86,8 +94,10 @@ impl Autosave {
         let revision = app.scene_revision();
         let autosave = Self {
             folder,
-            seen: revision,
-            changed_at: Instant::now(),
+            failures: 0,
+            failed: None,
+            pace: Pace::new(revision, 0.0),
+            started: Instant::now(),
             stored: revision,
             await_frame,
         };
@@ -103,51 +113,79 @@ impl Autosave {
         }
     }
 
-    /// Saves when the scene changed and has been quiet a moment, or at
+    /// Seconds since watching began.
+    fn now(&self) -> f64 {
+        self.started.elapsed().as_secs_f64()
+    }
+
+    /// Saves when the scene changed and has been quiet a moment, or has
+    /// gone unsaved for long (at the next pause between strokes), or at
     /// once when the app is `leaving`. Call it after every frame and once
     /// before quitting. Also restores the autosave when the user asks.
     pub fn tick(&mut self, app: &mut App, leaving: bool) {
+        // Quitting normally after a restore, before its first frame (the
+        // window closed while a big scene opened): it didn't crash the
+        // app, so the next start restores it again.
+        if leaving {
+            self.frame_drawn();
+        }
         if app.take_restore_request() {
             match crate::config::folder().and_then(|folder| restore_from(app, &folder)) {
                 Some(_) => {
                     self.await_frame = true;
-                    self.seen = app.scene_revision();
-                    self.stored = self.seen;
+                    self.stored = app.scene_revision();
+                    self.pace.reset(self.stored, self.now());
                 }
                 None => app.autosave_gone(),
             }
         }
         let revision = app.scene_revision();
-        if revision != self.seen {
-            self.seen = revision;
-            self.changed_at = Instant::now();
-        }
-        let quiet = leaving || self.changed_at.elapsed() >= QUIET;
-        if self.folder.is_none() || revision == self.stored || !quiet {
+        let now = self.now();
+        let due = self.pace.due(revision, now) || leaving;
+        let tried = self.failed == Some(revision) && !leaving;
+        if self.folder.is_none() || revision == self.stored || !due || tried {
             return;
         }
         if !app.autosave_ready(leaving) {
             return;
         }
         let bytes = app.autosave_bytes();
+        self.pace.saved(now);
         let folder = self.folder.clone().expect("checked");
         match write(&folder, bytes) {
             Ok(()) => {
                 self.stored = revision;
+                self.failures = 0;
+                self.failed = None;
                 // What is stored now is new work: start with it next time.
                 let _ = std::fs::remove_file(folder.join(RESTORING));
             }
             Err(e) => {
-                log::warn!("autosave failed: {e}");
-                self.folder = None;
-                let full = e.kind() == std::io::ErrorKind::StorageFull;
-                app.autosave_trouble(if full {
-                    Trouble::Full
-                } else {
-                    Trouble::Unavailable
-                });
+                if let Some(trouble) = self.failed_write(revision, &e) {
+                    app.autosave_trouble(trouble);
+                }
             }
         }
+    }
+
+    /// A write of `revision` failed. What to tell the user when autosave
+    /// stops: at once for a full disk, otherwise after a few failures in
+    /// a row; until then it is tried again at the next change.
+    fn failed_write(&mut self, revision: u64, e: &std::io::Error) -> Option<Trouble> {
+        self.failures += 1;
+        self.failed = Some(revision);
+        let full = e.kind() == std::io::ErrorKind::StorageFull;
+        if !full && self.failures < MAX_FAILURES {
+            log::warn!("autosave failed, trying again at the next change: {e}");
+            return None;
+        }
+        log::warn!("autosave failed: {e}");
+        self.folder = None;
+        Some(if full {
+            Trouble::Full
+        } else {
+            Trouble::Unavailable
+        })
     }
 }
 
@@ -191,4 +229,45 @@ fn write(folder: &Path, bytes: Option<Bytes>) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    fn watching() -> Autosave {
+        Autosave {
+            folder: Some(PathBuf::from("autosave")),
+            failures: 0,
+            failed: None,
+            pace: Pace::new(0, 0.0),
+            started: Instant::now(),
+            stored: 0,
+            await_frame: false,
+        }
+    }
+
+    #[test]
+    fn a_failed_write_is_tried_again_and_a_few_in_a_row_stop_autosave() {
+        let mut autosave = watching();
+        let denied = Error::from(ErrorKind::PermissionDenied);
+        assert_eq!(autosave.failed_write(1, &denied), None);
+        assert!(autosave.folder.is_some());
+        assert_eq!(autosave.failed, Some(1));
+        assert_eq!(autosave.failed_write(2, &denied), None);
+        assert_eq!(
+            autosave.failed_write(3, &denied),
+            Some(Trouble::Unavailable)
+        );
+        assert!(autosave.folder.is_none());
+    }
+
+    #[test]
+    fn a_full_disk_stops_autosave_at_once() {
+        let mut autosave = watching();
+        let full = Error::from(ErrorKind::StorageFull);
+        assert_eq!(autosave.failed_write(1, &full), Some(Trouble::Full));
+        assert!(autosave.folder.is_none());
+    }
 }

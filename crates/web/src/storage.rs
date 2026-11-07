@@ -19,7 +19,11 @@
 //!
 //! A restore that crashes the tab would crash it again on every reload, so
 //! a flag in localStorage marks a restore under way until its first frame
-//! is drawn. Found at start, the restore is only offered.
+//! is drawn, or the page leaves normally. Found at start, the restore is
+//! only offered. The flag is set only once the reference file is read
+//! (see [`autosave::restore`]): that read takes seconds for a big splat,
+//! and someone reloading meanwhile would otherwise find the session only
+//! offered, and then replaced by the first change.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,8 +31,8 @@ use std::sync::Arc;
 
 use js_sys::Uint8Array;
 use splatstudy_core::App;
-use splatstudy_core::scene::autosave::{Autosave as Bytes, Trouble};
-use splatstudy_core::scene::{self, BlobKey};
+use splatstudy_core::scene::BlobKey;
+use splatstudy_core::scene::autosave::{self, Autosave as Bytes, Pace, Trouble};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::Storage;
@@ -247,8 +251,6 @@ extern "C" {
     fn page_hidden() -> bool;
 }
 
-/// Seconds without a change before saving.
-const QUIET: f64 = 2.0;
 /// How often the revision is looked at, in ms.
 const POLL_MS: i32 = 500;
 /// Room kept free beyond the file itself when deciding whether it fits.
@@ -322,8 +324,8 @@ async fn read_scene() -> Option<Vec<u8>> {
 }
 
 /// The reference file a stored scene names, if it is stored.
-async fn read_reference(key: Option<BlobKey>) -> Option<Arc<[u8]>> {
-    match idb_blob(&key?.name()).await {
+async fn read_reference(key: BlobKey) -> Option<Arc<[u8]>> {
+    match idb_blob(&key.name()).await {
         Ok(v) => {
             let view = v.dyn_into::<Uint8Array>().ok()?;
             let bytes = to_arc(&view);
@@ -343,23 +345,27 @@ async fn read_reference(key: Option<BlobKey>) -> Option<Arc<[u8]>> {
 type Visit<'a> = dyn FnMut(&mut dyn FnMut(&mut App)) + 'a;
 
 /// Opens a stored scene in `app`, with its reference. Flags the restore
-/// until a frame is drawn. The reference's key when it came back too, or
-/// `None` when the scene didn't read.
+/// from the moment the app opens it until a frame is drawn. The
+/// reference's key when it came back too, or `None` when the scene didn't
+/// read.
 async fn restore_scene(scene: &[u8], with_app: &mut Visit<'_>) -> Option<Option<String>> {
-    set(RESTORING, "1");
-    let key = scene::reference_key(scene).ok().flatten();
-    let reference = read_reference(key).await;
-    let with_reference = reference.is_some();
-    let mut reference = Some(reference);
-    let mut restored = false;
-    with_app(&mut |app| restored = app.restore_autosave(scene, reference.take().flatten()));
-    if !restored {
-        remove(RESTORING);
-        return None;
-    }
+    let flag = |on| {
+        if on {
+            set(RESTORING, "1");
+        } else {
+            remove(RESTORING);
+        }
+    };
+    let open = |scene: &[u8], reference: Option<Arc<[u8]>>| {
+        let mut reference = Some(reference);
+        let mut restored = false;
+        with_app(&mut |app| restored = app.restore_autosave(scene, reference.take().flatten()));
+        restored
+    };
+    let key = autosave::restore(scene, read_reference, flag, open).await?;
     AWAIT_FRAME.set(true);
     log::info!("restored the autosave ({} bytes)", scene.len());
-    Some(key.filter(|_| with_reference).map(|key| key.name()))
+    Some(key.map(|key| key.name()))
 }
 
 /// Opens the scene [`begin_restore`] read in `app`. Returns the URL
@@ -387,9 +393,10 @@ pub type WithApp = Rc<dyn Fn(&mut dyn FnMut(&mut App))>;
 struct State {
     /// False once storing failed: the app goes on without autosave.
     on: bool,
-    /// The revision last seen, and when it changed (seconds).
+    /// The revision last seen.
     seen: u64,
-    changed_at: f64,
+    /// When to save (seconds on the page's clock).
+    pace: Pace,
     /// The revision stored, or restored; `None` when another tab wrote
     /// since.
     stored: Option<u64>,
@@ -461,7 +468,7 @@ impl Autosave {
             state: Rc::new(RefCell::new(State {
                 on: true,
                 seen: revision,
-                changed_at: now(),
+                pace: Pace::new(revision, now()),
                 stored: Some(revision),
                 overwritten_at: None,
                 heard: 0,
@@ -518,7 +525,8 @@ impl Autosave {
         Ok(())
     }
 
-    /// Saves if the scene changed and has been quiet long enough, or at
+    /// Saves if the scene changed and has been quiet long enough, or has
+    /// gone unsaved for long (at the next pause between strokes), or at
     /// once when the page is `leaving`.
     fn poll(&self, leaving: bool) {
         let this = self.clone();
@@ -526,6 +534,14 @@ impl Autosave {
     }
 
     fn poll_app(&self, app: &mut App, leaving: bool) {
+        // The page goes normally after a restore, before its first frame
+        // (someone reloading while a big scene opened): the restore didn't
+        // crash the tab, so the next start restores it again rather than
+        // only offering it. A crash never gets here: the tab is gone, or
+        // the shell stays borrowed after a trap and `poll` can't reach it.
+        if leaving {
+            frame_drawn();
+        }
         let mut st = self.state.borrow_mut();
         if let Some(trouble) = st.trouble.take() {
             app.autosave_trouble(trouble);
@@ -537,12 +553,9 @@ impl Autosave {
         }
         let revision = app.scene_revision();
         let t = now();
-        if revision != st.seen {
-            st.seen = revision;
-            st.changed_at = t;
-        }
-        let quiet = leaving || t - st.changed_at >= QUIET;
-        if !st.on || !st.unsaved(revision, leaving) || !quiet {
+        st.seen = revision;
+        let due = st.pace.due(revision, t) || leaving;
+        if !st.on || !st.unsaved(revision, leaving) || !due {
             return;
         }
         if !app.autosave_ready(leaving) {
@@ -562,6 +575,7 @@ impl Autosave {
         let started = now();
         let bytes = app.autosave_bytes();
         crate::timing::note("autosave scene", now() - started);
+        st.pace.saved(t);
         st.writing = true;
         st.issued += 1;
         let (issued, heard) = (st.issued, st.heard);
@@ -622,6 +636,7 @@ impl Autosave {
             st.writing = false;
             if let (Some(blob), Some(revision)) = (restored, revision) {
                 st.seen = revision;
+                st.pace.reset(revision, now());
                 st.stored = Some(revision);
                 st.overwritten_at = None;
                 st.stored_blob = blob;
