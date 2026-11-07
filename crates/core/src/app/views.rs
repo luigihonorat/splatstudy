@@ -308,7 +308,8 @@ impl App {
         if shown(left) {
             // The toolbar hides the brush beneath it, but not that of a
             // stroke passing over it.
-            if !on_toolbar(SCULPT) || self.drags[SCULPT].is_some() {
+            // Nor while the calipers have the pointer.
+            if (!on_toolbar(SCULPT) || self.drags[SCULPT].is_some()) && !self.caliper_busy() {
                 self.tool_cursor(ui, left);
             }
             if self.debug {

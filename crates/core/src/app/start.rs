@@ -15,8 +15,8 @@
 //!   - a viewpoint: `front`, `back`, `left`, `right`, `top`, `bottom`,
 //!     `three-quarter`;
 //!   - an aid each view has of its own: `silhouette`, `mirror`, `plumb`,
-//!     `grid`, `ortho` (or `perspective`), and a lighting: `studio`,
-//!     `raking`, `top-light`;
+//!     `grid`, `calipers`, `ortho` (or `perspective`), and a lighting:
+//!     `studio`, `raking`, `top-light`;
 //!   - an aid both views share: `ghost`, `wireframe`, `difference`,
 //!     `link`, `swap`, `measure`;
 //!   - in `view=` only, the views that show: `both`, `sculpt`,
@@ -55,6 +55,8 @@ struct ViewSettings {
     mirror: Option<bool>,
     plumb: Option<bool>,
     grid: Option<bool>,
+    /// The calipers shown.
+    calipers: Option<bool>,
     ortho: Option<bool>,
     lighting: Option<Lighting>,
 }
@@ -134,6 +136,7 @@ impl ViewSettings {
             "mirror" => &mut self.mirror,
             "plumb" => &mut self.plumb,
             "grid" => &mut self.grid,
+            "calipers" => &mut self.calipers,
             "ortho" => &mut self.ortho,
             "perspective" => {
                 self.ortho = Some(!on);
@@ -344,6 +347,7 @@ impl App {
             if let Some(lighting) = from.lighting {
                 aids.lighting = lighting;
             }
+            set(&mut self.calipers.set.shown[index], from.calipers);
         }
         let shared = &o.shared;
         set(&mut st.ghost, shared.ghost);

@@ -797,6 +797,7 @@ impl App {
                 self.quad_remesh_controls(ui)
             });
         }
+        self.calipers_group(ui);
     }
 
     /// The tools, and the chosen one's size, strength, stabiliser,

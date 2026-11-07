@@ -49,6 +49,8 @@ pub(super) enum ViewOption {
     Panels,
     /// Opens the window that picks the view's background colour.
     Background,
+    /// The calipers shown in the view, or hidden.
+    Calipers,
 }
 
 /// What the reference view holds, which decides what its toolbar offers.
@@ -81,6 +83,8 @@ impl ViewOption {
             Reset => "Home",
             Panels => "Tab",
             Background => "",
+            // Shift+E adds one.
+            Calipers => "",
         }
     }
 
@@ -90,7 +94,7 @@ impl ViewOption {
         use ViewOption::*;
         matches!(
             self,
-            Perspective | Lighting | Grid | Plumb | Silhouette | Mirror | Frame | Reset
+            Perspective | Lighting | Grid | Plumb | Silhouette | Mirror | Frame | Reset | Calipers
         )
     }
 
@@ -116,6 +120,7 @@ impl ViewOption {
             Reset => tr.reset_view,
             Panels => st.hide_panels,
             Background => st.background,
+            Calipers => tr.calipers.calipers,
         }
         .to_owned()
     }
@@ -142,6 +147,7 @@ impl ViewOption {
             Reset => icons::reset(painter, rect, colour),
             Panels => icons::panels(painter, rect, colour),
             Background => icons::background(painter, rect, colour),
+            Calipers => icons::calipers(painter, rect, colour),
         }
     }
 
@@ -184,13 +190,13 @@ fn option_groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
         return vec![
             vec![Tool],
             vec![Perspective, Wireframe, Lighting],
-            vec![Grid, Plumb],
+            vec![Grid, Plumb, Calipers],
             vec![Silhouette, Difference, Ghost, Mirror],
             vec![Frame, Reset, Link],
             vec![Panels],
         ];
     }
-    match kind {
+    let mut groups = match kind {
         RefKind::Image => vec![vec![Grid, Plumb], vec![Mirror], vec![Frame]],
         RefKind::Mesh => vec![
             vec![Perspective, Lighting],
@@ -204,7 +210,12 @@ fn option_groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
             vec![Silhouette, Mirror],
             vec![Frame, Reset, Link],
         ],
+    };
+    // Calipers lie on a 3D reference only.
+    if matches!(kind, RefKind::Mesh | RefKind::Splats) {
+        groups[1].push(Calipers);
     }
+    groups
 }
 
 /// Whether view `index`'s toolbar sits on the view's left edge: each on
@@ -313,6 +324,7 @@ impl App {
             Tool => true,
             Lighting => self.flyout_open(option, index),
             Background => self.background_open(index),
+            Calipers => self.calipers.set.shown[index],
             Frame | Reset => false,
         }
     }
@@ -342,6 +354,7 @@ impl App {
             Reset => self.reset_view(index),
             Panels => self.toggle_panels(),
             Background => self.toggle_background(index),
+            Calipers => self.calipers.set.shown[index] ^= true,
         }
         self.dirty = true;
     }
@@ -367,6 +380,10 @@ impl App {
             Plumb => to.plumb = from.plumb,
             Silhouette => to.silhouette = from.silhouette,
             Mirror => to.mirror = from.mirror,
+            Calipers => {
+                let shown = &mut self.calipers.set.shown;
+                shown[other] = shown[index];
+            }
             Frame | Reset => self.apply(option, other),
             _ => {}
         }

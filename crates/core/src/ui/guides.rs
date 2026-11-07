@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! The guides drawn over a view, the same in the app and in a screenshot:
-//! the grid and the plumb line.
+//! the grid and the plumb line; and how a length is marked over a view,
+//! by the measure and the calipers.
 
-use egui::{Painter, Pos2, Rect, Stroke, pos2};
+use egui::{Painter, Pos2, Rect, Stroke, Vec2, pos2};
 
 use super::theme;
 
@@ -47,4 +48,38 @@ pub fn grid(painter: &Painter, rect: Rect, divisions: u32) {
             painter.vline(x.round() + 0.5, rect.y_range(), stroke);
         }
     }
+}
+
+/// Half the length of the tick across each end of a marked length, in
+/// points.
+pub const TICK: f32 = 5.0;
+
+/// The unit vector square to the line from `a` to `b`: the way its end
+/// ticks run, and its label sits.
+pub fn across([a, b]: [Pos2; 2]) -> Vec2 {
+    (b - a).normalized().rot90()
+}
+
+/// A length marked as on a ruler: the line from `a` to `b`, and a short
+/// tick across each end.
+pub fn ruler(painter: &Painter, ends: [Pos2; 2], stroke: Stroke) {
+    painter.line_segment(ends, stroke);
+    let tick = across(ends) * TICK;
+    for end in ends {
+        painter.line_segment([end - tick, end + tick], stroke);
+    }
+}
+
+/// Where a marked length's label goes: beside the middle, `gap` points
+/// out, on the side away from `centre` (the view's).
+pub fn label_at(ends: [Pos2; 2], centre: Pos2, gap: f32) -> Pos2 {
+    let [a, b] = ends;
+    let middle = a + (b - a) / 2.0;
+    let across = across(ends);
+    let side = if across.dot(middle - centre) >= 0.0 {
+        across
+    } else {
+        -across
+    };
+    middle + side * gap
 }

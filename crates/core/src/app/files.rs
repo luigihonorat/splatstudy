@@ -207,9 +207,11 @@ impl App {
             log,
             reference,
             view,
+            calipers,
             history_damaged,
             reference_damaged,
         } = scene;
+        self.set_calipers(calipers.unwrap_or_default());
         // The timelapse needs the clay the log starts from. Without it the
         // replay would start from the default sphere, and number the
         // checkpoints after it one too low: start a new history from the
@@ -279,6 +281,7 @@ impl App {
             split: self.split,
             study: Some(self.study_view()),
         });
+        w.calipers(&self.calipers.set);
         w.finish()
     }
 
@@ -514,6 +517,7 @@ impl App {
         self.files.saved = None;
         self.files.restored = false;
         self.files.replaced();
+        self.set_calipers(Default::default());
         self.reset_view(SCULPT);
         self.reset_view(REFERENCE);
     }
@@ -523,13 +527,21 @@ impl App {
     /// placement, crop or credit, a study aid. Camera moves don't count.
     /// It is a fingerprint, so only compare it for equality.
     pub fn scene_revision(&self) -> u64 {
-        revision(
+        let revision = revision(
             self.files.generation,
             &self.sculpt,
             self.scene_reference(),
             &self.study_view(),
             self.cameras.map(|c| c.ortho),
-        )
+        );
+        // The calipers too, as their chunk keeps them.
+        if self.calipers.set.is_default() {
+            return revision;
+        }
+        let mut w = Writer::new();
+        w.u64(revision);
+        self.calipers.set.write(&mut w);
+        content_hash(&w.finish())
     }
 
     /// True when an autosave can be taken now: no stroke under way, and

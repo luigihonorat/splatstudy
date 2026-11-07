@@ -33,6 +33,8 @@ impl App {
             if pressed(M::NONE, Key::Home) {
                 self.apply(ViewOption::Reset, self.key_view(ui));
             }
+            // Before the study aids': Shift+E, not the measure's E.
+            self.caliper_keys(ui);
             self.study_shortcuts(ui);
         }
         self.file_shortcuts(ui);
@@ -121,6 +123,7 @@ impl App {
                     (tr.plumb_line, "V"),
                     (tr.grid, "G"),
                     (tr.study.measure, "E"),
+                    (tr.calipers.add, "Shift+E"),
                     (tr.study.lighting, "B"),
                     (tr.mesh.remesh, "Shift+R"),
                     (tr.mesh.quad_remesh, "Shift+Q"),
