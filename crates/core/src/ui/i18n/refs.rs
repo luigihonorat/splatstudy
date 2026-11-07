@@ -51,6 +51,8 @@ pub struct RefTr {
     pub gallery_note: &'static str,
     /// While a cast downloads; `{name}` is its short name.
     pub loading: &'static str,
+    /// Notice when a cast from the gallery couldn't be downloaded.
+    pub download_failed: &'static str,
     /// Each bundled sample's short name under its thumbnail, by its id
     /// (see `reference/samples.rs`).
     pub sample_names: &'static [(&'static str, &'static str)],
@@ -84,6 +86,7 @@ pub const JA: RefTr = RefTr {
     gallery_link: "ギャラリーから石膏像を選ぶ",
     gallery_note: "クリックするとモチーフとして読み込みます",
     loading: "{name}を読み込み中…",
+    download_failed: "石膏像をダウンロードできませんでした。接続を確認してください",
     sample_names: &[
         ("brutus", "ブルータス"),
         ("venus", "ミロのヴィーナス"),
@@ -125,6 +128,7 @@ pub const EN: RefTr = RefTr {
     gallery_link: "or choose a cast from the gallery",
     gallery_note: "click a cast to load it as the reference",
     loading: "loading {name}…",
+    download_failed: "couldn't download the cast; check the connection",
     sample_names: &[
         ("brutus", "brutus"),
         ("venus", "venus de milo"),
@@ -166,6 +170,7 @@ pub const FR: RefTr = RefTr {
     gallery_link: "ou choisissez un plâtre dans la galerie",
     gallery_note: "cliquez sur un plâtre pour le charger comme modèle",
     loading: "chargement : {name}…",
+    download_failed: "impossible de télécharger le plâtre ; vérifiez la connexion",
     sample_names: &[
         ("brutus", "brutus"),
         ("venus", "vénus de milo"),

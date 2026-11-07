@@ -157,7 +157,12 @@ impl App {
         // The sample on its way has arrived, or this file took its place
         // (the shell drops a fetch that a newer file overtakes).
         if purpose.supersedes() {
-            self.reference.gallery.loading = None;
+            let sample = self.reference.gallery.loading.take();
+            // The shells hand over a fetch that failed (offline, an HTTP
+            // error) empty: say so, and keep what was shown.
+            if bytes.is_empty() && sample.is_some_and(|s| s.file == name) {
+                return self.notify(self.lang.tr().refs.download_failed);
+            }
         }
         match purpose {
             FilePurpose::Scene => self.open_scene(name, bytes),

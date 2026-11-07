@@ -10,6 +10,7 @@
 mod autosave;
 mod config;
 mod files;
+mod gallery;
 mod text;
 
 use std::collections::HashMap;

@@ -5,21 +5,22 @@
 //!
 //! The thumbnails sit next to the page (`samples/thumbs/`), drawn by the
 //! app's own renderer (`cargo xtask samples thumbs`), and are fetched the
-//! first time the gallery opens. Samples are only shipped with the web
-//! build, so the desktop app has no gallery.
+//! first time the gallery opens. Every shell answers the same fetches: the
+//! web build from next to the page, the desktop app from the web app's
+//! site (casts downloaded once and kept, thumbnails built in).
 
 use std::collections::HashMap;
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, Vec2};
 
-use super::{App, REFERENCE, Request, WEB};
+use super::{App, REFERENCE, Request};
 use crate::input::FilePurpose;
 use crate::reference::load::load_png;
 use crate::reference::samples::{SAMPLES, Sample};
 use crate::ui::{fonts, menu, theme};
 
-/// Whether this build has a gallery: the samples are next to the web page.
-pub(super) const HAS_GALLERY: bool = WEB;
+/// Whether this build has a gallery: every shell can fetch the samples.
+pub(super) const HAS_GALLERY: bool = true;
 
 /// A thumbnail's side in the window, in points.
 const THUMB: f32 = 120.0;
@@ -406,5 +407,33 @@ mod tests {
         ));
         assert!(h.app.loading_text().is_none());
         assert!(h.app.reference.current.is_none());
+        let notice = h.app.notice.as_ref().map(|(text, _)| text.as_str());
+        assert_eq!(notice, Some(h.app.lang.tr().refs.download_failed));
+
+        // With a reference shown, a failed download leaves it as it was.
+        h.app
+            .push_event(file(FilePurpose::Reference, "homer.ply", tetrahedron()));
+        h.app.notice = None;
+        h.app.load_sample(Sample::by_id("brutus").unwrap());
+        h.frames(1);
+        h.app
+            .push_event(file(FilePurpose::Reference, "brutus.ply", Vec::new()));
+        assert!(h.app.notice.is_some());
+        assert_eq!(h.app.shown_sample().map(|s| s.id), Some("homer"));
+    }
+
+    /// The desktop app has the gallery too: the tests run on it.
+    #[test]
+    fn the_empty_reference_view_links_to_the_gallery_on_every_build() {
+        let Some(mut h) = super::super::study::tests::Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        assert!(h.app.reference.current.is_none());
+        // The link sits just under the drop hint, in the middle.
+        let link = h.app.view_rects[REFERENCE].center() + egui::vec2(0.0, 28.0);
+        h.drag(link, link);
+        let gallery = &h.app.reference.gallery;
+        assert!(gallery.open && gallery.asked, "the link opened the gallery");
     }
 }
