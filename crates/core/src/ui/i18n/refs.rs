@@ -41,6 +41,8 @@ pub struct RefTr {
     pub view_dependent_colour: &'static str,
     /// File menu item that opens the gallery of bundled casts.
     pub open_gallery: &'static str,
+    /// The same, shorter, under "open reference" in the reference panel.
+    pub panel_gallery: &'static str,
     /// The gallery window's title.
     pub gallery: &'static str,
     /// A link under the empty reference view's drop hint, to the gallery.
@@ -77,6 +79,7 @@ pub const JA: RefTr = RefTr {
     crop_box: "切り抜き枠",
     view_dependent_colour: "見る向きで変わる色",
     open_gallery: "ギャラリーからモチーフを選ぶ…",
+    panel_gallery: "ギャラリーから開く…",
     gallery: "ギャラリー",
     gallery_link: "ギャラリーから石膏像を選ぶ",
     gallery_note: "クリックするとモチーフとして読み込みます",
@@ -117,6 +120,7 @@ pub const EN: RefTr = RefTr {
     crop_box: "crop box",
     view_dependent_colour: "view-dependent colour",
     open_gallery: "open reference from gallery…",
+    panel_gallery: "open from gallery…",
     gallery: "gallery",
     gallery_link: "or choose a cast from the gallery",
     gallery_note: "click a cast to load it as the reference",
@@ -157,6 +161,7 @@ pub const FR: RefTr = RefTr {
     crop_box: "boîte de recadrage",
     view_dependent_colour: "couleur selon l'angle de vue",
     open_gallery: "choisir un modèle dans la galerie…",
+    panel_gallery: "choisir dans la galerie…",
     gallery: "galerie",
     gallery_link: "ou choisissez un plâtre dans la galerie",
     gallery_note: "cliquez sur un plâtre pour le charger comme modèle",

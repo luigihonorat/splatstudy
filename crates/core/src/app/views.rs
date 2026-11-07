@@ -296,6 +296,9 @@ impl App {
         }
         self.timer_ui(ui, area, rects);
         self.toolbars(ui, rects);
+        if shown(rects[SCULPT]) {
+            self.brush_flash(ui, rects[SCULPT]);
+        }
 
         let left = rects[SCULPT];
         if shown(left) {

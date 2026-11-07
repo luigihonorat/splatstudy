@@ -14,6 +14,7 @@ use std::sync::Arc;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use glam::{Mat4, Vec3};
 
+use super::gallery::HAS_GALLERY;
 use super::panels::Group;
 use super::study::ReferenceLook;
 use super::{App, REFERENCE, Request, SCULPT};
@@ -352,13 +353,14 @@ impl App {
                     }
                 }
                 if panels.holds(Group::Credit) {
-                    ui::group(ui, "credit", tr.refs.credit, |ui| self.reference_credit(ui));
+                    ui::folded_group(ui, "credit", tr.refs.credit, |ui| self.reference_credit(ui));
                 }
             });
     }
 
-    /// Opening and removing the reference, its file's name, and for a
-    /// picture showing all of it again.
+    /// Opening the reference (from a file or the gallery), making a mesh
+    /// from it, removing it, its file's name, and for a picture showing
+    /// all of it again.
     fn reference_file(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         if ui::choice(ui, tr.open_reference, false).clicked() {
@@ -367,9 +369,13 @@ impl App {
                 extensions: REFERENCE_EXTENSIONS,
             });
         }
+        if HAS_GALLERY && ui::choice(ui, tr.refs.panel_gallery, false).clicked() {
+            self.open_gallery();
+        }
         if self.reference.current.is_none() {
             return;
         }
+        self.mesh_from_reference_controls(ui);
         if ui::choice(ui, tr.remove_reference, false).clicked() {
             self.remove_reference();
             return;

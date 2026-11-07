@@ -140,6 +140,13 @@ impl ViewOption {
         }
     }
 
+    /// Whether this option is switched on and off, its button inverted
+    /// while it is on: not the tool, the lighting or an action.
+    fn switches(self) -> bool {
+        use ViewOption::*;
+        !matches!(self, Tool | Lighting | Frame | Reset)
+    }
+
     /// Whether this option's button opens a column of choices rather than
     /// switching it.
     pub(super) fn has_flyout(self) -> bool {
@@ -487,7 +494,7 @@ impl App {
                 // Shift + click lights both views alike.
                 let both = ui.input(|i| i.modifiers.shift);
                 match option {
-                    ViewOption::Tool => self.tool.tool = BRUSHES[k].0,
+                    ViewOption::Tool => self.choose_brush(BRUSHES[k].0),
                     _ if both => {
                         for aids in &mut self.study.views {
                             aids.lighting = Light::ALL[k];
@@ -531,10 +538,22 @@ impl App {
                     .on_hover_cursor(CursorIcon::PointingHand);
                 let on = self.option_on(option, index);
                 let hovered = response.hovered();
-                if hovered || self.flyout_open(option, index) {
+                // A switch that is on is inverted: a light square, its
+                // icon dark.
+                let inverted = on && option.switches();
+                if inverted {
+                    let fill = if hovered {
+                        theme::TOOL_ON.gamma_multiply(0.8)
+                    } else {
+                        theme::TOOL_ON
+                    };
+                    painter.rect_filled(button.shrink(1.0), 0.0, fill);
+                } else if hovered || self.flyout_open(option, index) {
                     painter.rect_filled(button, 0.0, theme::TOOL_HOVER);
                 }
-                let colour = if on || hovered {
+                let colour = if inverted {
+                    theme::TOOL_INVERTED
+                } else if on || hovered {
                     theme::TOOL_ON
                 } else {
                     theme::TOOL_OFF

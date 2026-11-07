@@ -16,7 +16,6 @@ use crate::camera::OrbitCamera;
 use crate::input::{FilePurpose, PointerKind};
 use crate::meshio::{self, Soup};
 use crate::quad;
-use crate::reference::Content;
 use crate::render::clay::GpuMesh;
 pub(super) use tool_pie::TOOL_PIE_KEY;
 
@@ -46,6 +45,11 @@ const MIN_PRESSURE_SIZE: f32 = 0.2;
 /// How long the size and strength show by the brush after they change,
 /// in seconds.
 const READOUT: f64 = 1.2;
+
+/// How long a newly chosen brush's name shows at the top of the sculpt
+/// view, and the last part of it, in which it fades out, in seconds.
+const BRUSH_FLASH: f64 = 1.0;
+const BRUSH_FADE: f64 = 0.3;
 
 /// Each brush with its letter key and starting strength, in `Brush::ALL`
 /// order; its digit is in `DIGITS`.
@@ -207,6 +211,8 @@ pub(super) struct ToolSettings {
     pub(super) buildup: Buildup,
     /// When the size or strength last changed, to show them by the brush.
     readout: Option<f64>,
+    /// When a brush was last chosen, to show its name.
+    flash: Option<f64>,
     pub(super) symmetry: bool,
     /// Stroke stabiliser: how far the brush trails the pointer, in
     /// points; 0 is off.
@@ -249,6 +255,7 @@ impl Default for ToolSettings {
             falloff: [Falloff::Smooth; 8],
             buildup: Buildup::Layer,
             readout: None,
+            flash: None,
             // A study from a reference is rarely symmetric: mirroring is
             // asked for, not assumed.
             symmetry: false,
@@ -385,7 +392,7 @@ impl App {
             }
             for ((brush, key, _), digit) in BRUSHES.into_iter().zip(DIGITS) {
                 if pressed(M::NONE, digit) || pressed(M::NONE, key) {
-                    self.tool.tool = brush;
+                    self.choose_brush(brush);
                 }
             }
             if pressed(M::SHIFT, Key::R) {
@@ -734,6 +741,11 @@ impl App {
         if self.panels.holds(Group::Remeshing) {
             ui::group(ui, "remeshing", m.remeshing, |ui| self.remesh_controls(ui));
         }
+        if self.panels.holds(Group::QuadRemesh) {
+            ui::group(ui, "quad", m.quad_remesh, |ui| {
+                self.quad_remesh_controls(ui)
+            });
+        }
     }
 
     /// The tools, and the chosen one's size, strength, stabiliser,
@@ -792,22 +804,54 @@ impl App {
         switch(ui, tr, &mut self.tool.symmetry, tr.mesh.symmetry_x);
     }
 
-    /// The voxel remesh and the mesh from the reference, which share its
-    /// resolution, then the quad remesh.
+    /// The voxel remesh, its button over its resolution.
     fn remesh_controls(&mut self, ui: &mut egui::Ui) {
+        let m = self.lang.tr().mesh;
+        if ui::choice(ui, m.remesh, false).clicked() {
+            self.ask_remesh();
+        }
+        self.resolution_slider(ui);
+    }
+
+    /// The quad remesh, its button over its number of quads.
+    fn quad_remesh_controls(&mut self, ui: &mut egui::Ui) {
+        let m = self.lang.tr().mesh;
+        if ui::choice(ui, m.quad_remesh, false).clicked() {
+            self.ask_quad_remesh();
+        }
+        let range = quad::MIN_QUADS as f32..=quad::MAX_QUADS as f32;
+        ui::typed_slider(ui, m.quads, &mut self.tool.quads, range, 100.0, |v| {
+            format!("{v:.0}")
+        });
+    }
+
+    /// The voxel resolution, which the remesh and the mesh from the
+    /// reference share.
+    fn resolution_slider(&mut self, ui: &mut egui::Ui) {
         let m = self.lang.tr().mesh;
         let range = voxel::MIN_RESOLUTION as f32..=voxel::MAX_RESOLUTION as f32;
         ui::slider(ui, m.resolution, &mut self.tool.resolution, range, |v| {
             format!("{v:.0}")
         });
-        if ui::choice(ui, m.remesh, false).clicked() {
-            self.ask_remesh();
+    }
+
+    /// The mesh from the reference, in the reference panel: the button,
+    /// then its resolution (the remesh's too) and for splats the density
+    /// it keeps.
+    pub(super) fn mesh_from_reference_controls(&mut self, ui: &mut egui::Ui) {
+        let m = self.lang.tr().mesh;
+        let live = self.playback.is_none();
+        if ui
+            .add_enabled_ui(live, |ui| ui::choice(ui, m.from_reference, false))
+            .inner
+            .clicked()
+        {
+            self.ask(Pending::FromReference, m.from_reference);
         }
-        // Clay from the reference: the threshold only matters for splats.
-        let loaded = self.has_reference();
+        self.resolution_slider(ui);
         let splats = matches!(
             self.reference.current.as_ref().map(|r| &r.content),
-            Some(Content::Splats(_))
+            Some(crate::reference::Content::Splats(_))
         );
         if splats {
             let threshold = &mut self.tool.threshold;
@@ -815,21 +859,50 @@ impl App {
                 format!("{:.0}%", v * 100.0)
             });
         }
-        if ui
-            .add_enabled_ui(loaded, |ui| ui::choice(ui, m.from_reference, false))
-            .inner
-            .clicked()
-        {
-            self.ask(Pending::FromReference, m.from_reference);
+    }
+
+    /// Makes `brush` the tool, its name showing for a moment at the top
+    /// of the sculpt view.
+    pub(super) fn choose_brush(&mut self, brush: Brush) {
+        self.tool.tool = brush;
+        self.tool.flash = Some(self.now);
+        self.dirty = true;
+    }
+
+    /// The chosen brush's name in a box at the top of the sculpt view
+    /// (`rect`), for a moment after it was chosen, fading out.
+    pub(super) fn brush_flash(&mut self, ui: &egui::Ui, rect: Rect) {
+        let Some(at) = self.tool.flash else {
+            return;
+        };
+        let age = self.now - at;
+        if age >= BRUSH_FLASH {
+            self.tool.flash = None;
+            return;
         }
-        ui.add_space(10.0);
-        let range = quad::MIN_QUADS as f32..=quad::MAX_QUADS as f32;
-        ui::typed_slider(ui, m.quads, &mut self.tool.quads, range, 100.0, |v| {
-            format!("{v:.0}")
-        });
-        if ui::choice(ui, m.quad_remesh, false).clicked() {
-            self.ask_quad_remesh();
-        }
+        let opacity = ((BRUSH_FLASH - age) / BRUSH_FADE).min(1.0) as f32;
+        let p = self.theme.palette();
+        let name = brush_name(self.lang.tr(), self.tool.tool);
+        egui::Area::new(egui::Id::unique("brush flash"))
+            .fixed_pos(rect.center_top() + egui::vec2(0.0, 12.0))
+            .pivot(egui::Align2::CENTER_TOP)
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                ui.multiply_opacity(opacity);
+                egui::Frame::NONE
+                    .fill(p.bg)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .inner_margin(egui::Margin::symmetric(14, 6))
+                    .show(ui, |ui| ui.label(name));
+            });
+        // Each frame while it fades, then once more to take it away.
+        let wait = if age < BRUSH_FLASH - BRUSH_FADE {
+            BRUSH_FLASH - BRUSH_FADE - age
+        } else {
+            0.0
+        };
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(wait));
     }
 
     fn pressure(&self) -> f32 {

@@ -324,7 +324,7 @@ impl Default for StudyState {
         Self {
             layout: Layout::Both,
             swapped: false,
-            link: false,
+            link: true,
             views: [Aids::default(); 2],
             focus: SCULPT,
             plumb_x: [0.5; 2],
@@ -1350,6 +1350,7 @@ pub(super) mod tests {
             eprintln!("no GPU adapter; skipping app test");
             return;
         };
+        h.app.study.link = false;
         h.app.load_reference("clay.obj", clay_as_obj().into());
         // Placed where the clay is, as it is, rather than fitted.
         h.app.reference.current.as_mut().unwrap().align = Alignment::default();
@@ -1593,6 +1594,8 @@ pub(super) mod tests {
             eprintln!("no GPU adapter; skipping app test");
             return;
         };
+        assert!(h.app.study.link, "linked at first");
+        h.app.apply(ViewOption::Link, SCULPT);
         h.app.apply(ViewOption::Link, SCULPT);
         h.app.apply(ViewOption::Perspective, REFERENCE);
         assert!(h.app.cameras.iter().all(|c| c.ortho));
@@ -1691,6 +1694,8 @@ pub(super) mod tests {
             eprintln!("no GPU adapter; skipping app test");
             return;
         };
+        // Unlinked, so each view keeps a projection of its own.
+        h.app.study.link = false;
         let c = h.app.view_rects[SCULPT].center();
         h.drag(c, c + egui::vec2(30.0, 0.0));
         let st = &mut h.app.study;

@@ -59,6 +59,9 @@ pub struct MeshTr {
     /// Going one subdivision level down or up, keeping the detail.
     pub level_down: &'static str,
     pub level_up: &'static str,
+    /// "level down" and "level up" side by side in the sculpt panel.
+    pub down: &'static str,
+    pub up: &'static str,
     /// Dropping the subdivision levels above or below the current one.
     pub delete_higher: &'static str,
     pub delete_lower: &'static str,
@@ -127,6 +130,8 @@ pub const JA: MeshTr = MeshTr {
     level: "レベル",
     level_down: "レベルを下げる",
     level_up: "レベルを上げる",
+    down: "下げる",
+    up: "上げる",
     delete_higher: "上のレベルを外す",
     delete_lower: "下のレベルを外す",
     cannot_subdivide: "このメッシュは細分化できません",
@@ -178,6 +183,8 @@ pub const EN: MeshTr = MeshTr {
     level: "level",
     level_down: "level down",
     level_up: "level up",
+    down: "down",
+    up: "up",
     delete_higher: "delete higher levels",
     delete_lower: "delete lower levels",
     cannot_subdivide: "this mesh can't be subdivided",
@@ -229,6 +236,8 @@ pub const FR: MeshTr = MeshTr {
     level: "niveau",
     level_down: "niveau inférieur",
     level_up: "niveau supérieur",
+    down: "descendre",
+    up: "monter",
     delete_higher: "supprimer les niveaux supérieurs",
     delete_lower: "supprimer les niveaux inférieurs",
     cannot_subdivide: "ce maillage ne peut pas être subdivisé",
