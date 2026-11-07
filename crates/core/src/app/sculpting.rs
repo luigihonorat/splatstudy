@@ -231,8 +231,11 @@ pub(super) struct ToolSettings {
     pub(super) stabiliser: f32,
     /// Remesh resolution: cells across the clay's longest side.
     pub(super) resolution: f32,
-    /// Clay from splats: the density that counts as material, 0..1.
+    /// Clay from splats: the opacity a ray gathers before it counts as
+    /// having reached the surface, 0..1.
     pub(super) threshold: f32,
+    /// Clay from a reference: how much it is smoothed, in blur passes.
+    pub(super) smoothness: f32,
     /// Quad remesh: about how many quads.
     pub(super) quads: f32,
     /// Asked for in the frame at this time, done at the start of the next,
@@ -290,6 +293,7 @@ impl Default for ToolSettings {
             stabiliser: 0.0,
             resolution: voxel::DEFAULT_RESOLUTION as f32,
             threshold: voxel::DEFAULT_THRESHOLD,
+            smoothness: voxel::DEFAULT_SMOOTHNESS as f32,
             quads: quad::DEFAULT_QUADS as f32,
             pending: None,
             pie: None,
@@ -591,7 +595,12 @@ impl App {
             return;
         };
         let resolution = self.tool.resolution.round() as u32;
-        match voxel::clay_from_reference(reference, resolution, self.tool.threshold) {
+        let how = voxel::FromReference {
+            resolution,
+            threshold: self.tool.threshold,
+            smoothness: self.tool.smoothness.round() as u32,
+        };
+        match voxel::clay_from_reference(reference, how) {
             Some(mesh) => {
                 if self.replace_clay(mesh) {
                     self.playback = None;
@@ -925,8 +934,8 @@ impl App {
     }
 
     /// The mesh from the reference, in the reference panel: the button,
-    /// then its resolution (the remesh's too) and for splats the density
-    /// it keeps.
+    /// then its resolution (the remesh's too), how much it is smoothed and
+    /// for splats the opacity that makes the surface.
     pub(super) fn mesh_from_reference_controls(&mut self, ui: &mut egui::Ui) {
         let m = self.lang.tr().mesh;
         let live = self.playback.is_none();
@@ -938,13 +947,17 @@ impl App {
             self.ask(Pending::FromReference, m.from_reference);
         }
         self.resolution_slider(ui);
+        let range = 0.0..=voxel::MAX_SMOOTHNESS as f32;
+        ui::slider(ui, m.smoothness, &mut self.tool.smoothness, range, |v| {
+            format!("{v:.0}")
+        });
         let splats = matches!(
             self.reference.current.as_ref().map(|r| &r.content),
             Some(crate::reference::Content::Splats(_))
         );
         if splats {
             let threshold = &mut self.tool.threshold;
-            ui::slider(ui, m.threshold, threshold, 0.05..=1.0, |v| {
+            ui::slider(ui, m.threshold, threshold, 0.05..=0.95, |v| {
                 format!("{:.0}%", v * 100.0)
             });
         }

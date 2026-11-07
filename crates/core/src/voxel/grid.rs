@@ -153,6 +153,30 @@ impl Grid {
         count
     }
 
+    /// Blurs the values along x, y and z with the weights 1 2 1, which
+    /// smooths the shape their zero level makes by about half a node per
+    /// pass. The outer nodes keep their values.
+    pub fn blur(&mut self) {
+        let steps = [1, self.dims[0], self.dims[0] * self.dims[1]];
+        let mut line = Vec::new();
+        for axis in 0..3 {
+            let n = self.dims[axis];
+            let stride = steps[axis];
+            let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+            for u in 0..self.dims[a] {
+                for v in 0..self.dims[b] {
+                    let start = u * steps[a] + v * steps[b];
+                    line.clear();
+                    line.extend((0..n).map(|t| self.values[start + t * stride]));
+                    for t in 1..n.saturating_sub(1) {
+                        self.values[start + t * stride] =
+                            0.25 * line[t - 1] + 0.5 * line[t] + 0.25 * line[t + 1];
+                    }
+                }
+            }
+        }
+    }
+
     /// The value and its gradient at any point, interpolated between the
     /// eight nodes around it (clamped to the grid).
     pub fn sample(&self, p: Vec3) -> (f32, Vec3) {

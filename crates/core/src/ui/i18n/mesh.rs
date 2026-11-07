@@ -23,8 +23,11 @@ pub struct MeshTr {
     pub mirror_to_positive: &'static str,
     /// Making the sculpt's mesh from the reference.
     pub from_reference: &'static str,
-    /// How dense the splats must be to count as material.
+    /// How much opacity a ray through the splats gathers before it counts
+    /// as having reached the surface.
     pub threshold: &'static str,
+    /// How much the mesh from the reference is smoothed.
+    pub smoothness: &'static str,
     /// Notice after the mesh was made from the reference.
     pub made_from_reference: &'static str,
     /// Splitting every triangle into four.
@@ -112,6 +115,7 @@ pub const JA: MeshTr = MeshTr {
     mirror_to_positive: "左右を写す（X− → X+）",
     from_reference: "モチーフからメッシュ",
     threshold: "しきい値",
+    smoothness: "なめらかさ",
     made_from_reference: "モチーフからメッシュを作りました。元に戻すと前の塑像に戻ります",
     subdivide: "細分化",
     subdivided: "細分化しました。レベルを下げると大きな形を直せます",
@@ -164,6 +168,7 @@ pub const EN: MeshTr = MeshTr {
     mirror_to_positive: "mirror sculpt (X− → X+)",
     from_reference: "mesh from reference",
     threshold: "threshold",
+    smoothness: "smoothness",
     made_from_reference: "mesh made from the reference; undo brings the previous sculpt back",
     subdivide: "subdivide",
     subdivided: "subdivided; go a level down to change the broad forms",
@@ -216,6 +221,7 @@ pub const FR: MeshTr = MeshTr {
     mirror_to_positive: "symétriser (X− → X+)",
     from_reference: "maillage du modèle",
     threshold: "seuil",
+    smoothness: "lissage",
     made_from_reference: "maillage tiré du modèle ; annuler rétablit la sculpture précédente",
     subdivide: "subdiviser",
     subdivided: "subdivisé ; descendre d'un niveau pour reprendre les grandes formes",
