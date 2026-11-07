@@ -14,7 +14,8 @@ pub enum ThemeMode {
     Dark,
 }
 
-/// The 3D views stay black in both themes, so the clay reads the same.
+/// The 3D views stay black in both themes, so the clay reads the same,
+/// unless the user picks another background for a view.
 pub const VIEW_BG: Color32 = Color32::BLACK;
 /// The clay's colour, before lighting.
 pub const CLAY: Color32 = hex(0xC4C4C4);
@@ -56,6 +57,55 @@ pub const TOOL_ON: Color32 = VIEW_INK;
 pub const TOOL_OFF: Color32 = hex(0x7A7A7A);
 /// The icon of a switch that is on, on its light square.
 pub const TOOL_INVERTED: Color32 = hex(0x131313);
+
+/// What is drawn over a view in grey and white: its text, the brush, the
+/// silhouette. A view's background can be set (the toolbar's last
+/// button); on a light one these turn dark. The orange guides and the
+/// toolbars, on their own dark strip, read on either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewInks {
+    /// Labels and hints: [`VIEW_TEXT`] on a dark view.
+    pub text: Color32,
+    /// What stands out: [`VIEW_INK`].
+    pub ink: Color32,
+    /// The brush's mirror image: [`MIRROR_INK`].
+    pub mirror: Color32,
+    /// The silhouette's fill: [`SILHOUETTE_INK`].
+    pub silhouette: Color32,
+}
+
+/// The inks over the default black view.
+pub const DARK_VIEW_INKS: ViewInks = ViewInks {
+    text: VIEW_TEXT,
+    ink: VIEW_INK,
+    mirror: MIRROR_INK,
+    silhouette: SILHOUETTE_INK,
+};
+
+/// The inks over a light view: the same steps, from the other end.
+pub const LIGHT_VIEW_INKS: ViewInks = ViewInks {
+    text: hex(0x5C5C5C),
+    ink: hex(0x111111),
+    mirror: hex(0x6E6E6E),
+    silhouette: hex(0x1A1A1A),
+};
+
+/// Whether `background` is light enough for dark text: its relative
+/// luminance is past the point where black and white text contrast it
+/// alike.
+pub fn is_light(background: Color32) -> bool {
+    let rgba = egui::Rgba::from(background);
+    0.2126 * rgba.r() + 0.7152 * rgba.g() + 0.0722 * rgba.b() > 0.179
+}
+
+/// The inks to draw over a view of `background`.
+pub fn view_inks(background: Color32) -> ViewInks {
+    if is_light(background) {
+        LIGHT_VIEW_INKS
+    } else {
+        DARK_VIEW_INKS
+    }
+}
 
 /// The site's CSS custom properties, one set per mode.
 #[derive(Clone, Copy, Debug)]

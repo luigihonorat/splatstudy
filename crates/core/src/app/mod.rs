@@ -13,6 +13,8 @@
 //! - `gallery`: the bundled casts to choose a reference from
 //! - `study`: comparison aids (camera link, silhouette, ghost, guides, timer)
 //! - `toolbar`: each view's toolbar of view options
+//! - `background`: each view's background colour, and the window that
+//!   picks it
 //! - `panels`: hiding the side panels (Tab, Shift+Tab) and choosing their
 //!   groups (the window menu)
 //! - `files`: scenes, opening and importing
@@ -23,6 +25,7 @@
 //! - `menus` and `shortcuts`: shared; they call a hook in each part's file,
 //!   so a part grows without touching them.
 
+mod background;
 mod export;
 mod files;
 mod gallery;
@@ -50,7 +53,7 @@ use crate::navigation::{NavAction, NavStyle};
 use crate::render::clay::{ClayPass, GpuMesh};
 use crate::render::{self, Slot, ViewTarget};
 use crate::sculpt::Sculpt;
-use crate::ui::{self, fonts, i18n::Lang, theme, theme::ThemeMode};
+use crate::ui::{self, fonts, i18n::Lang, theme::ThemeMode};
 
 /// What the shell should do after a frame.
 #[derive(Clone, Debug)]
@@ -175,6 +178,8 @@ pub struct App {
     drags: [Option<Drag>; 2],
     /// A toolbar button's column of choices, while it is open.
     flyout: Option<toolbar::OpenFlyout>,
+    /// Each view's background colour, and the window that picks it.
+    background: background::BackgroundState,
     clay: ClayPass,
     sculpt: Sculpt,
     gpu_mesh: GpuMesh,
@@ -251,6 +256,7 @@ impl App {
             cameras: [OrbitCamera::default(); 2],
             drags: [None; 2],
             flyout: None,
+            background: Default::default(),
             clay,
             sculpt,
             gpu_mesh,
@@ -459,7 +465,7 @@ impl App {
         let [sculpt_shown, reference_shown] = self.view_rects.map(views::shown);
         let sculpt = &self.views[SCULPT];
         {
-            let mut pass = sculpt.begin_pass(encoder, theme::VIEW_BG);
+            let mut pass = sculpt.begin_pass(encoder, self.view_background(SCULPT));
             let camera = &self.cameras[SCULPT];
             self.draw_sculpt(
                 &mut pass,
@@ -469,7 +475,7 @@ impl App {
                 sculpt_shown,
             );
         }
-        let mut pass = self.views[REFERENCE].begin_pass(encoder, theme::VIEW_BG);
+        let mut pass = self.views[REFERENCE].begin_pass(encoder, self.view_background(REFERENCE));
         if reference_shown {
             self.draw_reference(&mut pass);
         }

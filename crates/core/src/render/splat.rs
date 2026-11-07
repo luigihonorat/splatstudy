@@ -149,8 +149,11 @@ pub struct SplatLook {
     /// 0..1. Alone, it fades every splat; with `over`, the splats fade
     /// together as one layer.
     pub opacity: f32,
-    /// Filled with the silhouette colour, [`SILHOUETTE_INK`].
+    /// Filled with the silhouette colour, `ink`.
     pub flat: bool,
+    /// The silhouette's colour: [`SILHOUETTE_INK`], or a dark one on a
+    /// light background.
+    pub ink: egui::Color32,
     /// Drawn over everything already in the pass instead of being hidden by
     /// the clay in front: the ghost over the sculpt. The splats are drawn
     /// whole into a target of their own when the slot is prepared, and the
@@ -168,6 +171,7 @@ impl Default for SplatLook {
         Self {
             opacity: 1.0,
             flat: false,
+            ink: SILHOUETTE_INK,
             over: false,
             view_dependent: true,
         }
@@ -523,7 +527,7 @@ impl SplatPass {
             Some(b) => (b.min, b.max, 1.0),
             None => (Vec3::ZERO, Vec3::ZERO, 0.0),
         };
-        let [r, g, b, _] = SILHOUETTE_INK.to_array().map(|c| f32::from(c) / 255.0);
+        let [r, g, b, _] = look.ink.to_array().map(|c| f32::from(c) / 255.0);
         let opacity = look.opacity.clamp(0.0, 1.0);
         // A ghost's splats go whole into its target, and the target fades.
         let (splat_opacity, layer_opacity) = if look.over {

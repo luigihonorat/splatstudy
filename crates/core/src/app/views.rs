@@ -12,7 +12,7 @@ use crate::camera::OrbitCamera;
 use crate::input::{Button, Modifiers, PointerKind, PointerPhase};
 use crate::navigation::{NavAction, snap_view};
 use crate::sculpt::LayerOp;
-use crate::ui::{fonts, i18n::Tr, theme};
+use crate::ui::{fonts, i18n::Tr};
 
 /// Navigation speeds: dolly per point dragged, and per point scrolled.
 const DOLLY_DRAG: f32 = 0.005;
@@ -259,14 +259,18 @@ impl App {
         } else {
             tr.sculpt
         };
-        for (rect, text) in rects.into_iter().zip([sculpt_label, tr.reference]) {
+        for (index, (rect, text)) in rects
+            .into_iter()
+            .zip([sculpt_label, tr.reference])
+            .enumerate()
+        {
             if shown(rect) {
                 painter.text(
                     rect.left_top() + egui::vec2(14.0, 12.0),
                     Align2::LEFT_TOP,
                     text,
                     label_font.clone(),
-                    theme::VIEW_TEXT,
+                    self.view_inks(index).text,
                 );
             }
         }
@@ -280,7 +284,7 @@ impl App {
                 Align2::CENTER_CENTER,
                 loading.as_deref().unwrap_or(tr.drop_hint),
                 fonts::light(16.0),
-                theme::VIEW_TEXT,
+                self.view_inks(REFERENCE).text,
             );
             self.gallery_link(ui, reference.center() + egui::vec2(0.0, 18.0));
         } else if let Some(text) = loading
@@ -291,7 +295,7 @@ impl App {
                 Align2::CENTER_TOP,
                 text,
                 fonts::regular(12.0),
-                theme::VIEW_TEXT,
+                self.view_inks(REFERENCE).text,
             );
         }
         self.timer_ui(ui, area, rects);
@@ -538,7 +542,7 @@ impl App {
             Align2::LEFT_BOTTOM,
             text,
             fonts::regular(12.0),
-            theme::VIEW_INK,
+            self.view_inks(SCULPT).ink,
         );
     }
 }

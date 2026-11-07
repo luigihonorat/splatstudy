@@ -100,6 +100,8 @@ pub struct Compositor {
     framing: Option<ImageFraming>,
     /// Over the sculpt, then over the reference.
     overlays: [ViewOverlay; 2],
+    /// The sculpt's background, then the reference's, as in the app.
+    backgrounds: [Color32; 2],
     frames: u64,
 }
 
@@ -151,6 +153,7 @@ impl Compositor {
             image: None,
             framing: None,
             overlays: [ViewOverlay::default(); 2],
+            backgrounds: [theme::VIEW_BG; 2],
             frames: 0,
         }
     }
@@ -185,6 +188,19 @@ impl Compositor {
     /// What is drawn over the sculpt and over the reference.
     pub fn set_overlays(&mut self, sculpt: ViewOverlay, reference: ViewOverlay) {
         self.overlays = [sculpt, reference];
+    }
+
+    /// The sculpt's and the reference's backgrounds, for a picture
+    /// reference's margins and for the text over each: the colours their
+    /// views are cleared to.
+    pub fn set_backgrounds(&mut self, backgrounds: [Color32; 2]) {
+        self.backgrounds = backgrounds;
+    }
+
+    /// The background the sculpt's view, then the reference's, is to be
+    /// cleared to.
+    pub fn backgrounds(&self) -> [Color32; 2] {
+        self.backgrounds
     }
 
     /// Where the sculpt is drawn, before [`compose`](Self::compose);
@@ -239,6 +255,7 @@ impl Compositor {
         let textures = (self.sculpt_texture, self.reference_texture);
         let image = self.image.as_ref().map(|i| (i.id(), i.size_vec2()));
         let (framing, [sculpt_overlay, reference_overlay]) = (self.framing, self.overlays);
+        let [sculpt_bg, reference_bg] = self.backgrounds;
         let ctx = self.ctx.clone();
         let mut output = ctx.run_ui(raw, |ui| {
             let painter = ui.painter();
@@ -250,14 +267,20 @@ impl Compositor {
                     title,
                 } => {
                     let sculpt = placement.sculpt.map(to_points);
+                    let reference = placement.reference.map(to_points);
+                    // Under a picture's margins, as in its view.
+                    for (rect, bg) in [(sculpt, sculpt_bg), (reference, reference_bg)] {
+                        if let Some(rect) = rect {
+                            painter.rect_filled(rect, 0.0, bg);
+                        }
+                    }
                     if let (Some(rect), Some(texture)) = (sculpt, textures.0) {
                         let uv = uv(sculpt_overlay.mirror);
                         painter.image(texture, rect, uv, Color32::WHITE);
                         view_guides(painter, rect, &sculpt_overlay);
                     }
                     let credit = credit.filter(|c| !c.is_empty());
-                    if let (Some(rect), Some(texture)) = (placement.reference, textures.1) {
-                        let rect = to_points(rect);
+                    if let (Some(rect), Some(texture)) = (reference, textures.1) {
                         let uv = uv(reference_overlay.mirror);
                         match (image, framing) {
                             (Some((id, size)), Some(framing)) => {
@@ -276,13 +299,13 @@ impl Compositor {
                         }
                         view_guides(painter, rect, &reference_overlay);
                         if let Some(credit) = credit {
-                            credit_line(painter, rect, credit, Align2::LEFT_BOTTOM);
+                            credit_line(painter, rect, credit, Align2::LEFT_BOTTOM, reference_bg);
                         }
                     } else if let (Some(rect), Some(credit)) = (sculpt, credit) {
                         // The reference is in the picture only over the
                         // sculpt, as its ghost: credited there, across from
                         // the clock.
-                        credit_line(painter, rect, credit, Align2::RIGHT_BOTTOM);
+                        credit_line(painter, rect, credit, Align2::RIGHT_BOTTOM, sculpt_bg);
                     }
                     if let Some(divider) = placement.divider {
                         painter.rect_filled(to_points(divider), 0.0, theme::DARK.border);
@@ -293,11 +316,20 @@ impl Compositor {
                             Align2::LEFT_BOTTOM,
                             clock,
                             fonts::regular(CLOCK_SIZE),
-                            theme::VIEW_TEXT,
+                            theme::view_inks(sculpt_bg).text,
                         );
                     }
                     if let Some((title, opacity)) = title.filter(|(t, _)| !t.trim().is_empty()) {
-                        let colour = theme::VIEW_INK.gamma_multiply(opacity.clamp(0.0, 1.0));
+                        // Over the view in the frame's top left corner.
+                        let under = match (sculpt, reference) {
+                            (Some(s), Some(r)) if r.min.x < s.min.x || r.min.y < s.min.y => {
+                                reference_bg
+                            }
+                            (Some(_), _) => sculpt_bg,
+                            (None, _) => reference_bg,
+                        };
+                        let ink = theme::view_inks(under).ink;
+                        let colour = ink.gamma_multiply(opacity.clamp(0.0, 1.0));
                         let wrap = screen.width() - 2.0 * TITLE_MARGIN.x;
                         let galley = painter.layout(
                             title.trim().to_owned(),
@@ -388,10 +420,11 @@ fn view_guides(painter: &egui::Painter, rect: Rect, overlay: &ViewOverlay) {
 
 /// The credit along the bottom of a view, in the corner `align` names
 /// (left or right bottom), clipped to it.
-fn credit_line(painter: &egui::Painter, rect: Rect, credit: &str, align: Align2) {
+fn credit_line(painter: &egui::Painter, rect: Rect, credit: &str, align: Align2, bg: Color32) {
     let font = fonts::regular(CREDIT_SIZE);
     let wrap = rect.width() - 2.0 * CREDIT_MARGIN.x;
-    let galley = painter.layout(credit.to_owned(), font, theme::VIEW_TEXT, wrap.max(10.0));
+    let text = theme::view_inks(bg).text;
+    let galley = painter.layout(credit.to_owned(), font, text, wrap.max(10.0));
     let size = galley.size();
     let x = if align == Align2::RIGHT_BOTTOM {
         rect.right() - CREDIT_MARGIN.x - size.x
@@ -400,10 +433,11 @@ fn credit_line(painter: &egui::Painter, rect: Rect, credit: &str, align: Align2)
     };
     let at = Pos2::new(x, rect.bottom() - CREDIT_MARGIN.y - size.y);
     let painter = painter.with_clip_rect(rect);
-    // On the view's own black, so a guide crossing it never strikes it out.
+    // On the view's own background, so a guide crossing it never strikes
+    // it out.
     let backing = Rect::from_min_size(at, size).expand(CREDIT_SIZE * 0.25);
-    painter.rect_filled(backing, 0.0, theme::VIEW_BG);
-    painter.galley(at, galley, theme::VIEW_TEXT);
+    painter.rect_filled(backing, 0.0, bg);
+    painter.galley(at, galley, text);
 }
 
 fn end_card(painter: &egui::Painter, screen: Rect, card: &EndCard) {

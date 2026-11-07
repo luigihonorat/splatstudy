@@ -344,8 +344,11 @@ impl Default for StudyState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(dead_code)] // read by the reference part's drawing, once it lands
 pub(super) struct ReferenceLook {
-    /// Filled flat with `theme::SILHOUETTE_INK`: no light, no own colours.
+    /// Filled flat with `ink`: no light, no own colours.
     pub(super) flat: bool,
+    /// The silhouette's colour: `theme::SILHOUETTE_INK`, or a dark one
+    /// over a light background.
+    pub(super) ink: Color32,
     /// 0..1.
     pub(super) opacity: f32,
     /// Laid over everything the pass has drawn as one see-through layer,
@@ -362,7 +365,7 @@ impl App {
     pub(super) fn sculpt_look(&self) -> Look {
         let aids = &self.study.views[SCULPT];
         let look = if aids.silhouette {
-            Look::flat(theme::SILHOUETTE_INK)
+            Look::flat(self.view_inks(SCULPT).silhouette)
         } else {
             Look::lit(theme::CLAY)
         };
@@ -389,6 +392,7 @@ impl App {
         let aids = &self.study.views[REFERENCE];
         ReferenceLook {
             flat: aids.silhouette,
+            ink: self.view_inks(REFERENCE).silhouette,
             opacity: 1.0,
             over: false,
             lighting: aids.lighting,
@@ -401,6 +405,7 @@ impl App {
         let aids = &self.study.views[SCULPT];
         self.study.ghost.then_some(ReferenceLook {
             flat: aids.silhouette,
+            ink: self.view_inks(SCULPT).silhouette,
             opacity: theme::GHOST_OPACITY,
             over: true,
             lighting: aids.lighting,
@@ -587,23 +592,26 @@ impl App {
         }
         let flash = self.study.timer.flash(now);
         if flash > 0.0 {
-            let veil = theme::VIEW_INK.gamma_multiply(0.22 * flash);
-            ui.painter().rect_filled(area, 0.0, veil);
+            // Each view lightens, or darkens if it is light.
+            for (index, rect) in rects.into_iter().enumerate().filter(|&(_, r)| shown(r)) {
+                let veil = self.view_inks(index).ink.gamma_multiply(0.22 * flash);
+                ui.painter().rect_filled(rect.intersect(area), 0.0, veil);
+            }
             ui.ctx().request_repaint();
         }
+        let index = if shown(rects[SCULPT]) {
+            SCULPT
+        } else {
+            REFERENCE
+        };
+        let (rect, inks) = (rects[index], self.view_inks(index));
         let timer = &mut self.study.timer;
         if timer.clock == Clock::Off {
             return;
         }
-        let rect = if shown(rects[SCULPT]) {
-            rects[SCULPT]
-        } else {
-            rects[REFERENCE]
-        };
         let remaining = timer.remaining(now);
         let painter = ui.painter();
-        let clock =
-            painter.layout_no_wrap(clock_text(remaining), fonts::light(26.0), theme::VIEW_INK);
+        let clock = painter.layout_no_wrap(clock_text(remaining), fonts::light(26.0), inks.ink);
         let corner = rect.right_top() + egui::vec2(-14.0, 8.0);
         let clock_rect =
             Rect::from_min_size(corner - egui::vec2(clock.size().x, 0.0), clock.size());
@@ -615,9 +623,9 @@ impl App {
         }
         let running = matches!(timer.clock, Clock::Running { .. });
         let colour = if running || response.hovered() {
-            theme::VIEW_INK
+            inks.ink
         } else {
-            theme::VIEW_TEXT
+            inks.text
         };
         painter.galley(clock_rect.min, clock, colour);
         if timer.rounds > 1 {
@@ -626,7 +634,7 @@ impl App {
                 Align2::RIGHT_TOP,
                 format!("{} / {}", timer.round + 1, timer.rounds),
                 fonts::regular(12.0),
-                theme::VIEW_TEXT,
+                inks.text,
             );
         }
         if running {
@@ -761,7 +769,7 @@ impl App {
                     Align2::CENTER_BOTTOM,
                     st.measure_hint,
                     fonts::regular(13.0),
-                    theme::VIEW_TEXT,
+                    self.view_inks(index).text,
                 );
                 continue;
             };
@@ -786,7 +794,7 @@ impl App {
                     Align2::CENTER_CENTER,
                     format!("{value:.2}"),
                     fonts::regular(13.0),
-                    theme::VIEW_INK,
+                    self.view_inks(index).ink,
                 );
             }
         }
@@ -903,8 +911,11 @@ impl App {
         }
         {
             let mut pass = targets[1].begin_pass(&mut encoder, theme::VIEW_BG);
+            // Measured: the default ink on the default black, whatever
+            // the views show.
             let look = ReferenceLook {
                 flat: true,
+                ink: theme::SILHOUETTE_INK,
                 opacity: 1.0,
                 over: false,
                 lighting: Lighting::default(),
@@ -985,9 +996,9 @@ impl App {
             .iou
             .map_or("–".to_owned(), |iou| format!("{:.0}%", iou * 100.0));
         let colour = if fresh {
-            theme::VIEW_INK
+            self.view_inks(SCULPT).ink
         } else {
-            theme::VIEW_TEXT
+            self.view_inks(SCULPT).text
         };
         let corner = rect.right_bottom() + egui::vec2(-14.0, -12.0);
         let shown = painter.text(
@@ -1009,7 +1020,7 @@ impl App {
                     Align2::RIGHT_BOTTOM,
                     label,
                     fonts::regular(12.0),
-                    theme::VIEW_TEXT,
+                    self.view_inks(SCULPT).text,
                 );
                 painter.hline(
                     text.left() - 22.0..=text.left() - 8.0,

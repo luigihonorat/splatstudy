@@ -92,6 +92,9 @@ pub struct Settings {
     pub turn_reference: bool,
     /// The session's elapsed time in a corner of the sculpt.
     pub clock: bool,
+    /// The sculpt's background, then the reference's, as the views show
+    /// them.
+    pub backgrounds: [egui::Color32; 2],
 }
 
 impl Default for Settings {
@@ -108,6 +111,7 @@ impl Default for Settings {
             turntable: false,
             turn_reference: false,
             clock: false,
+            backgrounds: [theme::VIEW_BG; 2],
         }
     }
 }
@@ -326,8 +330,10 @@ impl Job {
         }
         let duration = replay.duration();
         let timeline = settings.timeline(duration);
+        let mut compositor = Compositor::new(device, size, settings.layout);
+        compositor.set_backgrounds(settings.backgrounds);
         Ok(Job {
-            compositor: Compositor::new(device, size, settings.layout),
+            compositor,
             // Through the queue, in pieces: the start can be a fine clay
             // (a copy without its timelapse), and a buffer that size
             // mapped at creation can fail in the browser.
@@ -478,14 +484,14 @@ impl Job {
                     view.aspect(),
                     &settings.look,
                 );
-                let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
+                let mut pass = view.begin_pass(&mut encoder, settings.backgrounds[0]);
                 gpu.clay.draw(&mut pass, Slot::ExportSculpt, &self.gpu_mesh);
                 if settings.ghost {
                     draw_reference(&mut pass, Slot::ExportSculpt, &camera, view.size);
                 }
             }
             if let Some(view) = self.compositor.reference_view() {
-                let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
+                let mut pass = view.begin_pass(&mut encoder, settings.backgrounds[1]);
                 draw_reference(
                     &mut pass,
                     Slot::ExportReference,
