@@ -9,7 +9,7 @@ use glam::Vec3;
 use super::study::Layout;
 use super::{App, Drag, REFERENCE, SCULPT};
 use crate::camera::OrbitCamera;
-use crate::input::{Button, Modifiers, PointerKind, PointerPhase};
+use crate::input::{Button, Modifiers, PointerKind};
 use crate::navigation::{NavAction, snap_view};
 use crate::sculpt::LayerOp;
 use crate::ui::{fonts, i18n::Tr};
@@ -366,6 +366,7 @@ impl App {
 
         // An open pie menu takes every press; the toolbar takes its own.
         // While a flyout is open, a press anywhere only closes it.
+        let mut started = false;
         if self.drags[index].is_none()
             && response.hovered()
             && !self.pie_open()
@@ -406,7 +407,10 @@ impl App {
                             free,
                         })
                     }
-                    (None, Some((pos, hit))) => self.start_stroke(rect, pos, hit),
+                    (None, Some((pos, hit))) => {
+                        self.start_stroke(rect, pos, hit);
+                        started = true;
+                    }
                     (None, None)
                         if index == SCULPT
                             && ours == Button::Primary
@@ -467,20 +471,7 @@ impl App {
                 });
             }
             Some(Drag::Stroke { .. }) if ui.input(|i| i.pointer.primary_down()) => {
-                let samples: Vec<_> = self
-                    .input
-                    .samples
-                    .iter()
-                    .filter(|s| {
-                        matches!(s.phase, PointerPhase::Move | PointerPhase::Down)
-                            && s.pressure > 0.0
-                    })
-                    .map(|s| {
-                        let pos = self.view_pos_in(index, rect, egui::pos2(s.pos[0], s.pos[1]));
-                        (pos, s.brush_pressure())
-                    })
-                    .collect();
-                for (pos, pressure) in samples {
+                for (pos, pressure) in self.stroke_samples(index, rect, started) {
                     self.stroke_to(rect, pos, pressure);
                 }
             }

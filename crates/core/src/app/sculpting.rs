@@ -13,7 +13,7 @@ use glam::{Mat4, Vec2, Vec3};
 use super::panels::Group;
 use super::{App, Drag, Request, SCULPT};
 use crate::camera::OrbitCamera;
-use crate::input::{FilePurpose, PointerKind};
+use crate::input::{Button, FilePurpose, PointerEvent, PointerKind, PointerPhase};
 use crate::meshio::{self, Soup};
 use crate::quad;
 use crate::render::clay::GpuMesh;
@@ -379,6 +379,43 @@ fn walk(
         along += spacing;
     }
     length - (along - spacing)
+}
+
+/// Which of a frame's `samples` go on with a stroke started by the press
+/// `by`: that pointer's own, while it is pressed, with some pressure. Any
+/// other pointer's (a mouse event the system makes from a pen, say) are
+/// not part of the stroke, and neither is what a pen reports after it
+/// lifts, if it touches down again within the frame. In the frame the
+/// stroke `started`, they start at its press.
+fn stroke_samples(
+    samples: &[PointerEvent],
+    by: Option<PointerEvent>,
+    started: bool,
+) -> impl Iterator<Item = &PointerEvent> {
+    let ours = move |s: &PointerEvent| by.is_none_or(|p| s.id == p.id && s.kind == p.kind);
+    let press =
+        |s: &PointerEvent| s.phase == PointerPhase::Down && s.button == Some(Button::Primary);
+    let from = if started {
+        samples
+            .iter()
+            .rposition(|s| ours(s) && press(s))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mut pressed = true;
+    samples[from..].iter().filter(move |s| {
+        if !ours(s) {
+            return false;
+        }
+        match s.phase {
+            PointerPhase::Down if s.button == Some(Button::Primary) => pressed = true,
+            PointerPhase::Up if s.button == Some(Button::Primary) => pressed = false,
+            PointerPhase::Cancel => pressed = false,
+            _ => {}
+        }
+        pressed && matches!(s.phase, PointerPhase::Move | PointerPhase::Down) && s.pressure > 0.0
+    })
 }
 
 /// Where `tool`'s settings are kept: `Brush::ALL` lists the brushes in
@@ -958,16 +995,49 @@ impl App {
             .request_repaint_after(std::time::Duration::from_secs_f64(wait));
     }
 
-    fn pressure(&self) -> f32 {
-        self.input.last.map_or(1.0, |e| e.brush_pressure())
+    /// True while the pen is used with its eraser end: the brush does
+    /// its opposite action, as with the invert key. A stroke keeps the
+    /// end it started with, whatever other pointer moves meanwhile.
+    fn erasing(&self) -> bool {
+        let pointer = match self.drags[SCULPT] {
+            Some(Drag::Stroke { pointer, .. }) => pointer,
+            _ => self.input.last,
+        };
+        pointer.is_some_and(|e| e.kind == PointerKind::Pen && e.eraser)
     }
 
-    /// True while the pen is used with its eraser end: the brush does
-    /// its opposite action, as with the invert key.
-    fn erasing(&self) -> bool {
+    /// The press that starts a stroke this frame: the last left press
+    /// among the frame's samples. Not the frame's last sample, which may
+    /// be the lift, or another pointer's: a mouse move the system adds
+    /// where a pen lifted would make a dab of full pressure.
+    fn stroke_press(&self) -> Option<PointerEvent> {
         self.input
-            .last
-            .is_some_and(|e| e.kind == PointerKind::Pen && e.eraser)
+            .samples
+            .iter()
+            .rev()
+            .find(|s| s.phase == PointerPhase::Down && s.button == Some(Button::Primary))
+            .or(self.input.last.as_ref())
+            .copied()
+    }
+
+    /// The samples of this frame that go on with the stroke under way, in
+    /// view points, with their pressure. `started` is true in the frame
+    /// the stroke started in.
+    pub(super) fn stroke_samples(
+        &self,
+        index: usize,
+        rect: Rect,
+        started: bool,
+    ) -> Vec<(Pos2, f32)> {
+        let Some(Drag::Stroke { pointer, .. }) = self.drags[SCULPT] else {
+            return Vec::new();
+        };
+        stroke_samples(&self.input.samples, pointer, started)
+            .map(|s| {
+                let pos = self.view_pos_in(index, rect, egui::pos2(s.pos[0], s.pos[1]));
+                (pos, s.brush_pressure())
+            })
+            .collect()
     }
 
     pub(super) fn start_stroke(&mut self, rect: Rect, pos: Pos2, hit: Hit) {
@@ -986,11 +1056,13 @@ impl App {
                 scale,
             });
         } else {
-            let pressure = self.pressure();
+            let pointer = self.stroke_press();
+            let pressure = pointer.map_or(1.0, |e| e.brush_pressure());
             self.drags[SCULPT] = Some(Drag::Stroke {
                 last: pos,
                 pressure,
                 carry: 0.0,
+                pointer,
             });
             self.dab_at(rect, pressure, hit, Vec3::ZERO);
         }
@@ -1005,6 +1077,7 @@ impl App {
             last,
             pressure: last_pressure,
             carry,
+            pointer,
         }) = self.drags[SCULPT]
         else {
             return;
@@ -1042,6 +1115,7 @@ impl App {
             last: to,
             pressure,
             carry,
+            pointer,
         });
     }
 
@@ -1812,5 +1886,213 @@ mod tests {
         };
         assert!(moved(false) > 100, "the stroke built nothing");
         assert_eq!(moved(true), 0, "clay moved on the far side");
+    }
+
+    /// A pen event, as the desktop shell sends them.
+    fn pen(phase: crate::PointerPhase, pos: Pos2, pressure: f32) -> crate::PointerEvent {
+        use crate::PointerPhase::{Down, Up};
+        crate::PointerEvent {
+            id: 1 << 32 | 1,
+            kind: PointerKind::Pen,
+            phase,
+            pos: [pos.x, pos.y],
+            button: matches!(phase, Down | Up).then_some(crate::Button::Primary),
+            pressure,
+            eraser: false,
+        }
+    }
+
+    /// A mouse event: `pressure` is 1.0 while its left button is down.
+    fn mouse(phase: crate::PointerPhase, pos: Pos2, pressure: f32) -> crate::PointerEvent {
+        crate::PointerEvent {
+            id: 0,
+            kind: PointerKind::Mouse,
+            ..pen(phase, pos, pressure)
+        }
+    }
+
+    /// The dabs that `frames` of pointer events lay, each frame's events
+    /// pushed and then the frame drawn. `frames` gets the sculpt view.
+    fn dabs_of(frames: impl FnOnce(Rect) -> Vec<Vec<crate::PointerEvent>>) -> Option<Vec<Dab>> {
+        use super::super::study::tests::Harness;
+        use crate::sculpt::Event;
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return None;
+        };
+        let start = h.app.sculpt.log().len();
+        for events in frames(h.app.view_rects[SCULPT]) {
+            for event in events {
+                h.app.push_event(crate::InputEvent::Pointer(event));
+            }
+            h.frames(1);
+        }
+        let dabs: Vec<Dab> = h.app.sculpt.log()[start..]
+            .iter()
+            .filter_map(|e| match e.event {
+                Event::Dab(dab) => Some(dab),
+                _ => None,
+            })
+            .collect();
+        assert!(!dabs.is_empty(), "no dabs");
+        Some(dabs)
+    }
+
+    /// A pen stroke across the clay that presses hardest (0.5) as it
+    /// starts and fades towards 0.1 as it lifts, a sample a frame: its
+    /// frames, and where it lifts.
+    fn fading_stroke(rect: Rect) -> (Vec<Vec<crate::PointerEvent>>, Pos2) {
+        use crate::PointerPhase::{Down, Move, Up};
+        let at = |i: usize| rect.center() + egui::vec2(-60.0 + i as f32 * 6.0, 0.0);
+        let mut frames = vec![vec![pen(Move, at(0), 0.0)], vec![pen(Down, at(0), 0.5)]];
+        for i in 1..=20 {
+            frames.push(vec![pen(Move, at(i), 0.5 - 0.4 * i as f32 / 20.0)]);
+        }
+        frames.push(vec![pen(Up, at(20), 0.1)]);
+        (frames, at(20))
+    }
+
+    /// No dab of a stroke whose pen pressed hardest at its first dab is
+    /// stronger or larger than that first dab.
+    fn assert_none_above_the_first(dabs: &[Dab]) {
+        let first = dabs[0];
+        for (i, dab) in dabs.iter().enumerate() {
+            assert!(
+                dab.strength <= first.strength * 1.001,
+                "dab {i} of {}: strength {} above the pen's hardest, {}",
+                dabs.len(),
+                dab.strength,
+                first.strength
+            );
+            // The size also goes by the depth of the clay under the dab.
+            assert!(
+                dab.radius <= first.radius * 1.05,
+                "dab {i} of {}: radius {} above the pen's largest, {}",
+                dabs.len(),
+                dab.radius,
+                first.radius
+            );
+        }
+    }
+
+    #[test]
+    fn a_pen_that_bounces_as_it_lifts_lays_no_blob() {
+        use crate::PointerPhase::{Down, Move, Up};
+        // The pen lifts, touches again lightly for an instant (within one
+        // frame), and the system adds a mouse move where it lifted: that
+        // touch's one dab takes the pen's pressure, not the mouse's.
+        let Some(dabs) = dabs_of(|rect| {
+            let (mut frames, end) = fading_stroke(rect);
+            frames.push(vec![
+                pen(Down, end, 0.1),
+                pen(Up, end, 0.1),
+                mouse(Move, end, 0.0),
+            ]);
+            frames
+        }) else {
+            return;
+        };
+        assert_none_above_the_first(&dabs);
+        let last = dabs.last().unwrap();
+        assert!(
+            (last.strength / dabs[0].strength - 0.2).abs() < 0.01,
+            "the touch's dab took pressure {} rather than the pen's 0.1",
+            last.strength / dabs[0].strength * 0.5
+        );
+    }
+
+    #[test]
+    fn a_mouse_event_amid_a_pen_stroke_is_not_part_of_it() {
+        use crate::PointerPhase::Move;
+        // A mouse sample with its button down (full pressure) among the
+        // pen's, near the lift.
+        let Some(dabs) = dabs_of(|rect| {
+            let (mut frames, end) = fading_stroke(rect);
+            let at = frames.len() - 3;
+            frames[at].push(mouse(Move, end, 1.0));
+            frames
+        }) else {
+            return;
+        };
+        assert_none_above_the_first(&dabs);
+    }
+
+    #[test]
+    fn a_pen_sample_after_its_lift_is_not_part_of_the_stroke() {
+        use crate::PointerPhase::{Down, Move, Up};
+        // SDL sends a lift first, then the lifting message's position and
+        // pressure; here the pen touches down again within the frame, so
+        // the stroke goes on, but without the sample taken in the air.
+        let Some(dabs) = dabs_of(|rect| {
+            let (mut frames, end) = fading_stroke(rect);
+            let up = frames.pop().unwrap();
+            assert_eq!(up[0].phase, Up);
+            let near = end + egui::vec2(6.0, 0.0);
+            frames.push(vec![
+                pen(Up, end, 0.1),
+                pen(Move, near, 0.9),
+                pen(Down, near, 0.1),
+            ]);
+            for i in 1..=5 {
+                frames.push(vec![pen(Move, near + egui::vec2(i as f32 * 6.0, 0.0), 0.1)]);
+            }
+            frames.push(vec![pen(Up, near + egui::vec2(30.0, 0.0), 0.1)]);
+            frames
+        }) else {
+            return;
+        };
+        assert_none_above_the_first(&dabs);
+    }
+
+    #[test]
+    fn an_eraser_stroke_stays_inverted_through_a_stray_mouse_event() {
+        use crate::PointerPhase::Move;
+        let Some(dabs) = dabs_of(|rect| {
+            let (mut frames, end) = fading_stroke(rect);
+            for event in frames.iter_mut().flatten() {
+                event.eraser = true;
+            }
+            let at = frames.len() - 3;
+            frames[at].push(mouse(Move, end, 0.0));
+            frames
+        }) else {
+            return;
+        };
+        assert!(dabs.len() > 10);
+        assert!(
+            dabs.iter().all(|d| d.invert),
+            "a dab of the eraser stroke built up"
+        );
+    }
+
+    #[test]
+    fn mouse_and_touch_strokes_press_fully() {
+        use crate::PointerPhase::{Down, Move, Up};
+        // Browsers report 0.5 for a touch.
+        let touch = |phase, pos: Pos2| crate::PointerEvent {
+            id: 7,
+            kind: PointerKind::Touch,
+            ..pen(phase, pos, if phase == Up { 0.0 } else { 0.5 })
+        };
+        let Some(dabs) = dabs_of(|rect| {
+            let at = |i: usize, y: f32| rect.center() + egui::vec2(-60.0 + i as f32 * 6.0, y);
+            let mut frames = vec![vec![mouse(Move, at(0, -40.0), 0.0)]];
+            frames.push(vec![mouse(Down, at(0, -40.0), 1.0)]);
+            frames.extend((1..=10).map(|i| vec![mouse(Move, at(i, -40.0), 1.0)]));
+            frames.push(vec![mouse(Up, at(10, -40.0), 0.0)]);
+            frames.push(vec![touch(Down, at(0, 40.0))]);
+            frames.extend((1..=10).map(|i| vec![touch(Move, at(i, 40.0))]));
+            frames.push(vec![touch(Up, at(10, 40.0))]);
+            frames
+        }) else {
+            return;
+        };
+        assert!(dabs.len() > 20);
+        let full = dabs[0].strength;
+        assert!(full > 0.0);
+        assert!(
+            dabs.iter().all(|d| d.strength == full),
+            "a mouse or touch dab pressed less than fully"
+        );
     }
 }
