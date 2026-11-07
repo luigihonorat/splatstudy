@@ -110,15 +110,29 @@ pub enum Falloff {
     /// "sharp" until sharp became a stiffer plateau. Only timelapses
     /// recorded with it replay it; the panel no longer lists it.
     Peak,
+    /// The panel's falloff slider, 0..=[`MAX_HARDNESS`]: full strength out
+    /// to a plateau that widens with it, then smooth's dome down to the
+    /// rim. 0 is smooth itself; [`SHARP_HARDNESS`] is about as hard as
+    /// sharp, and beyond it harder still.
+    Hard(u8),
 }
+
+/// The hardest the falloff slider goes.
+pub const MAX_HARDNESS: u8 = 100;
+/// Where on the falloff slider the plateau is as wide as sharp's.
+pub const SHARP_HARDNESS: u8 = 90;
+/// How far out, as a share of the radius, the hardest falloff stays at
+/// full strength.
+const MAX_PLATEAU: f32 = 0.9;
 
 /// How far out, as a share of the radius, [`Falloff::Sharp`] stays at
 /// full strength.
 pub const SHARP_PLATEAU: f32 = 0.65;
 
 impl Falloff {
-    /// Every falloff, in the order the panel lists them. A log stores
-    /// each one by its own byte, not by this order (see `record`).
+    /// The named falloffs, as the panel listed them before its slider;
+    /// older timelapses replay them. A log stores each one by its own
+    /// byte, not by this order (see `record`).
     pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Flat, Falloff::Sharp];
 
     /// The weight at `distance` from the centre of a brush of `radius`:
@@ -154,7 +168,27 @@ impl Falloff {
                 let s = 1.0 - t;
                 s * s * s
             }
+            Falloff::Hard(hardness) => {
+                let plateau = hard_plateau(hardness);
+                let x = ((t - plateau) / (1.0 - plateau)).max(0.0);
+                let s = 1.0 - x * x;
+                s * s
+            }
         }
+    }
+}
+
+/// How far out, as a share of the radius, a falloff of `hardness` stays at
+/// full strength: up to sharp's plateau at [`SHARP_HARDNESS`], then
+/// faster to [`MAX_PLATEAU`].
+fn hard_plateau(hardness: u8) -> f32 {
+    let h = f32::from(hardness.min(MAX_HARDNESS));
+    let sharp = f32::from(SHARP_HARDNESS);
+    if h <= sharp {
+        SHARP_PLATEAU * h / sharp
+    } else {
+        let rest = f32::from(MAX_HARDNESS) - sharp;
+        SHARP_PLATEAU + (MAX_PLATEAU - SHARP_PLATEAU) * (h - sharp) / rest
     }
 }
 
@@ -196,6 +230,10 @@ pub struct Dab {
     pub direction: Vec3,
     /// Clay: whether a stroke builds more where it passes again.
     pub buildup: Buildup,
+    /// Clay: fill the hollows first. The clay rises towards a height
+    /// above the area's average, not above the point under the brush, so
+    /// what is already higher (the rim of a hollow, a bump) stays.
+    pub fill: bool,
 }
 
 /// One undoable change: the vertices a stroke touched, before and after.
@@ -1049,16 +1087,25 @@ impl Sculpt {
     // The brushes below move `found`, on the plane of `area` (see `dab_at`).
 
     fn clay(&mut self, area: &[u32], found: &[u32], dab: Dab) {
-        let Some((n, _)) = self.area_plane(area, dab) else {
+        let Some((n, origin)) = self.area_plane(area, dab) else {
             return;
         };
-        // The plane goes through the point under the brush. (Through the
-        // average position instead, it would sit below a curved surface and
-        // lift the rim more than the centre.)
-        let plane_point = dab.centre;
         let sign = if dab.invert { -1.0 } else { 1.0 };
         // How far above the area the clay builds up, at full strength.
         let height = dab.radius * 0.25 * dab.strength;
+        // The plane goes through the point under the brush. (Through the
+        // average position instead, it would sit below a curved surface and
+        // lift the rim more than the centre.) Each vertex rises by a share
+        // of its way up, but no more than twice the height: deeper hollows
+        // rise as much as the rest, and the detail comes up with them.
+        // Filling, the plane goes through the average, and each vertex
+        // rises by a share of its whole way: the hollows most, the rims
+        // above the plane not at all.
+        let (plane_point, most) = if dab.fill {
+            (origin, f32::INFINITY)
+        } else {
+            (dab.centre, 2.0 * height)
+        };
         // In layers: how far a vertex may rise in this stroke.
         let layer = dab.radius * LAYER * dab.strength;
         for &v in found {
@@ -1070,9 +1117,8 @@ impl Sculpt {
             if above >= height {
                 continue;
             }
-            let mut lift = (height - above).min(2.0 * height)
-                * self.weight(p.distance(dab.centre), dab.radius)
-                * 0.3;
+            let mut lift =
+                (height - above).min(most) * self.weight(p.distance(dab.centre), dab.radius) * 0.3;
             if dab.buildup == Buildup::Layer {
                 lift = lift.min(layer - self.risen(v, n) * sign);
                 if lift <= 0.0 {
@@ -1401,6 +1447,7 @@ mod tests {
             symmetry: false,
             direction: Vec3::ZERO,
             buildup: Default::default(),
+            fill: false,
         }
     }
 
@@ -1434,7 +1481,8 @@ mod tests {
     fn falloffs_run_from_full_at_the_centre_to_nothing_at_the_rim() {
         let every = Falloff::ALL
             .into_iter()
-            .chain([Falloff::Linear, Falloff::Peak]);
+            .chain([Falloff::Linear, Falloff::Peak])
+            .chain((0..=MAX_HARDNESS).map(Falloff::Hard));
         for falloff in every {
             assert_eq!(falloff.weight(0.0, 1.0), 1.0, "{falloff:?}");
             assert_eq!(falloff.weight(1.0, 1.0), 0.0, "{falloff:?}");
@@ -1456,6 +1504,76 @@ mod tests {
         let at = |f: Falloff| f.weight(0.4, 1.0);
         assert!(at(Falloff::Flat) > at(Falloff::Smooth));
         assert!(at(Falloff::Smooth) > at(Falloff::Peak));
+    }
+
+    #[test]
+    fn the_falloff_slider_runs_from_smooth_to_past_sharp() {
+        // At 0 it is smooth itself, so a brush left alone works as before.
+        for i in 0..=100 {
+            let t = i as f32 / 100.0;
+            assert_eq!(
+                Falloff::Hard(0).weight(t, 1.0),
+                Falloff::Smooth.weight(t, 1.0)
+            );
+        }
+        // Harder along the slider: never weaker anywhere, the plateau
+        // wider at every step.
+        for h in 1..=MAX_HARDNESS {
+            let (soft, hard) = (Falloff::Hard(h - 1), Falloff::Hard(h));
+            for i in 0..=100 {
+                let t = i as f32 / 100.0;
+                assert!(hard.weight(t, 1.0) >= soft.weight(t, 1.0), "{h} at {t}");
+            }
+            assert!(hard_plateau(h) > hard_plateau(h - 1), "{h}");
+        }
+        // At sharp's mark its plateau is sharp's; the top of the slider
+        // holds its full strength further out still.
+        let sharp = Falloff::Hard(SHARP_HARDNESS);
+        assert_eq!(sharp.weight(SHARP_PLATEAU, 1.0), 1.0);
+        assert!(sharp.weight(SHARP_PLATEAU + 0.01, 1.0) < 1.0);
+        let hardest = Falloff::Hard(MAX_HARDNESS);
+        assert_eq!(hardest.weight(0.85, 1.0), 1.0);
+        assert!(hardest.weight(0.95, 1.0) > Falloff::Sharp.weight(0.95, 1.0));
+    }
+
+    /// A bump of clay on the top of a sphere, a sixth of the brush that
+    /// then goes over it wide; how high its top stands.
+    fn bump_under_a_wide_dab(fill: bool) -> (f32, f32) {
+        let mut s = Sculpt::new(Mesh::icosphere(6));
+        let top = |s: &Sculpt, x: f32| s.raycast(Vec3::new(x, 0.0, 3.0), -Vec3::Z).unwrap().point.z;
+        s.begin_stroke();
+        for _ in 0..30 {
+            let hit = s.raycast(Vec3::new(0.0, 0.0, 3.0), -Vec3::Z).unwrap();
+            s.dab(Dab {
+                radius: 0.05,
+                strength: 1.0,
+                ..dab(Brush::Clay, hit.point)
+            });
+            s.refresh();
+        }
+        s.end_stroke();
+        let (bump, beside) = (top(&s, 0.0), top(&s, 0.15));
+        s.begin_stroke();
+        let hit = s.raycast(Vec3::new(0.0, 0.0, 3.0), -Vec3::Z).unwrap();
+        s.dab(Dab {
+            radius: 0.3,
+            strength: 0.5,
+            fill,
+            ..dab(Brush::Clay, hit.point)
+        });
+        s.end_stroke();
+        (top(&s, 0.0) - bump, top(&s, 0.15) - beside)
+    }
+
+    #[test]
+    fn filling_builds_around_a_bump_and_leaves_its_top() {
+        let (top, around) = bump_under_a_wide_dab(false);
+        // Plain clay takes the bump up with the rest.
+        assert!(top > 0.5 * around, "clay: top {top}, around {around}");
+        let (top, around) = bump_under_a_wide_dab(true);
+        // Filling, the clay rises around it, and its top stays.
+        assert!(around > 0.0, "fill: around {around}");
+        assert!(top.abs() < 1e-6, "fill: top {top}, around {around}");
     }
 
     #[test]
@@ -1616,6 +1734,7 @@ mod tests {
                     symmetry: true,
                     direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
                     buildup: Buildup::Accumulate,
+                    fill: false,
                     ..dab(brush, at)
                 };
                 if summed {

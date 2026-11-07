@@ -20,8 +20,8 @@ use crate::render::clay::GpuMesh;
 pub(super) use tool_pie::TOOL_PIE_KEY;
 
 use crate::sculpt::{
-    Brush, Buildup, Dab, Falloff, Hit, LayerOp, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh,
-    START_LEVEL, Sculpt, cube_sphere,
+    Brush, Buildup, Dab, Falloff, Hit, LayerOp, Levels, MAX_HARDNESS, MAX_TRIANGLES, MAX_VERTICES,
+    Mesh, START_LEVEL, Sculpt, cube_sphere,
 };
 use crate::ui::{self, i18n::Tr, icons, menu};
 use crate::voxel;
@@ -193,27 +193,19 @@ fn switch(ui: &mut egui::Ui, tr: &Tr, on: &mut bool, label: &str) {
     });
 }
 
-fn falloff_name(tr: &Tr, falloff: Falloff) -> &'static str {
-    match falloff {
-        Falloff::Smooth => tr.mesh.falloff_smooth,
-        Falloff::Flat => tr.mesh.falloff_flat,
-        Falloff::Sharp => tr.mesh.falloff_sharp,
-        // Old timelapses only: never in the panel, which lists `ALL`.
-        Falloff::Linear => tr.mesh.falloff_smooth,
-        Falloff::Peak => tr.mesh.falloff_sharp,
-    }
-}
-
 pub(super) struct ToolSettings {
     pub(super) tool: Brush,
     /// Radius on screen, in points.
     pub(super) radius: f32,
     /// Strength per tool at full pen pressure, 0..1, in `Brush::ALL` order.
     pub(super) strength: [f32; 8],
-    /// How each tool fades towards its rim, in `Brush::ALL` order.
-    pub(super) falloff: [Falloff; 8],
+    /// How hard each tool's edge is, from smooth (0) to past sharp
+    /// ([`MAX_HARDNESS`]), in `Brush::ALL` order (see [`Falloff::Hard`]).
+    pub(super) hardness: [f32; 8],
     /// Whether the clay builds more where a stroke passes again.
     pub(super) buildup: Buildup,
+    /// Whether the clay fills the hollows first (see `Dab::fill`).
+    pub(super) fill: bool,
     /// When the size or strength last changed, to show them by the brush.
     readout: Option<f64>,
     /// When a brush was last chosen, to show its name.
@@ -233,6 +225,13 @@ pub(super) struct ToolSettings {
     pending: Option<(Pending, f64)>,
     /// The tool pie menu, while it is open.
     pie: Option<crate::ui::pie::Pie>,
+}
+
+impl ToolSettings {
+    /// How `tool` fades towards its rim: its hardness, to the slider's step.
+    pub(super) fn falloff(&self, tool: Brush) -> Falloff {
+        Falloff::Hard(self.hardness[tool_index(tool)].round() as u8)
+    }
 }
 
 /// A slow operation waiting for the next frame.
@@ -257,8 +256,9 @@ impl Default for ToolSettings {
             tool: Brush::Clay,
             radius: 48.0,
             strength: BRUSHES.map(|(_, _, strength)| strength),
-            falloff: [Falloff::Smooth; 8],
+            hardness: [0.0; 8],
             buildup: Buildup::Layer,
+            fill: false,
             readout: None,
             flash: None,
             // A study from a reference is rarely symmetric: mirroring is
@@ -816,18 +816,18 @@ impl App {
         if tool == Brush::Clay {
             let options = Buildup::ALL.map(|b| (buildup_name(tr, b), b));
             choices(ui, tr.mesh.buildup, &options, &mut self.tool.buildup);
+            ui.add_space(4.0);
+            switch(ui, tr, &mut self.tool.fill, tr.mesh.fill);
         }
-        ui::section(ui, tr.mesh.falloff);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            let chosen = &mut self.tool.falloff[tool_index(self.tool.tool)];
-            for falloff in Falloff::ALL {
-                if ui::choice(ui, falloff_name(tr, falloff), *chosen == falloff).clicked() {
-                    *chosen = falloff;
-                }
-            }
-        });
-        falloff_curve(ui, self.tool.falloff[tool_index(self.tool.tool)]);
+        let hardness = &mut self.tool.hardness[index];
+        ui::slider(
+            ui,
+            tr.mesh.falloff,
+            hardness,
+            0.0..=f32::from(MAX_HARDNESS),
+            |v| format!("{v:.0}"),
+        );
+        falloff_curve(ui, self.tool.falloff(tool));
         ui.add_space(10.0);
         switch(ui, tr, &mut self.tool.symmetry, tr.mesh.symmetry_x);
     }
@@ -953,8 +953,7 @@ impl App {
         let scale = camera.world_per_point(hit.point, rect.height());
         if self.held_tool() == Brush::Move {
             let (right, up) = camera.right_up();
-            self.sculpt
-                .set_falloff(self.tool.falloff[tool_index(Brush::Move)]);
+            self.sculpt.set_falloff(self.tool.falloff(Brush::Move));
             self.sculpt
                 .grab(hit.point, self.tool.radius * scale, self.tool.symmetry);
             self.drags[SCULPT] = Some(Drag::Grab {
@@ -1044,7 +1043,7 @@ impl App {
         let strength = self.tool.strength[index] * pressure;
         let size = MIN_PRESSURE_SIZE + (1.0 - MIN_PRESSURE_SIZE) * pressure;
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
-        self.sculpt.set_falloff(self.tool.falloff[index]);
+        self.sculpt.set_falloff(self.tool.falloff(tool));
         self.sculpt.dab(Dab {
             brush: tool,
             centre: hit.point,
@@ -1054,6 +1053,7 @@ impl App {
             symmetry: self.tool.symmetry,
             direction,
             buildup: self.tool.buildup,
+            fill: self.tool.fill,
         });
     }
 
@@ -1092,7 +1092,7 @@ impl App {
         let line = Stroke::new(1.0, ink);
         let painter = ui.painter().with_clip_rect(rect);
         let held = self.held_tool();
-        let falloff = self.tool.falloff[tool_index(held)];
+        let falloff = self.tool.falloff(held);
         let m = ui.input(|i| i.modifiers.into());
         // Not for the mask tools: the blur has no opposite action, and the
         // mask's isn't dashed either.
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn the_inner_ring_is_where_the_brush_works_at_half_strength() {
-        for falloff in Falloff::ALL {
+        for falloff in (0..=MAX_HARDNESS).step_by(10).map(Falloff::Hard) {
             let t = half_weight(falloff);
             assert!((falloff.weight(t, 1.0) - 0.5).abs() < 1e-3, "{falloff:?}");
         }

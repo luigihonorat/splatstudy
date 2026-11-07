@@ -476,6 +476,7 @@ mod job {
                 symmetry: true,
                 direction: Vec3::ZERO,
                 buildup: Default::default(),
+                fill: false,
             });
             s.end_stroke();
             s.refresh();

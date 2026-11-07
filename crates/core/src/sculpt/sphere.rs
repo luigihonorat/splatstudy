@@ -286,6 +286,7 @@ mod tests {
                 symmetry: true,
                 direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
                 buildup: Default::default(),
+                fill: false,
             });
             s.refresh();
         }
@@ -395,6 +396,7 @@ mod tests {
                         symmetry: true,
                         direction: Vec3::X,
                         buildup: Default::default(),
+                        fill: false,
                     });
                 }
                 s.refresh();
