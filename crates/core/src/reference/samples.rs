@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! The references shipped with the web build, under `samples/` next to the
-//! page, and who made them. Each one is CC0 or CC BY, approved before it is
+//! page (the desktop app downloads them from there), and who made them. Each one is CC0 or CC BY, approved before it is
 //! added, and under 24 MiB (the host's limit per file).
 
 use super::Credit;
@@ -110,7 +110,8 @@ impl Sample {
         SAMPLES.iter().find(|s| s.file.eq_ignore_ascii_case(name))
     }
 
-    /// Where the web build fetches it from, next to the page.
+    /// Where the web build fetches it from, next to the page; the desktop
+    /// app from the same path on the web app's site.
     pub fn path(&self) -> String {
         format!("samples/{}", self.file)
     }
