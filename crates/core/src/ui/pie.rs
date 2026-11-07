@@ -13,14 +13,15 @@
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use egui::{Align2, Color32, Event, Key, Order, Pos2, Rect, Sense, Stroke};
+use egui::{Color32, Event, Key, Order, Pos2, Rect, Sense, Stroke};
 
 use super::icons::{self, Icon};
 use super::{fonts, theme};
 
 /// Around the centre, a disc where nothing is chosen, in points.
 pub const DEAD_ZONE: f32 = 22.0;
-/// From the centre to each label's anchor, in points.
+/// The least distance from the centre to the middle of each label, in
+/// points.
 const LABEL_RADIUS: f32 = 72.0;
 /// Room round a label that still counts as on it, in points.
 const LABEL_SLACK: f32 = 4.0;
@@ -61,21 +62,42 @@ fn direction(index: usize, count: usize) -> egui::Vec2 {
     egui::vec2(angle.cos(), angle.sin())
 }
 
-/// Where the label of slice `index` of `count`, `size` large, sits round
-/// `centre`: on its slice's direction, reaching away from the centre on
-/// the left and right, so neighbours near the top and bottom don't run
-/// into each other; centred straight up and down.
-fn label_rect(centre: Pos2, index: usize, count: usize, size: egui::Vec2) -> Rect {
-    let d = direction(index, count);
-    let anchor = centre + d * LABEL_RADIUS;
-    let align = if d.x > 0.2 {
-        Align2::LEFT_CENTER
-    } else if d.x < -0.2 {
-        Align2::RIGHT_CENTER
-    } else {
-        Align2::CENTER_CENTER
+/// The distance from the centre to the middle of every item, `sizes`
+/// large: the least at which no two come nearer each other than twice
+/// `LABEL_SLACK` (so a click near one is never on another), and never less
+/// than `LABEL_RADIUS`. Two items are clear once they are clear across or
+/// down the screen, and both gaps grow with the distance, so each pair
+/// needs the lesser of the two.
+fn item_radius(sizes: &[egui::Vec2]) -> f32 {
+    let count = sizes.len();
+    let need = |room: f32, apart: f32| {
+        if apart.abs() > 1e-4 {
+            room / apart.abs()
+        } else {
+            f32::INFINITY
+        }
     };
-    align.anchor_size(anchor, size)
+    let mut radius = LABEL_RADIUS;
+    for i in 0..count {
+        for j in i + 1..count {
+            let apart = direction(i, count) - direction(j, count);
+            let room = (sizes[i] + sizes[j]) / 2.0 + egui::Vec2::splat(2.0 * LABEL_SLACK);
+            radius = radius.max(need(room.x, apart.x).min(need(room.y, apart.y)));
+        }
+    }
+    radius
+}
+
+/// Where the items of `sizes` sit round `centre`: each centred on its
+/// slice's direction, all at the same distance, so they lie evenly on one
+/// circle however long their labels are.
+fn item_rects(centre: Pos2, sizes: &[egui::Vec2]) -> Vec<Rect> {
+    let radius = item_radius(sizes);
+    (sizes.iter().enumerate())
+        .map(|(index, &size)| {
+            Rect::from_center_size(centre + direction(index, sizes.len()) * radius, size)
+        })
+        .collect()
 }
 
 /// What an open menu did this frame.
@@ -179,11 +201,16 @@ impl Pie {
                 })
             })
             .collect();
-        // The ring reaches just past the farthest label's corner.
-        let label_rect = |index, size| label_rect(self.centre, index, count, size);
-        let rects: Vec<Rect> = (galleys.iter().enumerate())
-            .map(|(index, g)| label_rect(index, g.size() + egui::vec2(lead, 0.0)))
+        // Each item is its icon and its text side by side, centred on its
+        // point of the circle; the ring reaches just past the farthest
+        // item's corner.
+        let sizes: Vec<_> = (galleys.iter())
+            .map(|g| {
+                let tall = if icons.is_some() { icons::SIZE } else { 0.0 };
+                egui::vec2(lead + g.size().x, g.size().y.max(tall))
+            })
             .collect();
+        let rects = item_rects(self.centre, &sizes);
         let pointer = ctx.input(|i| i.pointer.latest_pos());
         let hovered = pointer.and_then(|p| choice_at(self.centre, p, &rects));
         self.hovered = hovered;
@@ -249,10 +276,12 @@ impl Pie {
                         );
                         icons[index](painter, square, color);
                     }
+                    let top = rect.center().y - galley.size().y / 2.0;
+                    let bottom = top + galley.size().y;
                     let text = rect.left() + lead..=rect.right();
-                    painter.galley(egui::pos2(*text.start(), rect.top()), galley, color);
+                    painter.galley(egui::pos2(*text.start(), top), galley, color);
                     if chosen == Some(index) {
-                        painter.hline(text, rect.bottom() + 1.5, Stroke::new(1.0, color));
+                        painter.hline(text, bottom + 1.5, Stroke::new(1.0, color));
                     }
                 }
                 response
@@ -320,8 +349,7 @@ mod tests {
         }
         // Labels as wide as the longest tool names don't run into each
         // other, and each lies across its own slice.
-        let size = egui::vec2(120.0, 20.0);
-        let rects: Vec<Rect> = (0..7).map(|i| label_rect(C, i, 7, size)).collect();
+        let rects = item_rects(C, &[egui::vec2(120.0, 20.0); 7]);
         for (i, a) in rects.iter().enumerate() {
             // A label is its own choice wherever it reaches.
             assert_eq!(choice_at(C, a.center(), &rects), Some(i), "{i}");
@@ -334,5 +362,65 @@ mod tests {
         let a = -FRAC_PI_2 - 0.51 * width;
         let pos = C + egui::vec2(a.cos(), a.sin()) * 80.0;
         assert_eq!(slice_at(C, pos, 7), Some(6));
+    }
+
+    #[test]
+    fn items_are_centred_evenly_on_one_circle() {
+        // The tool pie's eight items, an icon and its label, about as wide
+        // as in each language: short Japanese, English, longer French.
+        let tall = 20.0;
+        let menus: [&[f32]; 4] = [
+            &[70.0, 66.0, 94.0, 84.0, 106.0, 84.0, 70.0, 66.0],
+            &[66.0, 54.0, 72.0, 78.0, 76.0, 74.0, 66.0, 66.0],
+            &[88.0, 66.0, 76.0, 62.0, 80.0, 78.0, 70.0, 74.0],
+            // Very uneven, and an odd count.
+            &[20.0, 160.0, 40.0, 140.0, 24.0],
+        ];
+        for widths in menus {
+            let count = widths.len();
+            let sizes: Vec<_> = widths.iter().map(|&w| egui::vec2(w, tall)).collect();
+            let rects = item_rects(C, &sizes);
+            let radius = item_radius(&sizes);
+            assert!(radius >= LABEL_RADIUS);
+            for (index, rect) in rects.iter().enumerate() {
+                assert!((rect.size() - sizes[index]).length() < 1e-3);
+                // Its middle on the circle, within a point, on its own
+                // direction: evenly spaced, the first straight up.
+                let middle = rect.center();
+                assert!(
+                    (middle.distance(C) - radius).abs() < 1.0,
+                    "{widths:?} {index}"
+                );
+                let want = index as f32 / count as f32 * TAU - FRAC_PI_2;
+                let got = (middle - C).angle();
+                let off = (got - want + TAU / 2.0).rem_euclid(TAU) - TAU / 2.0;
+                assert!(off.abs() < 1e-3, "{widths:?} {index} {off}");
+                // Pointing at it, or clicking on any of it, chooses it.
+                assert_eq!(slice_at(C, middle, count), Some(index));
+                let corners = [
+                    rect.left_top(),
+                    rect.right_top(),
+                    rect.left_bottom(),
+                    rect.right_bottom(),
+                ];
+                for corner in corners {
+                    assert_eq!(choice_at(C, corner, &rects), Some(index));
+                }
+                // No two items touch, slack included.
+                for other in &rects[index + 1..] {
+                    let near = rect
+                        .expand(LABEL_SLACK)
+                        .intersect(other.expand(LABEL_SLACK));
+                    assert!(
+                        near.width() <= 1e-3 || near.height() <= 1e-3,
+                        "{rect:?} {other:?}"
+                    );
+                }
+            }
+        }
+        // Small items keep the least radius.
+        let small = [egui::vec2(10.0, 10.0); 4];
+        assert_eq!(item_radius(&small), LABEL_RADIUS);
+        assert_eq!(item_radius(&[]), LABEL_RADIUS);
     }
 }
