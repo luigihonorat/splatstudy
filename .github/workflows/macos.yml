@@ -1,0 +1,34 @@
+# Builds SplatStudy.app (Intel and Apple Silicon in one binary) on a Mac
+# runner. Not part of ci.yml while the repository is private, where macOS
+# minutes count ten times: run it by hand from the Actions tab, or push to the
+# macos-app branch. The artifact holds SplatStudy-macos.zip; unzip that one
+# too (it keeps the binary's executable bit, which artifacts drop).
+
+name: macos
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos-app]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: sh scripts/macos-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: splatstudy-macos
+          path: target/macos/SplatStudy-macos.zip
+          compression-level: 0
