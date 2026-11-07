@@ -3,8 +3,9 @@
 //! Clay from splats by depth fusion, the way recent splat-to-mesh methods
 //! (2DGS, Gaussian Opacity Fields, RaDe-GS) do it: the splats are drawn
 //! from many directions around the shape, each view keeps the depth where
-//! its rays have gathered half their opacity (the median depth), and the
-//! views are fused into a truncated signed distance on a grid.
+//! its rays have gathered a set share of their opacity (half: the median
+//! depth; by default a little more), and the views are fused into a
+//! truncated signed distance on a grid.
 //!
 //! Each view trusts its depth over a stretch that grows with how fuzzy
 //! the surface is there (how deep the opacity takes to gather), and less
@@ -77,6 +78,11 @@ const MAX_REACH: f32 = 4.0;
 const AROUND: f32 = 3.0;
 /// Grid nodes added around the splats.
 const PAD: usize = 4;
+/// The views are fused no finer than where this many splats share each
+/// pixel-sized cell of the surface, on average (see [`field`])...
+const DENSE: f32 = 24.0;
+/// ...but never coarser than this many cells across.
+const MIN_FUSED: u32 = 48;
 /// Gaps in the solid up to about twice this many nodes wide are closed.
 const CLOSE: usize = 2;
 /// How much a view that sees through a node counts towards it being
@@ -146,6 +152,15 @@ struct Depths {
 /// by `align`. `level` (0..1) is the opacity a ray gathers before it counts
 /// as having reached the surface; `smoothness` blurs the result that many
 /// more times (see [`Grid::blur`]). `None` if nothing is left.
+///
+/// A capture only samples its surface so finely. Fused at cells smaller
+/// than the splats' spacing, rays slip between them and a fuzzy surface
+/// (hair, a beard, a poorly seen side) comes out as a sponge of holes; a
+/// small crop box at a high resolution asks for just that. So the views
+/// are fused no finer than where [`DENSE`] splats share each pixel-sized
+/// cell, sealed and filled there, and the field is then resampled to
+/// `resolution`: the mesh is as fine as asked, and smooth where the splats
+/// say no more.
 pub fn field(
     splats: &Splats,
     align: &Alignment,
@@ -154,9 +169,8 @@ pub fn field(
     level: f32,
     smoothness: u32,
 ) -> Option<Grid> {
-    let level = level.clamp(0.05, 0.95);
+    let level = level.clamp(*super::THRESHOLDS.start(), *super::THRESHOLDS.end());
     let m = align.matrix();
-    let turn = Mat3::from_mat4(m);
     let kept = |p: Vec3| crop.is_none_or(|c| c.contains(p));
 
     // The region: where the splats inside the crop box are.
@@ -169,6 +183,73 @@ pub fn field(
             max = max.max(w);
         }
     }
+    let mut g = Grid::around(min, max, resolution, PAD, 0.0)?;
+    let inside: Vec<Vec3> = splats
+        .positions
+        .iter()
+        .zip(&splats.colors)
+        .filter(|(p, c)| f32::from(c[3]) / 255.0 > MIN_OPACITY && kept(**p))
+        .map(|(p, _)| m.transform_point3(*p))
+        .collect();
+    let fine = supported(&inside, (min, max), resolution);
+    let mut coarse = fused(splats, align, (min, max), fine, level)?;
+    let truncation = TRUNCATION * coarse.step;
+    // One pass takes out the grain of the splats. Sealed and filled at
+    // the resolution it was fused at, and before the cut, so the cut face
+    // is whole and flat.
+    coarse.blur();
+    settle(&mut coarse, truncation, CLOSE);
+    if coarse.dims == g.dims {
+        g = coarse;
+    } else {
+        for at in 0..g.len() {
+            let [i, j, k] = g.coords(at);
+            g.values[at] = coarse.sample(g.point(i, j, k)).0;
+        }
+    }
+    for _ in 0..smoothness {
+        g.blur();
+    }
+    if let Some(crop) = crop {
+        wall(&mut g, align, crop, truncation);
+    }
+    settle(&mut g, truncation, 0);
+    Some(g)
+}
+
+/// The finest resolution, up to `resolution`, that splats at `centres`
+/// support over the region from `min` to `max`: where [`DENSE`] of them
+/// share each pixel-sized cell they are in, on average. A surface's
+/// splats per cell go with the square of the cell's size.
+fn supported(centres: &[Vec3], (min, max): (Vec3, Vec3), resolution: u32) -> u32 {
+    let longest = (max - min).max_element();
+    let cell = longest / resolution as f32 * PIXEL;
+    let mut keys: Vec<u64> = centres
+        .iter()
+        .filter(|w| w.cmpge(min).all() && w.cmple(max).all())
+        .map(|w| morton(((*w - min) / cell).as_uvec3().min(UVec3::splat(0x1f_ffff))))
+        .collect();
+    let count = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    let density = count as f32 / keys.len().max(1) as f32;
+    let coarser = (DENSE / density).sqrt().max(1.0);
+    ((resolution as f32 / coarser) as u32)
+        .max(MIN_FUSED)
+        .min(resolution)
+}
+
+/// The views fused into a grid over the region from `min` to `max`,
+/// `resolution` cells across. `None` if no splat is left.
+fn fused(
+    splats: &Splats,
+    align: &Alignment,
+    (min, max): (Vec3, Vec3),
+    resolution: u32,
+    level: f32,
+) -> Option<Grid> {
+    let m = align.matrix();
+    let turn = Mat3::from_mat4(m);
     let mut g = Grid::around(min, max, resolution, PAD, 0.0)?;
     let step = g.step;
     let far = g.point(g.dims[0] - 1, g.dims[1] - 1, g.dims[2] - 1);
@@ -289,18 +370,7 @@ pub fn field(
     for (map, view) in maps.iter_mut().zip(&views) {
         weigh(map, &frame, view, &normals, &outer, truncation);
     }
-
     fuse(&mut g, &frame, &views, &maps, truncation);
-    // One pass takes out the grain of the splats; the rest are asked for.
-    for _ in 0..=smoothness {
-        g.blur();
-    }
-    // Sealed and filled before the cut, so the cut face is whole and flat.
-    settle(&mut g, truncation, CLOSE);
-    if let Some(crop) = crop {
-        wall(&mut g, align, crop, truncation);
-        settle(&mut g, truncation, 0);
-    }
     Some(g)
 }
 
@@ -781,7 +851,7 @@ fn weigh(
             let inner = f32::from(outer[s]) * facing > 0.0;
             // A fuzzy surface is trusted over a longer stretch of the
             // ray, and less.
-            let reach = (FUZZ * map.fuzz[p]).clamp(truncation, MAX_REACH * truncation);
+            let reach = (FUZZ * map.fuzz[p].abs()).clamp(truncation, MAX_REACH * truncation);
             map.fuzz[p] = reach;
             let w = square.max(0.05) * truncation / reach;
             weight[p] = if inner { -w } else { w };
@@ -1227,6 +1297,70 @@ mod tests {
             .sum::<f32>()
             / n;
         var.sqrt()
+    }
+
+    #[test]
+    fn faint_splats_at_the_highest_threshold_stay_one_solid_piece() {
+        // Each splat lets most light through: rays through the ball's
+        // edge gather some opacity but not the threshold.
+        let splats = discs(&sphere(6000, Vec3::ZERO, 0.8), 0.03, 70);
+        let how = crate::voxel::FromReference {
+            resolution: 48,
+            threshold: *crate::voxel::THRESHOLDS.end(),
+            ..Default::default()
+        };
+        let mesh = clay_from_reference(&reference(splats), how).unwrap();
+        let (manifold, pieces, genus) = topology(&mesh);
+        assert!(manifold && pieces == 1 && genus == 0);
+        for p in &mesh.positions {
+            assert!((p.length() - 0.8).abs() < 0.06, "{p}");
+        }
+    }
+
+    #[test]
+    fn a_thin_capture_at_a_fine_resolution_has_no_holes() {
+        // A ball under a fuzz of small faint splats, like hair, asked for
+        // at the finest resolution: fused as finely, rays slip between
+        // the splats and the fuzz comes out as a sponge.
+        let mut surface = sphere(5000, Vec3::ZERO, 0.8);
+        for (i, (p, n)) in sphere(40_000, Vec3::ZERO, 1.0).into_iter().enumerate() {
+            let depth = rand_like(p * 3.0 + Vec3::splat(i as f32 * 1e-3));
+            surface.push((p * (0.8 + 0.12 * depth), n));
+        }
+        let mut splats = discs(&surface, 0.012, 230);
+        for c in &mut splats.colors[5000..] {
+            c[3] = 50;
+        }
+        let how = crate::voxel::FromReference {
+            resolution: crate::voxel::MAX_RESOLUTION,
+            ..Default::default()
+        };
+        let mesh = clay_from_reference(&reference(splats), how).unwrap();
+        let (manifold, pieces, genus) = topology(&mesh);
+        assert!(manifold && pieces == 1 && genus == 0, "genus {genus}");
+        // Somewhere in the fuzz, nothing inside the ball.
+        for p in &mesh.positions {
+            assert!((0.76..0.95).contains(&p.length()), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_thinly_sampled_surface_is_fused_coarser() {
+        let (min, max) = (Vec3::splat(-1.0), Vec3::splat(1.0));
+        let centres = |n| -> Vec<Vec3> {
+            sphere(n, Vec3::ZERO, 0.8)
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect()
+        };
+        // Densely sampled for the resolution: as asked.
+        let dense = centres(800_000);
+        assert_eq!(supported(&dense, (min, max), 128), 128);
+        // A quarter as many splats per cell: fused coarser.
+        let thin = supported(&dense, (min, max), 256);
+        assert!((140..=240).contains(&thin), "{thin}");
+        // Never coarser than the floor.
+        assert_eq!(supported(&centres(500), (min, max), 128), MIN_FUSED);
     }
 
     #[test]
