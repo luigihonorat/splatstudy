@@ -366,6 +366,18 @@ pub(super) fn start_sculpt() -> Sculpt {
 }
 
 impl App {
+    /// Whether a stroke, a grab or a mask tap is under way in the sculpt
+    /// view. Undo and redo wait until it ends: undone under an open
+    /// stroke, a level change or a subdivide would swap the clay, and the
+    /// stroke would then close as an undo step of the other level's
+    /// vertices; an ordinary step undone would come partly back.
+    pub(super) fn sculpt_drag_open(&self) -> bool {
+        matches!(
+            self.drags[SCULPT],
+            Some(Drag::Stroke { .. } | Drag::Grab { .. } | Drag::MaskTap { .. })
+        )
+    }
+
     /// Undo, redo, tool and size keys.
     pub(super) fn sculpt_shortcuts(&mut self, ui: &egui::Ui) {
         use egui::Modifiers as M;
@@ -373,9 +385,14 @@ impl App {
         // The timelapse shows the clay as it was: no sculpting until it closes.
         if self.playback.is_none() {
             self.tool_pie_keys(ui);
+            // The keys are taken even mid-stroke, so they don't fall
+            // through to something else, but do nothing until it ends.
+            let busy = self.sculpt_drag_open();
             if pressed(M::COMMAND | M::SHIFT, Key::Z) || pressed(M::COMMAND, Key::Y) {
-                self.sculpt.redo();
-            } else if pressed(M::COMMAND, Key::Z) {
+                if !busy {
+                    self.sculpt.redo();
+                }
+            } else if pressed(M::COMMAND, Key::Z) && !busy {
                 self.sculpt.undo();
             }
             // Before the tools: plain M would take Alt+M too.
@@ -1366,6 +1383,65 @@ mod tests {
         assert!(h.app.sculpt.edit_layer(LayerOp::AddChalk));
         h.frames(1);
         assert_eq!(h.app.sculpt.mesh.vertex(0).layers[..2], [255, 255]);
+    }
+
+    #[test]
+    fn undo_waits_for_the_stroke_under_way_to_end() {
+        // A level up, a stroke, Ctrl+Z with the pen still down, let go,
+        // Ctrl+Z again: the first undo used to take the level back under
+        // the open stroke, which then closed as a step of the finer
+        // level's vertices, and the second undo indexed past the end of
+        // the coarser clay.
+        use super::super::study::tests::Harness;
+        use crate::PointerPhase::{Down, Move, Up};
+        use crate::input::Modifiers;
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let command = Modifiers {
+            command: true,
+            ctrl: !cfg!(target_os = "macos"),
+            ..Default::default()
+        };
+        let (top, count) = h.app.sculpt.levels().unwrap();
+        h.key(Key::D, true);
+        h.frames(2);
+        assert_eq!(h.app.sculpt.levels(), Some((top - 1, count)));
+        h.key(Key::D, false);
+        h.frames(2);
+        assert_eq!(h.app.sculpt.levels(), Some((top, count)));
+        let before = h.app.sculpt.mesh.positions.clone();
+
+        let rect = h.app.view_rects[SCULPT];
+        let from = rect.center() - egui::vec2(60.0, 0.0);
+        h.pointer(Move, from);
+        h.pointer(Down, from);
+        for k in 1..=4 {
+            h.pointer(Move, from + egui::vec2(30.0 * k as f32, 0.0));
+        }
+        assert!(h.app.sculpt_drag_open());
+        h.chord(Key::Z, command);
+        assert_eq!(
+            h.app.sculpt.levels(),
+            Some((top, count)),
+            "undone mid-stroke"
+        );
+        h.pointer(Up, from + egui::vec2(120.0, 0.0));
+        assert!(!h.app.sculpt_drag_open());
+        assert_ne!(
+            h.app.sculpt.mesh.positions, before,
+            "the stroke built nothing"
+        );
+
+        // Once the pen is up, undo takes the stroke back, then the level.
+        h.chord(Key::Z, command);
+        assert_eq!(h.app.sculpt.mesh.positions, before);
+        assert_eq!(h.app.sculpt.levels(), Some((top, count)));
+        h.chord(Key::Z, command);
+        assert_eq!(h.app.sculpt.levels(), Some((top - 1, count)));
+        h.chord(Key::Z, command);
+        h.frames(1);
     }
 
     #[test]

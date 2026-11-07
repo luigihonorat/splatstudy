@@ -56,7 +56,8 @@ impl App {
     fn edit_menu(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         ui.set_min_width(menu::MIN_WIDTH);
-        let live = self.playback.is_none();
+        // Not in the middle of a stroke either (see `sculpt_drag_open`).
+        let live = self.playback.is_none() && !self.sculpt_drag_open();
         if menu::action(ui, live && self.sculpt.can_undo(), tr.undo, &self.keys("Z")) {
             self.sculpt.undo();
         }
