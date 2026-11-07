@@ -477,6 +477,7 @@ mod job {
                 direction: Vec3::ZERO,
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             s.end_stroke();
             s.refresh();

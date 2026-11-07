@@ -287,6 +287,7 @@ mod tests {
                 direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             s.refresh();
         }
@@ -397,6 +398,7 @@ mod tests {
                         direction: Vec3::X,
                         buildup: Default::default(),
                         fill: false,
+                        wipes: false,
                     });
                 }
                 s.refresh();

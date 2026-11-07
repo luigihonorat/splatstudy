@@ -700,6 +700,7 @@ mod tests {
             direction: Vec3::X,
             buildup: Default::default(),
             fill: false,
+            wipes: false,
         }
     }
 

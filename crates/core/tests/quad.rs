@@ -24,6 +24,7 @@ fn strokes(s: &mut Sculpt, clock: f64, at: Vec3) -> f64 {
                 direction: Vec3::Y,
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             s.refresh();
         }

@@ -990,6 +990,7 @@ mod tests {
                     direction: Vec3::X,
                     buildup: Default::default(),
                     fill: false,
+                    wipes: false,
                 });
                 s.refresh();
             }
@@ -1101,6 +1102,7 @@ mod tests {
             direction: Vec3::ZERO,
             buildup: Default::default(),
             fill: false,
+            wipes: false,
         });
         live.end_stroke();
         live.refresh();
@@ -1200,6 +1202,7 @@ mod tests {
                 direction: Vec3::ZERO,
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             live.end_stroke();
             live.refresh();
@@ -1259,6 +1262,7 @@ mod tests {
                 direction: Vec3::X,
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             s.end_stroke();
             s.refresh();
@@ -1352,6 +1356,7 @@ mod tests {
                     direction: Vec3::X,
                     buildup: Default::default(),
                     fill: false,
+                    wipes: false,
                 });
                 if i % 4 == 3 {
                     s.refresh();
@@ -1447,6 +1452,7 @@ mod tests {
                     direction: Vec3::Y,
                     buildup: Default::default(),
                     fill: false,
+                    wipes: false,
                 });
                 s.refresh();
             }
@@ -1763,6 +1769,7 @@ mod tests {
                         direction: Vec3::Y,
                         buildup: Default::default(),
                         fill: false,
+                        wipes: false,
                     });
                     if i % 4 == 3 {
                         s.refresh();
@@ -1822,6 +1829,7 @@ mod tests {
                 direction: Vec3::X,
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             s.end_stroke();
             s.refresh();
@@ -1897,6 +1905,7 @@ mod tests {
                 direction: Vec3::ZERO,
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             resumed.end_stroke();
             resumed.refresh();
@@ -2055,6 +2064,7 @@ mod tests {
                     direction: Vec3::X,
                     buildup: Default::default(),
                     fill: false,
+                    wipes: false,
                 });
                 s.refresh();
             }
