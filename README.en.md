@@ -13,7 +13,7 @@ The screen is split in two: your clay sculpt on the left, the reference on the r
 
 In Japanese art-prep schools, students learn sculpture by modelling clay in front of plaster casts and live models. SplatStudy brings that way of learning to people who cannot attend such a school. It has aids for comparing your sculpt with the reference (linked cameras, silhouette comparison, a plumb line and more), and records the whole session as a timelapse.
 
-> An entry in **Built with Claude: Japan 2026** (November 2 to 8, 2026). All the code was written during the event, with Claude Code.
+> An entry in **Built with Claude: Japan 2026** (November 2 to 8, 2026). All the code was written during the event, with Claude Code. The look follows the author's own site, [thevirtualform.com](https://thevirtualform.com), but none of the site's code is used.
 
 ## Try it
 

@@ -21,7 +21,7 @@ a test.
    its file in `TABLES` in `crates/core/src/ui/fonts.rs`.
 2. **Add the field** to the table's struct with a short doc comment when its
    use isn't obvious, then a value in each of `JA`, `EN` and `FR`.
-   - English and French are lowercase, like the site (luigihonorat.com):
+   - English and French are lowercase, like the site (thevirtualform.com):
      "import reference…", "premiers pas".
    - Japanese uses the app's words: モチーフ (reference), 塑像 (sculpt).
      Full-width punctuation: `：`, `（ ）`, `、`.
