@@ -63,6 +63,7 @@ impl Lang {
 pub struct Tr {
     pub sculpt: &'static str,
     pub reference: &'static str,
+    /// The reference panel's item that opens a file as the reference.
     pub open_reference: &'static str,
     pub drop_hint: &'static str,
     pub tools: &'static str,
@@ -151,7 +152,7 @@ pub struct Tr {
 pub const JA: Tr = Tr {
     sculpt: "塑像",
     reference: "モチーフ",
-    open_reference: "モチーフを開く",
+    open_reference: "モチーフを読み込む",
     drop_hint: "スプラット・3Dスキャン・画像をここにドロップ",
     tools: "ツール",
     clay: "クレイ",
@@ -251,7 +252,7 @@ Alt＋右：拡大",
 pub const EN: Tr = Tr {
     sculpt: "sculpt",
     reference: "reference",
-    open_reference: "open reference",
+    open_reference: "import reference",
     drop_hint: "drop a splat, 3D scan or image here",
     tools: "tools",
     clay: "clay",
@@ -351,7 +352,7 @@ Alt + right: zoom",
 pub const FR: Tr = Tr {
     sculpt: "sculpture",
     reference: "modèle",
-    open_reference: "ouvrir un modèle",
+    open_reference: "importer un modèle",
     drop_hint: "déposez ici un splat, un scan 3D ou une image",
     tools: "outils",
     clay: "argile",
