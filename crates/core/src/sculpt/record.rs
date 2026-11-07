@@ -27,6 +27,11 @@ const MAX_GAP: f64 = 2.0;
 pub enum Event {
     Begin,
     Dab(Dab),
+    /// A symmetric dab from a log made before both sides took the larger
+    /// of their weights: where they overlap, it applies both in full (see
+    /// `Sculpt::summed_dab`). Only read from old logs, so that they replay
+    /// as they were sculpted.
+    SummedDab(Dab),
     Grab {
         centre: Vec3,
         radius: f32,
@@ -254,12 +259,15 @@ impl Entry {
             Event::Begin => {
                 w.u8(tag::BEGIN);
             }
-            Event::Dab(d) => {
-                // Bit 2 came later: older logs don't have it, which reads
-                // back as clay that accumulates.
+            Event::Dab(d) | Event::SummedDab(d) => {
+                // Bits 2 and 3 came later: older logs don't have them,
+                // which reads back as clay that accumulates and symmetric
+                // dabs that add up where they overlap.
+                let larger = matches!(self.event, Event::Dab(_)) && d.symmetry;
                 let flags = u8::from(d.invert)
                     | u8::from(d.symmetry) << 1
-                    | u8::from(d.buildup == Buildup::Layer) << 2;
+                    | u8::from(d.buildup == Buildup::Layer) << 2
+                    | u8::from(larger) << 3;
                 w.u8(tag::DAB)
                     .u8(d.brush as u8)
                     .vec3(d.centre)
@@ -335,10 +343,10 @@ impl Entry {
                     .ok_or_else(|| r.invalid("unknown brush"))?;
                 let (centre, radius, strength) = (r.vec3()?, r.f32()?, r.f32()?);
                 let flags = r.u8()?;
-                if flags > 7 {
+                if flags > 15 {
                     return Err(r.invalid("unknown dab flags"));
                 }
-                Event::Dab(Dab {
+                let dab = Dab {
                     brush,
                     centre,
                     radius,
@@ -351,7 +359,12 @@ impl Entry {
                     } else {
                         Buildup::Accumulate
                     },
-                })
+                };
+                if dab.symmetry && flags & 8 == 0 {
+                    Event::SummedDab(dab)
+                } else {
+                    Event::Dab(dab)
+                }
             }
             tag::GRAB => Event::Grab {
                 centre: r.vec3()?,
@@ -416,20 +429,22 @@ fn falloff_from_byte(byte: u8) -> Option<Falloff> {
 /// anywhere after one, was flat. (Flat used only in "accumulate" mode,
 /// or only with Move, still reads as linear.)
 fn recover_flat(entries: &mut [Entry]) {
+    let layer_dab = |entry: Option<&Entry>| {
+        matches!(
+            entry,
+            Some(Entry {
+                event: Event::Dab(dab) | Event::SummedDab(dab),
+                ..
+            }) if dab.buildup == Buildup::Layer
+        )
+    };
     let mut layered = false;
     for i in 0..entries.len() {
-        match entries[i].event {
-            Event::Dab(dab) if dab.buildup == Buildup::Layer => layered = true,
-            Event::Falloff(Falloff::Linear) => {
-                let before_layer = matches!(
-                    entries.get(i + 1),
-                    Some(Entry { event: Event::Dab(dab), .. }) if dab.buildup == Buildup::Layer
-                );
-                if layered || before_layer {
-                    entries[i].event = Event::Falloff(Falloff::Flat);
-                }
-            }
-            _ => {}
+        layered |= layer_dab(entries.get(i));
+        if entries[i].event == Event::Falloff(Falloff::Linear)
+            && (layered || layer_dab(entries.get(i + 1)))
+        {
+            entries[i].event = Event::Falloff(Falloff::Flat);
         }
     }
 }
@@ -581,6 +596,7 @@ impl Sculpt {
         match event {
             Event::Begin => self.begin_stroke(),
             Event::Dab(dab) => self.dab(dab),
+            Event::SummedDab(dab) => self.summed_dab(dab),
             Event::Grab {
                 centre,
                 radius,
@@ -1085,15 +1101,33 @@ mod tests {
         // brush, centre, radius and strength come before the flags.
         let mut old = bytes(dab);
         let flags = 8 + 1 + 1 + 12 + 4 + 4;
-        assert_eq!(old[flags], 7);
+        assert_eq!(old[flags], 15);
         old[flags] &= 3;
+        // Their symmetric dabs added up where both sides overlap.
         assert_eq!(
             read(&old),
-            Event::Dab(Dab {
+            Event::SummedDab(Dab {
                 buildup: Buildup::Accumulate,
                 ..dab
             })
         );
+        // Those from before the larger weight, with the build-up bit.
+        old[flags] = 7;
+        assert_eq!(read(&old), Event::SummedDab(dab));
+        let summed = Entry {
+            time: 1.0,
+            event: Event::SummedDab(dab),
+        };
+        let mut w = Writer::new();
+        summed.write(&mut w);
+        assert_eq!(w.finish(), old, "saved again as they were");
+        // Without symmetry the bit makes no difference.
+        let single = Dab {
+            symmetry: false,
+            ..dab
+        };
+        assert_eq!(bytes(single)[flags], 5);
+        assert_eq!(read(&bytes(single)), Event::Dab(single));
     }
 
     /// A log of `events`, as bytes.
