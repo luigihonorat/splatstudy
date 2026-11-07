@@ -10,6 +10,7 @@
 //! After changing Japanese text, regenerate the embedded font subset with
 //! `assets/fonts/subset.py`.
 
+pub mod calipers;
 pub mod export;
 pub mod files;
 pub mod help;
@@ -146,6 +147,7 @@ pub struct Tr {
     pub files: &'static files::FilesTr,
     pub video: &'static export::ExportTr,
     pub help: &'static help::HelpTr,
+    pub calipers: &'static calipers::CalipersTr,
 }
 
 pub const JA: Tr = Tr {
@@ -246,6 +248,7 @@ Alt＋右：拡大",
     files: &files::JA,
     video: &export::JA,
     help: &help::JA,
+    calipers: &calipers::JA,
 };
 
 pub const EN: Tr = Tr {
@@ -346,6 +349,7 @@ Alt + right: zoom",
     files: &files::EN,
     video: &export::EN,
     help: &help::EN,
+    calipers: &calipers::EN,
 };
 
 pub const FR: Tr = Tr {
@@ -446,6 +450,7 @@ Alt + droit : zoomer",
     files: &files::FR,
     video: &export::FR,
     help: &help::FR,
+    calipers: &calipers::FR,
 };
 
 #[cfg(test)]
