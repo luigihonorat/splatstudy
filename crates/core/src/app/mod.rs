@@ -48,7 +48,7 @@ use glam::Vec3;
 use panels::Group;
 
 use crate::camera::OrbitCamera;
-use crate::input::{FilePurpose, InputEvent, InputState};
+use crate::input::{FilePurpose, InputEvent, InputState, PointerEvent};
 use crate::navigation::{NavAction, NavStyle};
 use crate::render::clay::{ClayPass, GpuMesh};
 use crate::render::{self, Slot, ViewTarget};
@@ -122,11 +122,13 @@ const PANEL_WIDTH: f32 = 196.0;
 #[derive(Clone, Copy)]
 enum Drag {
     /// Clay or smooth: dabs along the path. `carry` is the distance travelled
-    /// since the last dab.
+    /// since the last dab. `pointer` is the press that started it: only
+    /// that pointer's samples go on with it.
     Stroke {
         last: Pos2,
         pressure: f32,
         carry: f32,
+        pointer: Option<PointerEvent>,
     },
     /// Move: the surface follows the pointer within the view plane.
     Grab {
