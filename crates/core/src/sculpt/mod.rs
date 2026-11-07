@@ -176,6 +176,17 @@ impl Falloff {
             }
         }
     }
+
+    /// How wide the drop from full strength to the rim is, as a share of
+    /// the radius: all of it for a dome, a narrow band for a hard edge.
+    pub fn shoulder(self) -> f32 {
+        match self {
+            Falloff::Smooth | Falloff::Linear | Falloff::Peak => 1.0,
+            Falloff::Flat => 0.5,
+            Falloff::Sharp => 1.0 - SHARP_PLATEAU,
+            Falloff::Hard(hardness) => 1.0 - hard_plateau(hardness),
+        }
+    }
 }
 
 /// How far out, as a share of the radius, a falloff of `hardness` stays at

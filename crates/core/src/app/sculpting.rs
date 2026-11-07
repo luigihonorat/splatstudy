@@ -26,8 +26,12 @@ use crate::sculpt::{
 use crate::ui::{self, i18n::Tr, icons, menu};
 use crate::voxel;
 
-/// Dabs are placed every this fraction of the tool radius along a stroke.
+/// Dabs are placed every this fraction of their radius along a stroke,
+/// or closer for a hard edge (see [`spacing`]).
 const SPACING: f32 = 0.15;
+/// The widest gap between dabs, as a share of the falloff's drop to the
+/// rim: wider, and each dab's edge shows as a step along the stroke.
+const GAP_PER_SHOULDER: f32 = 0.75;
 
 /// Sides of the brush outline drawn on the clay.
 const CURSOR_SEGMENTS: usize = 48;
@@ -41,6 +45,17 @@ const MAX_STABILISER: f32 = 120.0;
 /// Pen pressure scales the brush's strength and its size: its size at the
 /// lightest touch, as a share of its full size.
 const MIN_PRESSURE_SIZE: f32 = 0.2;
+
+/// The brush's size at `pressure`, as a share of its full size.
+fn pressure_size(pressure: f32) -> f32 {
+    MIN_PRESSURE_SIZE + (1.0 - MIN_PRESSURE_SIZE) * pressure.clamp(0.0, 1.0)
+}
+
+/// How far apart a stroke's dabs are, as a share of their radius: closer
+/// for a hard edge, whose drop to the rim must span more than a gap.
+fn spacing(falloff: Falloff) -> f32 {
+    SPACING.min(GAP_PER_SHOULDER * falloff.shoulder())
+}
 
 /// How long the size and strength show by the brush after they change,
 /// in seconds.
@@ -256,9 +271,17 @@ impl Default for ToolSettings {
             tool: Brush::Clay,
             radius: 48.0,
             strength: BRUSHES.map(|(_, _, strength)| strength),
-            hardness: [0.0; 8],
-            buildup: Buildup::Layer,
-            fill: false,
+            // Clay starts with the hardest edge, building up as it passes
+            // again and filling the hollows first; the rest start smooth.
+            hardness: BRUSHES.map(|(brush, _, _)| {
+                if brush == Brush::Clay {
+                    f32::from(MAX_HARDNESS)
+                } else {
+                    0.0
+                }
+            }),
+            buildup: Buildup::Accumulate,
+            fill: true,
             readout: None,
             flash: None,
             // A study from a reference is rarely symmetric: mirroring is
@@ -987,7 +1010,9 @@ impl App {
             return;
         };
         let (to, pressure) = follow(last, last_pressure, to, pressure, self.tool.stabiliser);
-        let spacing = (self.tool.radius * SPACING).max(1.0);
+        // Pressure sizes each dab: spaced for the smaller at either end.
+        let size = self.tool.radius * pressure_size(last_pressure.min(pressure));
+        let spacing = (size * spacing(self.tool.falloff(self.held_tool()))).max(1.0);
         // The way the brush heads, in the view plane; brushes that follow
         // the stroke take its part along the surface.
         let (right, up) = self.cameras[SCULPT].right_up();
@@ -1040,10 +1065,19 @@ impl App {
         let tool = self.held_tool();
         let index = tool_index(tool);
         let pressure = pressure.clamp(0.0, 1.0);
-        let strength = self.tool.strength[index] * pressure;
-        let size = MIN_PRESSURE_SIZE + (1.0 - MIN_PRESSURE_SIZE) * pressure;
+        let falloff = self.tool.falloff(tool);
+        // Closer dabs each lay less, so a stroke builds as much; a stroke
+        // in layers stops at its layer however close they are.
+        let layers = tool == Brush::Clay && self.tool.buildup == Buildup::Layer;
+        let density = if layers {
+            1.0
+        } else {
+            spacing(falloff) / SPACING
+        };
+        let strength = self.tool.strength[index] * pressure * density;
+        let size = pressure_size(pressure);
         let scale = self.cameras[SCULPT].world_per_point(hit.point, rect.height());
-        self.sculpt.set_falloff(self.tool.falloff(tool));
+        self.sculpt.set_falloff(falloff);
         self.sculpt.dab(Dab {
             brush: tool,
             centre: hit.point,
@@ -1593,6 +1627,79 @@ mod tests {
         let tool = ToolSettings::default();
         assert!(!tool.symmetry);
         assert_eq!(tool.tool, Brush::Clay);
+    }
+
+    /// A clay stroke along X over the top of a sphere, dabs spaced for
+    /// `falloff` and as strong as `dab_at` makes them: how much it builds
+    /// along its ridge, and the worst ripple there, both in world units.
+    fn ridge(falloff: Falloff, spacing: f32) -> (f32, f32) {
+        let mut s = Sculpt::new(Mesh::icosphere(7));
+        s.set_falloff(falloff);
+        let (r, step) = (0.15, 0.002);
+        let height = |s: &Sculpt| -> Vec<f32> {
+            (0..=200)
+                .map(|i| {
+                    let x = -0.2 + i as f32 * step;
+                    s.raycast(Vec3::new(x, 0.0, 3.0), -Vec3::Z).unwrap().point.z
+                })
+                .collect()
+        };
+        let before = height(&s);
+        s.begin_stroke();
+        let mut x = -0.35;
+        while x <= 0.35 {
+            let hit = s.raycast(Vec3::new(x, 0.0, 3.0), -Vec3::Z).unwrap();
+            s.dab(Dab {
+                brush: Brush::Clay,
+                centre: hit.point,
+                radius: r,
+                strength: 0.5 * spacing / SPACING,
+                invert: false,
+                symmetry: false,
+                direction: Vec3::X,
+                buildup: Buildup::Accumulate,
+                fill: true,
+            });
+            s.refresh();
+            x += spacing * r;
+        }
+        s.end_stroke();
+        let rise: Vec<f32> = height(&s).iter().zip(&before).map(|(a, b)| a - b).collect();
+        let mean = rise.iter().sum::<f32>() / rise.len() as f32;
+        // Each sample against the average of its neighbours half a gap away.
+        let k = (spacing * r / step / 2.0).round().max(1.0) as usize;
+        let ripple = (k..rise.len() - k)
+            .map(|i| (rise[i] - (rise[i - k] + rise[i + k]) / 2.0).abs())
+            .fold(0.0, f32::max);
+        (mean, ripple)
+    }
+
+    #[test]
+    fn a_hard_edge_lays_a_smooth_ridge_as_high_as_a_soft_spacing_would() {
+        let hardest = Falloff::Hard(MAX_HARDNESS);
+        let (stepped, steps) = ridge(hardest, SPACING);
+        let (smooth, ripple) = ridge(hardest, spacing(hardest));
+        // At the usual spacing each dab leaves a step; closer, none shows,
+        // and the stroke builds as much.
+        assert!(steps > 0.02 * stepped, "{steps} on {stepped}");
+        assert!(ripple < 0.005 * smooth, "{ripple} on {smooth}");
+        assert!(
+            (smooth - stepped).abs() < 0.05 * stepped,
+            "{smooth} vs {stepped}"
+        );
+        // Softer edges keep the usual spacing.
+        for h in [0, 60, 90] {
+            assert_eq!(spacing(Falloff::Hard(h)), SPACING, "{h}");
+        }
+    }
+
+    #[test]
+    fn clay_starts_hard_filling_and_accumulating() {
+        let tool = ToolSettings::default();
+        assert_eq!(tool.falloff(Brush::Clay), Falloff::Hard(MAX_HARDNESS));
+        assert_eq!(tool.buildup, Buildup::Accumulate);
+        assert!(tool.fill);
+        assert_eq!(tool.falloff(Brush::Smooth), Falloff::Hard(0));
     }
 
     #[test]
