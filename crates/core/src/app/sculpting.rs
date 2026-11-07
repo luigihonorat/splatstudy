@@ -921,7 +921,9 @@ impl App {
                     .fill(p.bg)
                     .stroke(Stroke::new(1.0, p.border))
                     .inner_margin(egui::Margin::symmetric(14, 6))
-                    .show(ui, |ui| ui.label(name));
+                    // An area at a centre pivot lays out in almost no width,
+                    // so the name would wrap letter by letter.
+                    .show(ui, |ui| ui.add(egui::Label::new(name).extend()));
             });
         // Each frame while it fades, then once more to take it away.
         let wait = if age < BRUSH_FLASH - BRUSH_FADE {
