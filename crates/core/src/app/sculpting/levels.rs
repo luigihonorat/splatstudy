@@ -112,13 +112,16 @@ impl App {
                 .inner
                 .clicked()
         };
-        // One per line: side by side they overflow the panel in Japanese.
-        if clicked(ui, down, m.level_down) {
-            self.ask_level(false);
-        }
-        if clicked(ui, up, m.level_up) {
-            self.ask_level(true);
-        }
+        // Side by side under the level, so the short words do.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            if clicked(ui, down, m.down) {
+                self.ask_level(false);
+            }
+            if clicked(ui, up, m.up) {
+                self.ask_level(true);
+            }
+        });
         if clicked(ui, up, m.delete_higher) {
             self.delete_levels(true);
         }

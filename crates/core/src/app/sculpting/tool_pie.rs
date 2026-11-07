@@ -52,7 +52,7 @@ impl App {
         match outcome {
             Outcome::Open => {}
             Outcome::Picked(index) => {
-                self.tool.tool = BRUSHES[index].0;
+                self.choose_brush(BRUSHES[index].0);
                 self.tool.pie = None;
             }
             Outcome::Cancelled => self.tool.pie = None,

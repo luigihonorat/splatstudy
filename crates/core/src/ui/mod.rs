@@ -60,8 +60,28 @@ pub fn section(ui: &mut Ui, text: &str) {
 /// and it stays so for the session. `key` names the group in any language.
 /// Returns what `add` returned, while the group is open.
 pub fn group<R>(ui: &mut Ui, key: &str, title: &str, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    group_with(ui, key, title, true, add)
+}
+
+/// A [`group`] that starts closed, for one seldom needed.
+pub fn folded_group<R>(
+    ui: &mut Ui,
+    key: &str,
+    title: &str,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    group_with(ui, key, title, false, add)
+}
+
+fn group_with<R>(
+    ui: &mut Ui,
+    key: &str,
+    title: &str,
+    open_at_first: bool,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
     let id = ui.make_persistent_id(("group", key));
-    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(open_at_first);
     let visuals = ui.visuals().clone();
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());

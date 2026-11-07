@@ -54,6 +54,8 @@ pub const TOOLBAR_BG: Color32 = Color32::from_rgba_premultiplied(19, 19, 19, 242
 pub const TOOL_HOVER: Color32 = hex(0x2A2A2A);
 pub const TOOL_ON: Color32 = VIEW_INK;
 pub const TOOL_OFF: Color32 = hex(0x7A7A7A);
+/// The icon of a switch that is on, on its light square.
+pub const TOOL_INVERTED: Color32 = hex(0x131313);
 
 /// The site's CSS custom properties, one set per mode.
 #[derive(Clone, Copy, Debug)]

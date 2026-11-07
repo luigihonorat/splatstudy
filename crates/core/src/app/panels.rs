@@ -12,8 +12,8 @@
 
 use egui::{Event, Key};
 
-use super::App;
 use super::study::Layout;
+use super::{App, REFERENCE, views};
 use crate::ui::{i18n::Tr, menu};
 
 /// Whether the panels show, and what to put back after Shift+Tab.
@@ -33,6 +33,7 @@ pub(super) enum Group {
     ToolSettings,
     Subdivision,
     Remeshing,
+    QuadRemesh,
     Reference,
     Alignment,
     Crop,
@@ -40,18 +41,23 @@ pub(super) enum Group {
 }
 
 impl Group {
-    pub(super) const ALL: [Group; 7] = [
+    pub(super) const ALL: [Group; 8] = [
         Group::ToolSettings,
         Group::Subdivision,
         Group::Remeshing,
+        Group::QuadRemesh,
         Group::Reference,
         Group::Alignment,
         Group::Crop,
         Group::Credit,
     ];
     /// The sculpt panel's groups, on the left.
-    pub(super) const SCULPT: [Group; 3] =
-        [Group::ToolSettings, Group::Subdivision, Group::Remeshing];
+    pub(super) const SCULPT: [Group; 4] = [
+        Group::ToolSettings,
+        Group::Subdivision,
+        Group::Remeshing,
+        Group::QuadRemesh,
+    ];
     /// The reference panel's groups, on the right.
     pub(super) const REFERENCE: [Group; 4] = [
         Group::Reference,
@@ -66,6 +72,7 @@ impl Group {
             Group::ToolSettings => "tools",
             Group::Subdivision => "subdivision",
             Group::Remeshing => "remeshing",
+            Group::QuadRemesh => "quad",
             Group::Reference => "reference",
             Group::Alignment => "alignment",
             Group::Crop => "crop",
@@ -79,6 +86,7 @@ impl Group {
             Group::ToolSettings => tr.mesh.tool_settings,
             Group::Subdivision => tr.mesh.subdivision,
             Group::Remeshing => tr.mesh.remeshing,
+            Group::QuadRemesh => tr.mesh.quad_remesh,
             Group::Reference => tr.reference_tools,
             Group::Alignment => tr.refs.alignment,
             Group::Crop => tr.refs.crop,
@@ -92,6 +100,8 @@ impl Group {
 struct Before {
     hidden: bool,
     layout: Layout,
+    /// The view shown alone.
+    alone: Layout,
 }
 
 impl Panels {
@@ -136,7 +146,7 @@ impl Panels {
         }
     }
 
-    /// The sculpt view alone, without panels (Shift+Tab).
+    /// One view alone, without panels (Shift+Tab).
     pub(super) fn focused(&self) -> bool {
         self.focus.is_some()
     }
@@ -153,9 +163,10 @@ impl Panels {
         }
     }
 
-    /// Shift+Tab: the sculpt view alone, without panels, or back to what
-    /// there was before, panels and views as they were.
-    pub(super) fn toggle_focus(&mut self, layout: &mut Layout) {
+    /// Shift+Tab: one view alone (`alone`, the sculpt or the reference),
+    /// without panels, or back to what there was before, panels and views
+    /// as they were.
+    pub(super) fn toggle_focus(&mut self, layout: &mut Layout, alone: Layout) {
         match self.focus.take() {
             Some(before) => {
                 *layout = before.layout;
@@ -165,18 +176,19 @@ impl Panels {
                 self.focus = Some(Before {
                     hidden: self.hidden,
                     layout: *layout,
+                    alone,
                 });
                 self.hidden = true;
-                *layout = Layout::Sculpt;
+                *layout = alone;
             }
         }
     }
 
-    /// Other views were chosen (from the menu, or with a scene) while the
-    /// sculpt showed alone: that is the end of it, and the views stay as
+    /// Other views were chosen (from the menu, or with a scene) while one
+    /// view showed alone: that is the end of it, and the views stay as
     /// chosen. The panels stay hidden until Tab.
     pub(super) fn settle(&mut self, layout: Layout) {
-        if layout != Layout::Sculpt {
+        if self.focus.is_some_and(|b| layout != b.alone) {
             self.focus = None;
         }
     }
@@ -216,10 +228,23 @@ impl App {
         let typing = self.ctx.text_edit_focused();
         for shift in take_tab_presses(&mut self.events, typing) {
             if shift {
-                self.panels.toggle_focus(&mut self.study.layout);
+                let alone = self.view_under_pointer();
+                self.panels.toggle_focus(&mut self.study.layout, alone);
             } else {
                 self.panels.toggle(&mut self.study.layout);
             }
+        }
+    }
+
+    /// The view Shift+Tab shows alone: the reference with the pointer
+    /// over it, the sculpt otherwise.
+    fn view_under_pointer(&self) -> Layout {
+        let pointer = self.ctx.input(|i| i.pointer.latest_pos());
+        let reference = self.view_rects[REFERENCE];
+        if views::shown(reference) && pointer.is_some_and(|p| reference.contains(p)) {
+            Layout::Reference
+        } else {
+            Layout::Sculpt
         }
     }
 
@@ -258,7 +283,8 @@ impl App {
         }
         let focused = self.panels.focused();
         if menu::item(ui, st.hide_panels_and_reference, "Shift+Tab", focused).clicked() {
-            self.panels.toggle_focus(&mut self.study.layout);
+            self.panels
+                .toggle_focus(&mut self.study.layout, Layout::Sculpt);
         }
     }
 }
@@ -291,13 +317,26 @@ mod tests {
                 ..Panels::default()
             };
             let mut layout = layout_before;
-            panels.toggle_focus(&mut layout);
+            panels.toggle_focus(&mut layout, Layout::Sculpt);
             assert!(panels.hidden() && panels.focused());
             assert_eq!(layout, Layout::Sculpt);
-            panels.toggle_focus(&mut layout);
+            panels.toggle_focus(&mut layout, Layout::Sculpt);
             assert_eq!((panels.hidden(), layout), (hidden, layout_before));
             assert!(!panels.focused());
         }
+    }
+
+    #[test]
+    fn shift_tab_over_the_reference_shows_it_alone() {
+        let mut panels = Panels::default();
+        let mut layout = Layout::Both;
+        panels.toggle_focus(&mut layout, Layout::Reference);
+        assert_eq!(layout, Layout::Reference);
+        panels.settle(layout);
+        assert!(panels.focused(), "still the reference alone");
+        panels.toggle_focus(&mut layout, Layout::Sculpt);
+        assert_eq!(layout, Layout::Both);
+        assert!(!panels.hidden() && !panels.focused());
     }
 
     #[test]
@@ -307,7 +346,7 @@ mod tests {
             ..Panels::default()
         };
         let mut layout = Layout::Both;
-        panels.toggle_focus(&mut layout);
+        panels.toggle_focus(&mut layout, Layout::Sculpt);
         panels.toggle(&mut layout);
         assert!(!panels.hidden() && !panels.focused());
         assert_eq!(layout, Layout::Both);
@@ -317,15 +356,15 @@ mod tests {
     fn choosing_other_views_ends_the_sculpt_alone() {
         let mut panels = Panels::default();
         let mut layout = Layout::Both;
-        panels.toggle_focus(&mut layout);
+        panels.toggle_focus(&mut layout, Layout::Sculpt);
         panels.settle(layout);
         assert!(panels.focused(), "still the sculpt alone");
         layout = Layout::Reference;
         panels.settle(layout);
         assert!(panels.hidden() && !panels.focused());
         // Shift+Tab now starts again from the views chosen.
-        panels.toggle_focus(&mut layout);
-        panels.toggle_focus(&mut layout);
+        panels.toggle_focus(&mut layout, Layout::Sculpt);
+        panels.toggle_focus(&mut layout, Layout::Sculpt);
         assert_eq!(layout, Layout::Reference);
         assert!(panels.hidden());
     }
@@ -417,14 +456,14 @@ mod tests {
 
         // The preferences keep the choice.
         let saved = h.app.preferences();
-        assert!(saved.ends_with("&hide=tools,subdivision"), "{saved}");
+        assert!(saved.ends_with("&hide=tools,subdivision,quad"), "{saved}");
         h.app.apply_preferences("lang=en");
         assert!(
             !h.app.panels.holds(Group::ToolSettings),
             "no hide key: kept"
         );
         h.app
-            .apply_preferences(&saved.replace("hide=tools,subdivision", "hide="));
+            .apply_preferences(&saved.replace("hide=tools,subdivision,quad", "hide="));
         assert_eq!(h.app.panels.removed_names(), "");
     }
 
@@ -477,7 +516,7 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), Group::ALL.len(), "{rows:?}");
 
-        click(&mut h, rows[5].center());
+        click(&mut h, rows[6].center());
         assert!(!h.app.panels.holds(Group::Crop));
         assert!(egui::Popup::is_any_open(&h.app.ctx), "still open");
         click(&mut h, rows[0].center());

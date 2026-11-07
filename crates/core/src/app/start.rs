@@ -371,7 +371,8 @@ impl App {
                 // brings them back with the panels.
                 if !self.panels.focused() {
                     self.study.layout = Layout::Both;
-                    self.panels.toggle_focus(&mut self.study.layout);
+                    self.panels
+                        .toggle_focus(&mut self.study.layout, Layout::Sculpt);
                 }
             } else if !self.panels.hidden() {
                 self.toggle_panels();
