@@ -97,6 +97,10 @@ impl App {
                 }
                 rows.extend([
                     (tr.mesh.tool_pie, TOOL_PIE_KEY.name().to_owned()),
+                    (
+                        tr.mesh.quick_settings,
+                        format!("Shift+{}", TOOL_PIE_KEY.name()),
+                    ),
                     (tr.invert, self.nav.invert_key().to_owned()),
                     (tr.size, "[  ]".to_owned()),
                     (tr.strength, "Shift+[  ]".to_owned()),

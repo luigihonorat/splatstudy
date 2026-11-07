@@ -3,6 +3,7 @@
 //! Sculpting: the tools, strokes on the clay and the sculpt panel.
 
 mod levels;
+mod quick_settings;
 mod tool_pie;
 
 use std::sync::Arc;
@@ -60,6 +61,11 @@ fn spacing(falloff: Falloff) -> f32 {
 /// How long the size and strength show by the brush after they change,
 /// in seconds.
 const READOUT: f64 = 1.2;
+
+/// The brush's least and greatest size: its radius on the screen, in
+/// points.
+const MIN_SIZE: f32 = 4.0;
+const MAX_SIZE: f32 = 400.0;
 
 /// How long a newly chosen brush's name shows at the top of the sculpt
 /// view, and the last part of it, in which it fades out, in seconds.
@@ -240,6 +246,8 @@ pub(super) struct ToolSettings {
     pending: Option<(Pending, f64)>,
     /// The tool pie menu, while it is open.
     pie: Option<crate::ui::pie::Pie>,
+    /// The size and strength at the pointer (Shift + Space), while open.
+    quick: Option<quick_settings::QuickSettings>,
 }
 
 impl ToolSettings {
@@ -293,6 +301,7 @@ impl Default for ToolSettings {
             quads: quad::DEFAULT_QUADS as f32,
             pending: None,
             pie: None,
+            quick: None,
         }
     }
 }
@@ -505,10 +514,10 @@ impl App {
         }
         let radius = self.tool.radius;
         if pressed(M::NONE, Key::OpenBracket) {
-            self.tool.radius = (self.tool.radius / 1.2).max(4.0);
+            self.tool.radius = (self.tool.radius / 1.2).max(MIN_SIZE);
         }
         if pressed(M::NONE, Key::CloseBracket) {
-            self.tool.radius = (self.tool.radius * 1.2).min(400.0);
+            self.tool.radius = (self.tool.radius * 1.2).min(MAX_SIZE);
         }
         if self.tool.radius != radius || self.tool.strength[index] != strength {
             self.tool.readout = Some(self.now);
@@ -843,18 +852,7 @@ impl App {
         let tr = self.lang.tr();
         let tool = self.tool.tool;
         let index = tool_index(tool);
-        let size = ui::slider(ui, tr.size, &mut self.tool.radius, 4.0..=400.0, |v| {
-            format!("{v:.0}")
-        });
-        let strength = &mut self.tool.strength[index];
-        let strength = ui::slider(ui, tr.strength, strength, 0.0..=1.0, |v| {
-            format!("{:.0}%", v * 100.0)
-        });
-        if size.changed() || strength.changed() {
-            self.tool.readout = Some(self.now);
-            // The brush may have been drawn already this frame.
-            ui.ctx().request_repaint();
-        }
+        self.size_and_strength(ui);
         let off = tr.mesh.off;
         let stabiliser = &mut self.tool.stabiliser;
         ui::slider(
@@ -891,6 +889,30 @@ impl App {
         falloff_curve(ui, self.tool.falloff(tool));
         ui.add_space(10.0);
         switch(ui, tr, &mut self.tool.symmetry, tr.mesh.symmetry_x);
+    }
+
+    /// The current tool's size and strength sliders, in the panel and at
+    /// the pointer (Shift + Space). A change shows both by the brush for a
+    /// moment.
+    fn size_and_strength(&mut self, ui: &mut egui::Ui) {
+        let tr = self.lang.tr();
+        let index = tool_index(self.tool.tool);
+        let size = ui::slider(
+            ui,
+            tr.size,
+            &mut self.tool.radius,
+            MIN_SIZE..=MAX_SIZE,
+            |v| format!("{v:.0}"),
+        );
+        let strength = &mut self.tool.strength[index];
+        let strength = ui::slider(ui, tr.strength, strength, 0.0..=1.0, |v| {
+            format!("{:.0}%", v * 100.0)
+        });
+        if size.changed() || strength.changed() {
+            self.tool.readout = Some(self.now);
+            // The brush may have been drawn already this frame.
+            ui.ctx().request_repaint();
+        }
     }
 
     /// The voxel remesh, its button over its resolution.
@@ -1122,10 +1144,13 @@ impl App {
 
     /// The tool a stroke uses with the keys held now: in ZBrush style Ctrl
     /// masks, whatever the tool (and Ctrl + Alt unmasks), and Ctrl + Shift
-    /// blurs the mask; Shift smooths.
+    /// blurs the mask; Shift smooths. Not while the size and strength are
+    /// open at the pointer: there Shift is part of their key.
     fn held_tool(&self) -> Brush {
         let (m, shift) = self.ctx.input(|i| (i.modifiers.into(), i.modifiers.shift));
-        if self.nav.masks(m) {
+        if self.tool.quick.is_some() {
+            self.tool.tool
+        } else if self.nav.masks(m) {
             if shift { Brush::BlurMask } else { Brush::Mask }
         } else if shift {
             Brush::Smooth
@@ -1192,7 +1217,7 @@ impl App {
             return;
         };
         if self.playback.is_some()
-            || self.pie_open()
+            || self.popup_open()
             || self.flyout.is_some()
             || matches!(self.drags[SCULPT], Some(Drag::Navigate { .. }))
         {

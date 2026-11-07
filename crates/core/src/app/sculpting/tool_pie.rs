@@ -15,8 +15,12 @@ pub(in crate::app) const TOOL_PIE_KEY: Key = Key::Space;
 impl App {
     /// Opens the tool pie on its key over the sculpt view, and picks or
     /// closes it on the key's release or Escape. Before the other
-    /// shortcuts, so Escape closes the pie and nothing else.
+    /// shortcuts, so Escape closes the pie and nothing else. With Shift,
+    /// the key opens the size and strength instead (see `quick_settings`).
     pub(super) fn tool_pie_keys(&mut self, ui: &egui::Ui) {
+        if self.quick_settings_keys(ui) {
+            return;
+        }
         match self.tool.pie {
             Some(pie) => self.tool_pie_outcome(pie.keys(ui)),
             // Not in the middle of a stroke or a turn of the view.
@@ -59,8 +63,15 @@ impl App {
         }
     }
 
-    /// Whether a pie menu is open: no stroke or view drag may start.
+    /// Whether the tool pie is open.
+    #[cfg(test)]
     pub(in crate::app) fn pie_open(&self) -> bool {
         self.tool.pie.is_some()
+    }
+
+    /// Whether the tool pie or the size and strength at the pointer are
+    /// open: no stroke or view drag may start.
+    pub(in crate::app) fn popup_open(&self) -> bool {
+        self.tool.pie.is_some() || self.tool.quick.is_some()
     }
 }

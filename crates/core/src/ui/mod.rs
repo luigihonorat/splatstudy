@@ -131,6 +131,11 @@ fn group_with<R>(
     inner
 }
 
+/// A slider's height, in points: its label line, then its track.
+pub const SLIDER_HEIGHT: f32 = 34.0;
+/// How far its track lies above its bottom edge, in points.
+pub const SLIDER_TRACK_INSET: f32 = 6.0;
+
 /// A slider in the site's style: label and value on one line, a 1px track
 /// underneath, filled in the text colour up to a small round handle.
 pub fn slider(
@@ -182,7 +187,7 @@ fn slider_with(
     let (lo, hi) = (*range.start(), *range.end());
     let width = ui.available_width();
     let (rect, mut response) =
-        ui.allocate_exact_size(egui::vec2(width, 34.0), Sense::click_and_drag());
+        ui.allocate_exact_size(egui::vec2(width, SLIDER_HEIGHT), Sense::click_and_drag());
     let font = fonts::regular(13.0);
     let shown = show(*value);
     // Where the number is, when it can be typed.
@@ -308,7 +313,7 @@ fn slider_with(
             d.remove::<String>(typing_id);
         }
     });
-    let y = rect.bottom() - 6.0;
+    let y = rect.bottom() - SLIDER_TRACK_INSET;
     let x = rect.left() + ((*value - lo) / (hi - lo)).clamp(0.0, 1.0) * rect.width();
     painter.hline(rect.x_range(), y, Stroke::new(1.0, line));
     painter.hline(rect.left()..=x, y, Stroke::new(1.0, text));

@@ -477,7 +477,7 @@ impl App {
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let free = self.calipers.drag.is_none()
             && self.drags.iter().all(Option::is_none)
-            && !self.pie_open()
+            && !self.popup_open()
             && self.flyout.is_none();
         let toolbars = self.toolbar_areas(rects);
         self.calipers.hover = None;
