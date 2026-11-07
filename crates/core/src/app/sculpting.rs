@@ -92,6 +92,7 @@ pub(super) fn brush_name(tr: &Tr, brush: Brush) -> &'static str {
         Brush::Crease => tr.crease,
         Brush::Pinch => tr.pinch,
         Brush::Mask => tr.mesh.mask,
+        Brush::BlurMask => tr.mesh.blur_mask,
     }
 }
 
@@ -107,6 +108,7 @@ pub(super) fn brush_icon(brush: Brush) -> fn(&egui::Painter, Rect, egui::Color32
         Brush::Crease => icons::crease_tool,
         Brush::Pinch => icons::pinch_tool,
         Brush::Mask => icons::mask_tool,
+        Brush::BlurMask => icons::blur_mask_tool,
     }
 }
 
@@ -355,9 +357,15 @@ fn walk(
     length - (along - spacing)
 }
 
-/// `Brush::ALL` lists the brushes in declaration order.
+/// Where `tool`'s settings are kept: `Brush::ALL` lists the brushes in
+/// declaration order. The mask blur, held with Ctrl + Shift, has none of
+/// its own: Shift smooths, and it smooths the mask with the Smooth
+/// brush's strength and falloff.
 fn tool_index(tool: Brush) -> usize {
-    tool as usize
+    match tool {
+        Brush::BlurMask => Brush::Smooth as usize,
+        tool => tool as usize,
+    }
 }
 
 /// The clay every new scene starts from: a sphere with the topology of a
@@ -1011,11 +1019,12 @@ impl App {
     }
 
     /// The tool a stroke uses with the keys held now: in ZBrush style Ctrl
-    /// masks, whatever the tool (and Ctrl + Alt unmasks); Shift smooths.
+    /// masks, whatever the tool (and Ctrl + Alt unmasks), and Ctrl + Shift
+    /// blurs the mask; Shift smooths.
     fn held_tool(&self) -> Brush {
         let (m, shift) = self.ctx.input(|i| (i.modifiers.into(), i.modifiers.shift));
         if self.nav.masks(m) {
-            Brush::Mask
+            if shift { Brush::BlurMask } else { Brush::Mask }
         } else if shift {
             Brush::Smooth
         } else {
@@ -1082,7 +1091,10 @@ impl App {
         let held = self.held_tool();
         let falloff = self.tool.falloff[tool_index(held)];
         let m = ui.input(|i| i.modifiers.into());
-        let dashed = held != Brush::Mask && (self.nav.inverts(m) || self.erasing());
+        // Not for the mask tools: the blur has no opposite action, and the
+        // mask's isn't dashed either.
+        let dashed = !matches!(held, Brush::Mask | Brush::BlurMask)
+            && (self.nav.inverts(m) || self.erasing());
         // Strokes work in the rendered view's points; the mirror view shows
         // it flipped, and `view_pos` maps either way.
         let pointer = self.view_pos(rect, screen);
@@ -1411,6 +1423,62 @@ mod tests {
         held(&mut h, false, false);
         h.drag(rect.center(), rect.center() + egui::vec2(60.0, 0.0));
         assert_ne!(h.app.sculpt.mesh.positions, before);
+    }
+
+    #[test]
+    fn ctrl_shift_blurs_the_mask_in_zbrush_style_only() {
+        use super::super::study::tests::Harness;
+        use crate::input::Modifiers;
+        use crate::navigation::NavStyle;
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.frames(1);
+        let held = |h: &mut Harness, ctrl: bool, shift: bool| {
+            h.app.push_event(crate::InputEvent::Modifiers(Modifiers {
+                ctrl: ctrl && !cfg!(target_os = "macos"),
+                command: ctrl,
+                shift,
+                ..Default::default()
+            }));
+            h.frames(1);
+        };
+        let rect = h.app.view_rects[SCULPT];
+        let tool = h.app.tool.tool;
+        let before = h.app.sculpt.mesh.positions.clone();
+        // A mask with a hard edge, painted with Ctrl.
+        held(&mut h, true, false);
+        h.drag(rect.center(), rect.center() + egui::vec2(60.0, 0.0));
+        let painted = h.app.sculpt.mesh.layers.clone();
+        assert!(!painted.mask.is_empty());
+
+        // Ctrl + Shift: the blur, its icon by the brush, the tool in hand
+        // kept.
+        held(&mut h, true, true);
+        assert_eq!(h.app.held_tool(), Brush::BlurMask);
+        h.drag(
+            rect.center() + egui::vec2(0.0, 20.0),
+            rect.center() + egui::vec2(60.0, 20.0),
+        );
+        let blurred = h.app.sculpt.mesh.layers.clone();
+        assert_ne!(blurred, painted, "the mask didn't change");
+        assert_eq!(h.app.sculpt.mesh.positions, before, "the clay moved");
+        assert_eq!(h.app.tool.tool, tool);
+        let blurs = h.app.sculpt.log().iter().filter(
+            |e| matches!(e.event, crate::sculpt::Event::Dab(d) if d.brush == Brush::BlurMask),
+        );
+        assert!(blurs.count() > 0);
+        // One undo step.
+        h.app.sculpt.undo();
+        assert_eq!(h.app.sculpt.mesh.layers, painted);
+
+        // Blender and Maya styles have no mask key: Shift still smooths.
+        for style in [NavStyle::Blender, NavStyle::Maya] {
+            h.app.nav = style;
+            held(&mut h, true, true);
+            assert_eq!(h.app.held_tool(), Brush::Smooth, "{style:?}");
+        }
     }
 
     #[test]

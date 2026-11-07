@@ -184,6 +184,7 @@ Alt＋右：移動
 Ctrl＋右：拡大
 粘土の上で Alt：逆の動き
 粘土の上で Ctrl：マスクを塗る（Alt も押すと消す）
+粘土の上で Ctrl＋Shift：マスクをぼかす
 Ctrl＋背景をクリック：マスクを反転
 Ctrl＋背景をドラッグ：マスクを消す",
     hint_blender: "中ボタン：回転
@@ -283,6 +284,7 @@ Alt + right: pan
 Ctrl + right: zoom
 Alt on the clay: opposite action
 Ctrl on the clay: paint the mask (with Alt: take it away)
+Ctrl + Shift on the clay: blur the mask
 Ctrl + click the background: invert the mask
 Ctrl + drag the background: clear the mask",
     hint_blender: "middle: turn
@@ -382,6 +384,7 @@ Alt + droit : déplacer
 Ctrl + droit : zoomer
 Alt sur l'argile : action inverse
 Ctrl sur l'argile : peindre le masque (avec Alt : l'enlever)
+Ctrl + Maj sur l'argile : flouter le masque
 Ctrl + clic sur le fond : inverser le masque
 Ctrl + glisser le fond : effacer le masque",
     hint_blender: "milieu : tourner

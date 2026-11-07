@@ -102,6 +102,8 @@ fn tool_id(brush: Brush) -> &'static str {
         Brush::Crease => "crease",
         Brush::Pinch => "pinch",
         Brush::Mask => "mask",
+        // Held with keys, never chosen: `tool=` looks in `Brush::ALL` only.
+        Brush::BlurMask => "blur-mask",
     }
 }
 
