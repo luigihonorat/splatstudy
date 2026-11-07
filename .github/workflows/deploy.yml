@@ -55,6 +55,11 @@ jobs:
           install -m 700 -d ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          rsync -rlz --delete --chmod=D755,F644 \
-            -e "ssh -i ~/.ssh/deploy -p ${PORT:-22}" \
-            dist/ "${USER}@${HOST}:${DEST}/"
+          # -t lets unchanged files (the 65 MB of casts) be skipped and keep
+          # their ETag. Changed files are renamed into place at the end, and
+          # index.html goes last, so it never names a ?v= build that is not
+          # there yet (those URLs are cached as immutable for a year).
+          SSH="ssh -i ~/.ssh/deploy -p ${PORT:-22}"
+          rsync -rltz --delay-updates --delete-after --chmod=D755,F644 \
+            --exclude=/index.html -e "$SSH" dist/ "${USER}@${HOST}:${DEST}/"
+          rsync -tz --chmod=F644 -e "$SSH" dist/index.html "${USER}@${HOST}:${DEST}/"
