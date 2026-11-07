@@ -1,21 +1,22 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! The brush's size and strength at the pointer: hold Shift + Space over
-//! the sculpt view and the panel's two sliders open where the pointer is,
-//! the pointer on the size slider's handle. They stay while Space is held
-//! (Shift may be let go), as the tool pie does; letting go of Space,
-//! Escape or a press outside them closes them.
+//! The brush's size and strength at the pointer: hold Space over the
+//! sculpt view and the panel's two sliders open where the pointer is, the
+//! pointer on the size slider's handle. They stay while Space is held, as
+//! the tool pie does; letting go of Space, Escape or a press outside them
+//! closes them.
 //!
-//! Either key may come first. Shift then Space opens them on Space's
-//! press (the pie opens only on a Space with no modifiers). Space then
-//! Shift opens the pie first, and the settings take its place as soon as
-//! Shift comes down. While they are open no stroke or view drag starts,
-//! and Shift doesn't smooth.
+//! Shift + Space is the tool pie's, whichever key comes first: Shift then
+//! Space opens the pie (these open only on a Space with no modifiers);
+//! Space then Shift opens these first, and the pie takes their place as
+//! soon as Shift comes down. While they are open no stroke or view drag
+//! starts.
 
 use egui::{Event, Key, Order, Pos2, Rect, Sense, Stroke, UiBuilder, vec2};
 
 use super::{MAX_SIZE, MIN_SIZE, TOOL_PIE_KEY};
 use crate::app::{App, SCULPT};
+use crate::ui::pie::Pie;
 use crate::ui::{SLIDER_HEIGHT, SLIDER_TRACK_INSET};
 
 /// The sliders' width, in points.
@@ -61,13 +62,21 @@ pub(in crate::app) struct QuickSettings {
 }
 
 impl App {
-    /// The settings' keys, before the tool pie's. Opens them on Shift +
-    /// Space over the sculpt view, or in place of the pie when Shift joins
-    /// its Space; closes them on Space's release or Escape. Takes Space's
+    /// The settings' keys, before the tool pie's. Opens them on Space over
+    /// the sculpt view; closes them on Space's release or Escape, or gives
+    /// their place to the pie when Shift joins their Space. Takes Space's
     /// events while they are open. True if they were open this frame: the
     /// pie then leaves the keys alone.
     pub(super) fn quick_settings_keys(&mut self, ui: &egui::Ui) -> bool {
-        if self.tool.quick.is_some() {
+        if let Some(quick) = self.tool.quick {
+            // Shift joins their Space: the pie takes their place.
+            let (shift, pointer) = ui.input(|i| (i.modifiers.shift_only(), i.pointer.latest_pos()));
+            if shift && ui.input(|i| i.key_down(TOOL_PIE_KEY)) {
+                self.tool.quick = None;
+                self.tool.pie = Some(Pie::at(pointer.unwrap_or(quick.at), TOOL_PIE_KEY));
+                self.flyout = None;
+                return true;
+            }
             let open = ui.input_mut(|i| {
                 let escape = i.consume_key(egui::Modifiers::NONE, Key::Escape);
                 let released = i.events.iter().any(
@@ -84,14 +93,7 @@ impl App {
             }
             return true;
         }
-        // Shift joins the pie's Space: the settings take its place.
-        if let Some(pie) = self.tool.pie {
-            let (shift, pointer) = ui.input(|i| (i.modifiers.shift_only(), i.pointer.latest_pos()));
-            if shift {
-                self.tool.pie = None;
-                self.open_quick_settings(pointer.unwrap_or(pie.centre), ui);
-                return true;
-            }
+        if self.tool.pie.is_some() {
             return false;
         }
         // Not in the middle of a stroke or a turn of the view.
@@ -103,7 +105,7 @@ impl App {
             let at = i.pointer.latest_pos().filter(|p| within.contains(*p))?;
             let press = i.events.iter().position(|e| {
                 matches!(e, Event::Key { key, pressed: true, repeat: false, modifiers, .. }
-                    if *key == TOOL_PIE_KEY && modifiers.shift_only())
+                    if *key == TOOL_PIE_KEY && modifiers.is_none())
             })?;
             // Its repeats while held, too: a focused button would take
             // Space as a click.
@@ -255,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_space_opens_size_and_strength_at_the_pointer_in_either_order() {
+    fn space_opens_size_and_strength_at_the_pointer_and_shift_space_the_pie() {
         let Some(mut h) = Harness::new() else {
             eprintln!("no GPU adapter; skipping app test");
             return;
@@ -266,10 +268,8 @@ mod tests {
         let radius = h.app.tool.radius;
         h.pointer(PointerPhase::Move, centre);
 
-        // Shift, then Space: the settings, not the pie, the size's
-        // handle under the pointer.
-        modifiers(&mut h, true);
-        assert_eq!(h.app.held_tool(), Brush::Smooth, "Shift alone smooths");
+        // Space: the settings, not the pie, the size's handle under the
+        // pointer.
         space(&mut h, true);
         let quick = h.app.tool.quick.expect("open");
         assert!(!h.app.pie_open());
@@ -277,7 +277,6 @@ mod tests {
         assert_eq!(quick.at, centre);
         let t = (radius - MIN_SIZE) / (MAX_SIZE - MIN_SIZE);
         assert!((handle(quick.panel, t) - centre).length() < 1e-3);
-        assert_eq!(h.app.held_tool(), tool, "Shift doesn't smooth while open");
         // Its first frame lays it out.
         h.frames(1);
 
@@ -296,50 +295,46 @@ mod tests {
         assert_eq!(h.app.tool.radius, grown);
         assert_eq!(strokes(&h), 0);
 
-        // A press outside closes it, and sculpts nothing.
+        // A press outside closes it, and sculpts nothing; Space still held
+        // doesn't open it again without a new press.
         let outside = egui::pos2(quick.panel.center().x, quick.panel.bottom() + 80.0);
         assert!(rect.contains(outside));
         h.drag(outside, outside + vec2(40.0, 0.0));
         assert!(!h.app.popup_open());
         assert_eq!(strokes(&h), 0);
-        // Space still held, Shift let go: it stays closed, and the pie
-        // doesn't open without a new press.
-        modifiers(&mut h, false);
+        h.frames(1);
         assert!(!h.app.popup_open());
         space(&mut h, false);
 
-        // Space, then Shift: the pie first, then the settings in its place.
+        // Shift, then Space: the pie.
         h.pointer(PointerPhase::Move, centre);
-        space(&mut h, true);
-        assert!(h.app.pie_open());
         modifiers(&mut h, true);
-        assert!(!h.app.pie_open());
-        assert!(h.app.tool.quick.is_some());
-        // Letting go of Shift keeps it; letting go of Space closes it.
-        modifiers(&mut h, false);
-        assert!(h.app.tool.quick.is_some());
-        space(&mut h, false);
-        assert!(!h.app.popup_open());
-        assert_eq!(h.app.tool.tool, tool, "no tool picked");
-
-        // Escape closes it too.
-        modifiers(&mut h, true);
-        space(&mut h, true);
-        assert!(h.app.tool.quick.is_some());
-        h.key(Key::Escape, true);
-        assert!(!h.app.popup_open());
-        // (The harness lets go of the keys after a chord.)
-        modifiers(&mut h, true);
-        assert!(!h.app.popup_open());
-        space(&mut h, false);
-        assert_eq!(h.app.held_tool(), Brush::Smooth, "Shift smooths again");
-        modifiers(&mut h, false);
-
-        // Plain Space still opens the pie.
+        assert_eq!(h.app.held_tool(), Brush::Smooth, "Shift alone smooths");
         space(&mut h, true);
         assert!(h.app.pie_open() && h.app.tool.quick.is_none());
+        modifiers(&mut h, false);
         space(&mut h, false);
         assert!(!h.app.popup_open());
+        assert_eq!(h.app.tool.tool, tool, "no tool picked in its centre");
+
+        // Space, then Shift: the settings first, then the pie in their
+        // place, which letting go of Space closes.
+        space(&mut h, true);
+        assert!(h.app.tool.quick.is_some());
+        modifiers(&mut h, true);
+        assert!(h.app.pie_open() && h.app.tool.quick.is_none());
+        modifiers(&mut h, false);
+        assert!(h.app.pie_open(), "Shift may be let go");
+        space(&mut h, false);
+        assert!(!h.app.popup_open());
+        assert_eq!(h.app.tool.tool, tool);
+
+        // Escape closes the settings too.
+        space(&mut h, true);
+        assert!(h.app.tool.quick.is_some());
+        h.key(Key::Escape, false);
+        assert!(!h.app.popup_open());
+        space(&mut h, false);
 
         // Closed, the same drag sculpts.
         h.drag(centre, centre + vec2(40.0, 0.0));

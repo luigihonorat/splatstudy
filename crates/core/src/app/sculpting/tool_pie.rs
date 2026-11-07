@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! The tools in a pie menu: hold Space over the sculpt view, point at a
-//! tool and let go (or click it).
+//! The tools in a pie menu: hold Shift + Space over the sculpt view,
+//! point at a tool and let go of Space (or click it).
 
 use egui::Key;
 
@@ -9,14 +9,15 @@ use super::{BRUSHES, brush_icon, brush_name};
 use crate::app::{App, SCULPT};
 use crate::ui::pie::{Outcome, Pie};
 
-/// The key held for the tool pie.
+/// The key held, with Shift, for the tool pie; alone it holds the size
+/// and strength at the pointer (see `quick_settings`).
 pub(in crate::app) const TOOL_PIE_KEY: Key = Key::Space;
 
 impl App {
-    /// Opens the tool pie on its key over the sculpt view, and picks or
-    /// closes it on the key's release or Escape. Before the other
-    /// shortcuts, so Escape closes the pie and nothing else. With Shift,
-    /// the key opens the size and strength instead (see `quick_settings`).
+    /// Opens the tool pie on Shift + its key over the sculpt view, and
+    /// picks or closes it on the key's release or Escape. Before the other
+    /// shortcuts, so Escape closes the pie and nothing else. The key alone
+    /// opens the size and strength instead (see `quick_settings`).
     pub(super) fn tool_pie_keys(&mut self, ui: &egui::Ui) {
         if self.quick_settings_keys(ui) {
             return;
@@ -25,7 +26,8 @@ impl App {
             Some(pie) => self.tool_pie_outcome(pie.keys(ui)),
             // Not in the middle of a stroke or a turn of the view.
             None if self.drags[SCULPT].is_none() && self.playback.is_none() => {
-                self.tool.pie = Pie::open(ui, TOOL_PIE_KEY, self.view_rects[SCULPT]);
+                let shift = egui::Modifiers::SHIFT;
+                self.tool.pie = Pie::open(ui, TOOL_PIE_KEY, shift, self.view_rects[SCULPT]);
                 // The pie takes the place of an open flyout.
                 if self.tool.pie.is_some() {
                     self.flyout = None;

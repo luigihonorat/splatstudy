@@ -125,12 +125,12 @@ impl Pie {
     /// repeated) with no modifiers while the pointer is in `within`,
     /// taking the press so that nothing else sees it (a focused button
     /// would take Space as a click).
-    pub fn open(ui: &egui::Ui, key: Key, within: Rect) -> Option<Pie> {
+    pub fn open(ui: &egui::Ui, key: Key, with: egui::Modifiers, within: Rect) -> Option<Pie> {
         ui.input_mut(|i| {
             let centre = i.pointer.latest_pos().filter(|p| within.contains(*p))?;
             let at = i.events.iter().position(|e| {
                 matches!(e, Event::Key { key: k, pressed: true, repeat: false, modifiers, .. }
-                    if *k == key && modifiers.is_none())
+                    if *k == key && modifiers.matches_exact(with))
             })?;
             // Its repeats while held, too.
             i.events.remove(at);
@@ -142,6 +142,16 @@ impl Pie {
                 hovered: None,
             })
         })
+    }
+
+    /// The menu opened round `centre` with `key` already held, as when
+    /// it takes the place of another menu on the same key.
+    pub fn at(centre: Pos2, key: Key) -> Pie {
+        Pie {
+            centre,
+            key,
+            hovered: None,
+        }
     }
 
     /// The keys: letting go of the menu's key picks the choice the menu
