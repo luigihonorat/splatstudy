@@ -93,7 +93,9 @@ pub enum Request {
     /// Write a file into a picked folder (desktop).
     WriteFile { path: String, bytes: Vec<u8> },
     /// Fetch a file shipped with the web build, such as a sample, by its
-    /// path next to the page. It comes back as [`InputEvent::File`].
+    /// path next to the page (the desktop app downloads the gallery's from
+    /// the web app). It comes back as [`InputEvent::File`], empty if it
+    /// couldn't be fetched.
     Fetch { url: String, purpose: FilePurpose },
 }
 
