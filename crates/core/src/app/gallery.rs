@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, Vec2};
 
-use super::{App, Request, WEB};
+use super::{App, REFERENCE, Request, WEB};
 use crate::input::FilePurpose;
 use crate::reference::load::load_png;
 use crate::reference::samples::{SAMPLES, Sample};
@@ -178,23 +178,22 @@ impl App {
             return;
         }
         let text = self.lang.tr().refs.gallery_link;
+        let inks = self.view_inks(REFERENCE);
         let clicked = egui::Area::new(egui::Id::unique("gallery link"))
             .fixed_pos(at)
             .pivot(Align2::CENTER_TOP)
             .show(ui.ctx(), |ui| {
                 // The views' muted text with a 1px underline, as the
                 // first-run hint is.
-                let galley = ui.painter().layout_no_wrap(
-                    text.to_owned(),
-                    fonts::regular(14.0),
-                    theme::VIEW_TEXT,
-                );
+                let galley =
+                    ui.painter()
+                        .layout_no_wrap(text.to_owned(), fonts::regular(14.0), inks.text);
                 let size = galley.size() + egui::vec2(0.0, 4.0);
                 let (rect, response) = ui.allocate_exact_size(size, Sense::click());
                 let colour = if response.hovered() {
-                    theme::VIEW_INK
+                    inks.ink
                 } else {
-                    theme::VIEW_TEXT
+                    inks.text
                 };
                 ui.painter().galley(rect.min, galley, colour);
                 ui.painter().hline(

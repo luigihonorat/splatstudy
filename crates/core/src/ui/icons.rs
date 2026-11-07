@@ -231,6 +231,15 @@ pub fn panels(painter: &Painter, rect: Rect, colour: Color32) {
     pen.line((10.5, 2.5), (10.5, 13.5));
 }
 
+/// The view's background colour: a filled square inside an outlined one,
+/// a swatch.
+pub fn background(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.polyline(&[(1.5, 1.5), (14.5, 1.5), (14.5, 14.5), (1.5, 14.5)], true);
+    let swatch = Rect::from_min_max(pen.at(5.0, 5.0), pen.at(11.0, 11.0));
+    painter.rect_filled(swatch, 0.0, colour);
+}
+
 /// An arrowhead at `tip`, pointing along `(dx, dy)`, one of the four
 /// axis directions, its arms reaching `arm` back and `arm` aside.
 fn head(pen: &Pen, tip: (f32, f32), (dx, dy): (f32, f32), arm: f32) {

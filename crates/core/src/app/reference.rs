@@ -745,6 +745,7 @@ impl App {
         let aspect = size[0] as f32 / size[1].max(1) as f32;
         let ReferenceLook {
             flat,
+            ink,
             opacity,
             over,
             lighting,
@@ -758,6 +759,7 @@ impl App {
                 let look = SplatLook {
                     opacity,
                     flat,
+                    ink,
                     over,
                     view_dependent: !self.reference.base_colour_only,
                 };
@@ -773,7 +775,7 @@ impl App {
                     return;
                 };
                 let colour = match (flat, *coloured) {
-                    (true, _) => theme::SILHOUETTE_INK,
+                    (true, _) => ink,
                     (false, true) => Color32::WHITE,
                     (false, false) => theme::CLAY,
                 };

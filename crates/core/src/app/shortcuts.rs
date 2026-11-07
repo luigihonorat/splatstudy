@@ -21,6 +21,7 @@ impl App {
         // and Home belong to the field, not to the tools and views.
         if !ui.ctx().text_edit_focused() {
             self.flyout_keys(ui);
+            self.background_keys(ui);
             self.sculpt_shortcuts(ui);
             for digit in numpad {
                 self.numpad_view(digit);

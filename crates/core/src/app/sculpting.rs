@@ -23,7 +23,7 @@ use crate::sculpt::{
     Brush, Buildup, Dab, Falloff, Hit, LayerOp, Levels, MAX_TRIANGLES, MAX_VERTICES, Mesh,
     START_LEVEL, Sculpt, cube_sphere,
 };
-use crate::ui::{self, i18n::Tr, icons, menu, theme};
+use crate::ui::{self, i18n::Tr, icons, menu};
 use crate::voxel;
 
 /// Dabs are placed every this fraction of the tool radius along a stroke.
@@ -1086,7 +1086,7 @@ impl App {
         {
             return;
         }
-        let ink = theme::VIEW_INK.gamma_multiply(0.6);
+        let ink = self.view_inks(SCULPT).ink.gamma_multiply(0.6);
         let line = Stroke::new(1.0, ink);
         let painter = ui.painter().with_clip_rect(rect);
         let held = self.held_tool();
@@ -1167,7 +1167,7 @@ impl App {
                 radius,
             )
         {
-            let grey = theme::MIRROR_INK.gamma_multiply(0.6);
+            let grey = self.view_inks(SCULPT).mirror.gamma_multiply(0.6);
             draw(ring, tick, Stroke::new(1.0, grey));
         }
         painter.circle_filled(centre, 1.5, ink);
@@ -1194,7 +1194,7 @@ impl App {
                     egui::Align2::LEFT_TOP,
                     text,
                     font,
-                    theme::VIEW_INK,
+                    self.view_inks(SCULPT).ink,
                 );
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_secs_f64(READOUT - age));

@@ -21,7 +21,7 @@ use crate::export::{self, Compositor, Layout, Overlay, Shape, ViewOverlay, place
 use crate::reference::Content;
 use crate::render::Slot;
 use crate::render::readback::Readback;
-use crate::ui::{menu, theme};
+use crate::ui::menu;
 
 /// The shortcut, with the command key: "print" the views.
 pub(super) const SHOT_KEY: Key = Key::P;
@@ -220,6 +220,7 @@ impl App {
             };
         }
         compositor.set_overlays(overlays[SCULPT], overlays[REFERENCE]);
+        compositor.set_backgrounds([SCULPT, REFERENCE].map(|index| self.view_background(index)));
 
         let reference = self.scene_reference();
         if let Some(Content::Image(image)) = reference.map(|r| &r.content) {
@@ -239,12 +240,12 @@ impl App {
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if let Some(view) = compositor.sculpt_view() {
-            let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
+            let mut pass = view.begin_pass(&mut encoder, compositor.backgrounds()[SCULPT]);
             let camera = &cameras[SCULPT];
             self.draw_sculpt(&mut pass, Slot::ExportSculpt, camera, view.size, true);
         }
         if let Some(view) = compositor.reference_view() {
-            let mut pass = view.begin_pass(&mut encoder, theme::VIEW_BG);
+            let mut pass = view.begin_pass(&mut encoder, compositor.backgrounds()[REFERENCE]);
             let look = self.reference_look();
             let camera = &cameras[REFERENCE];
             self.draw_reference_sized(&mut pass, Slot::ExportReference, camera, view.size, &look);
@@ -281,6 +282,7 @@ mod tests {
     use super::super::study::tests::Harness;
     use super::*;
     use crate::reference::{Credit, RefImage, Reference, Source};
+    use crate::ui::theme;
 
     #[test]
     fn a_narrower_picture_widens_the_view_to_keep_what_was_across() {

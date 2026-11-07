@@ -37,7 +37,9 @@ pub struct TextField {
 impl App {
     /// The preferences that outlive a session, as `key=value` pairs joined
     /// by `&`: `lang=ja&theme=dark&nav=zbrush`, then `&hide=crop,credit`
-    /// when the window menu took groups out of the panels. The shells store this
+    /// when the window menu took groups out of the panels, and
+    /// `&background=000000,f7f7f7` (the sculpt view's, the reference
+    /// view's) when a view's background isn't the default. The shells store this
     /// string as is (localStorage on the web, a file on desktop) and hand it
     /// back to [`App::apply_preferences`] at start.
     pub fn preferences(&self) -> String {
@@ -55,6 +57,9 @@ impl App {
         let removed = self.panels.removed_names();
         if !removed.is_empty() {
             saved += &format!("&hide={removed}");
+        }
+        if let Some(colours) = self.background_preference() {
+            saved += &format!("&background={colours}");
         }
         saved
     }
@@ -83,6 +88,7 @@ impl App {
                     }
                 }
                 "hide" => self.panels.set_removed_names(value),
+                "background" => self.apply_background_preference(value),
                 _ => {}
             }
         }
@@ -195,6 +201,7 @@ impl App {
             return;
         }
         let text = self.lang.tr().help.first_run_hint;
+        let inks = self.view_inks(SCULPT);
         let clicked = egui::Area::new(egui::Id::unique("first run hint"))
             .fixed_pos(view.center_bottom() - egui::vec2(0.0, 24.0))
             .pivot(Align2::CENTER_BOTTOM)
@@ -204,14 +211,14 @@ impl App {
                 let galley = ui.painter().layout_no_wrap(
                     text.to_owned(),
                     egui::TextStyle::Body.resolve(ui.style()),
-                    theme::VIEW_TEXT,
+                    inks.text,
                 );
                 let size = galley.size() + egui::vec2(0.0, 4.0);
                 let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
                 let colour = if response.hovered() {
-                    theme::VIEW_INK
+                    inks.ink
                 } else {
-                    theme::VIEW_TEXT
+                    inks.text
                 };
                 ui.painter().galley(rect.min, galley, colour);
                 ui.painter().hline(

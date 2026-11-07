@@ -73,6 +73,7 @@ fn render(device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> Vec<u8> 
         &SplatLook {
             opacity: scene.opacity,
             flat: scene.flat,
+            ink: SILHOUETTE_INK,
             over: scene.over,
             view_dependent: true,
         },

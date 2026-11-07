@@ -47,6 +47,8 @@ pub(super) enum ViewOption {
     Reset,
     /// Hides the side panels, or shows them: shared by both views.
     Panels,
+    /// Opens the window that picks the view's background colour.
+    Background,
 }
 
 /// What the reference view holds, which decides what its toolbar offers.
@@ -78,6 +80,7 @@ impl ViewOption {
             Frame => "F",
             Reset => "Home",
             Panels => "Tab",
+            Background => "",
         }
     }
 
@@ -112,6 +115,7 @@ impl ViewOption {
             Frame => st.frame_reference,
             Reset => tr.reset_view,
             Panels => st.hide_panels,
+            Background => st.background,
         }
         .to_owned()
     }
@@ -137,14 +141,15 @@ impl ViewOption {
             Frame => icons::frame(painter, rect, colour),
             Reset => icons::reset(painter, rect, colour),
             Panels => icons::panels(painter, rect, colour),
+            Background => icons::background(painter, rect, colour),
         }
     }
 
     /// Whether this option is switched on and off, its button inverted
     /// while it is on: not the tool, the lighting or an action.
-    fn switches(self) -> bool {
+    pub(super) fn switches(self) -> bool {
         use ViewOption::*;
-        !matches!(self, Tool | Lighting | Frame | Reset)
+        !matches!(self, Tool | Lighting | Frame | Reset | Background)
     }
 
     /// Whether this option's button opens a column of choices rather than
@@ -164,9 +169,16 @@ pub(super) fn lighting_name(st: &StudyTr, lighting: Light) -> &'static str {
 
 /// The buttons of view `index`'s toolbar, in groups from the top: the
 /// sculpt's tool, display, guides, comparison and camera, then the
-/// sculpt's hides the panels. A picture has no camera, light or outline of
-/// its own, and only the clay has edges, a ghost and a difference.
+/// sculpt's hides the panels, and last each view's background colour. A
+/// picture has no camera, light or outline of its own, and only the clay
+/// has edges, a ghost and a difference.
 pub(super) fn groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
+    let mut groups = option_groups(index, kind);
+    groups.push(vec![ViewOption::Background]);
+    groups
+}
+
+fn option_groups(index: usize, kind: RefKind) -> Vec<Vec<ViewOption>> {
     use ViewOption::*;
     if index == SCULPT {
         return vec![
@@ -300,6 +312,7 @@ impl App {
             // choices are open.
             Tool => true,
             Lighting => self.flyout_open(option, index),
+            Background => self.background_open(index),
             Frame | Reset => false,
         }
     }
@@ -328,6 +341,7 @@ impl App {
             Frame => self.frame_reference(),
             Reset => self.reset_view(index),
             Panels => self.toggle_panels(),
+            Background => self.toggle_background(index),
         }
         self.dirty = true;
     }
@@ -368,9 +382,9 @@ impl App {
             }
             let mut groups = groups(index, kind);
             // The reference alone has the sculpt's panel button, so it
-            // is never out of reach.
+            // is never out of reach; the background stays last.
             if index == REFERENCE && !shown(rects[SCULPT]) {
-                groups.push(vec![ViewOption::Panels]);
+                groups.insert(groups.len() - 1, vec![ViewOption::Panels]);
             }
             let sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
             let (panels, buttons) = layout(rect, on_left(index, self.study.swapped), &sizes);
@@ -408,6 +422,12 @@ impl App {
             panel: Rect::NOTHING,
             rows: Vec::new(),
         });
+    }
+
+    /// Whether `option`'s button opened the window open over view `index`:
+    /// the background colour's.
+    fn window_open(&self, option: ViewOption, index: usize) -> bool {
+        option == ViewOption::Background && self.background_open(index)
     }
 
     /// Where the open flyout was drawn last: there the view takes no
@@ -548,7 +568,10 @@ impl App {
                         theme::TOOL_ON
                     };
                     painter.rect_filled(button.shrink(1.0), 0.0, fill);
-                } else if hovered || self.flyout_open(option, index) {
+                } else if hovered
+                    || self.flyout_open(option, index)
+                    || self.window_open(option, index)
+                {
                     painter.rect_filled(button, 0.0, theme::TOOL_HOVER);
                 }
                 let colour = if inverted {
@@ -569,8 +592,8 @@ impl App {
                         self.apply(option, index);
                     }
                 }
-                // Its flyout, open, takes the tooltip's place.
-                if self.flyout_open(option, index) {
+                // Its flyout or window, open, takes the tooltip's place.
+                if self.flyout_open(option, index) || self.window_open(option, index) {
                     continue;
                 }
                 let (tool, lighting) = shows;
@@ -616,6 +639,7 @@ impl App {
             }
         }
         self.flyout_ui(ui, rects, &layouts);
+        self.background_window(ui, rects, &layouts);
     }
 }
 
@@ -845,7 +869,8 @@ mod tests {
                 ViewOption::Grid,
                 ViewOption::Plumb,
                 ViewOption::Mirror,
-                ViewOption::Frame
+                ViewOption::Frame,
+                ViewOption::Background,
             ]
         );
         let splats = groups(REFERENCE, RefKind::Splats).concat();

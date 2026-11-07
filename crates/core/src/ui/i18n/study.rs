@@ -57,6 +57,14 @@ pub struct StudyTr {
     /// Under a toolbar button's tooltip: Shift + click does the same in
     /// both views.
     pub both_views_hint: &'static str,
+    /// The toolbar's last button and the window it opens: a view's
+    /// background colour.
+    pub background: &'static str,
+    /// In that window, short: the view the colour goes to (or `both`).
+    pub to_sculpt: &'static str,
+    pub to_reference: &'static str,
+    /// In that window: picks the views' first colour again.
+    pub default_background: &'static str,
 }
 
 pub const JA: StudyTr = StudyTr {
@@ -92,6 +100,10 @@ pub const JA: StudyTr = StudyTr {
     panels_note: "Shift+Tab のあとの Tab は、パネルとモチーフを両方戻す
 文字の入力中は、Tab で次の欄へ移る",
     both_views_hint: "Shift＋クリック：両方のビューに",
+    background: "背景色",
+    to_sculpt: "塑像",
+    to_reference: "モチーフ",
+    default_background: "元の色",
 };
 
 pub const EN: StudyTr = StudyTr {
@@ -127,6 +139,10 @@ pub const EN: StudyTr = StudyTr {
     panels_note: "after Shift+Tab, Tab brings back the panels and the reference
 in a text field, Tab goes to the next field",
     both_views_hint: "shift-click: both views",
+    background: "background colour",
+    to_sculpt: "sculpt",
+    to_reference: "ref",
+    default_background: "default",
 };
 
 pub const FR: StudyTr = StudyTr {
@@ -162,6 +178,10 @@ pub const FR: StudyTr = StudyTr {
     panels_note: "après Maj+Tab, Tab rétablit les panneaux et le modèle
 dans un champ de texte, Tab passe au champ suivant",
     both_views_hint: "Maj + clic : les deux vues",
+    background: "couleur du fond",
+    to_sculpt: "sculpture",
+    to_reference: "modèle",
+    default_background: "par défaut",
 };
 
 fn ja_minutes(n: u32) -> String {

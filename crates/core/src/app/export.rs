@@ -11,7 +11,7 @@ use egui::{Align2, RichText, Stroke, TextureId};
 
 use super::playback::playback_length;
 use super::study::ReferenceLook;
-use super::{App, Request, WEB};
+use super::{App, REFERENCE, Request, SCULPT, WEB};
 use crate::camera::OrbitCamera;
 use crate::export::{
     CameraMotion, Captions, EndCard, Gpu, Job, Layout, Progress, Settings, Shape, Sink, Support,
@@ -212,6 +212,7 @@ impl App {
             turntable: e.turntable,
             turn_reference: self.study.link,
             clock: e.clock,
+            backgrounds: [SCULPT, REFERENCE].map(|index| self.view_background(index)),
         };
         settings.speed = match e.pace {
             Pace::Speed(speed) => speed,
