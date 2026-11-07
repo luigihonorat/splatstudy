@@ -757,6 +757,7 @@ mod tests {
             direction: Vec3::ZERO,
             buildup: Default::default(),
             fill: false,
+            wipes: false,
         });
         changed(revision(0, &sculpt, None, &study, [false; 2]), "mid-stroke");
         sculpt.end_stroke();
@@ -892,6 +893,7 @@ mod tests {
                 direction: Vec3::ZERO,
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             app.sculpt.end_stroke();
             app.sculpt.refresh();
@@ -982,6 +984,7 @@ mod tests {
             direction: Vec3::ZERO,
             buildup: Default::default(),
             fill: false,
+            wipes: false,
         });
         b.sculpt.end_stroke();
         b.sculpt.refresh();

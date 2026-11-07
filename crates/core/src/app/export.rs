@@ -815,6 +815,7 @@ mod tests {
             direction: glam::Vec3::ZERO,
             buildup: Default::default(),
             fill: false,
+            wipes: false,
         };
         app.sculpt.set_clock(from);
         app.sculpt.begin_stroke();

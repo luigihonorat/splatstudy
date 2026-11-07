@@ -266,7 +266,8 @@ impl Entry {
                 let larger = matches!(self.event, Event::Dab(_)) && d.symmetry;
                 // Bit 4 came later still: the mask blur is stored as the
                 // Smooth brush with it, smoothing the mask instead of the
-                // clay. Older logs never set it, nor bit 5, clay's fill.
+                // clay. Older logs never set it, nor bit 5, clay's fill,
+                // nor bit 6, a dab that wipes its chalk away at once.
                 let (brush, on_mask) = match d.brush {
                     Brush::BlurMask => (Brush::Smooth, true),
                     brush => (brush, false),
@@ -276,7 +277,8 @@ impl Entry {
                     | u8::from(d.buildup == Buildup::Layer) << 2
                     | u8::from(larger) << 3
                     | u8::from(on_mask) << 4
-                    | u8::from(d.fill) << 5;
+                    | u8::from(d.fill) << 5
+                    | u8::from(d.wipes) << 6;
                 w.u8(tag::DAB)
                     .u8(brush as u8)
                     .vec3(d.centre)
@@ -352,7 +354,7 @@ impl Entry {
                     .ok_or_else(|| r.invalid("unknown brush"))?;
                 let (centre, radius, strength) = (r.vec3()?, r.f32()?, r.f32()?);
                 let flags = r.u8()?;
-                if flags > 63 {
+                if flags > 127 {
                     return Err(r.invalid("unknown dab flags"));
                 }
                 // Bit 4: the Smooth brush on the mask (see `write`).
@@ -375,6 +377,7 @@ impl Entry {
                         Buildup::Accumulate
                     },
                     fill: flags & 32 != 0,
+                    wipes: flags & 64 != 0,
                 };
                 if dab.symmetry && flags & 8 == 0 {
                     Event::SummedDab(dab)
@@ -865,6 +868,7 @@ mod tests {
                         // them.
                         buildup: Buildup::ALL[k % Buildup::ALL.len()],
                         fill: k % 3 == 1,
+                        wipes: k % 2 == 0,
                     });
                     if i % 3 == 0 {
                         s.refresh();
@@ -935,6 +939,7 @@ mod tests {
                     direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
                     buildup: Default::default(),
                     fill: false,
+                    wipes: false,
                 });
                 if i % 2 == 0 {
                     s.refresh();
@@ -1009,6 +1014,7 @@ mod tests {
                 direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
                 buildup: Default::default(),
                 fill: false,
+                wipes: false,
             });
             if i % 2 == 0 {
                 s.refresh();
@@ -1080,6 +1086,7 @@ mod tests {
             direction: Vec3::X,
             buildup: Buildup::Layer,
             fill: false,
+            wipes: false,
         };
         let bytes = log_bytes(&[Event::Dab(dab)]);
         // From the end: the direction after the flags, and the centre,
@@ -1111,13 +1118,13 @@ mod tests {
                 assert!(read.is_err(), "{brush:?}");
             }
         }
-        // It has no brush byte of its own, and the bits above clay's fill
-        // (bit 5) are unknown.
+        // It has no brush byte of its own, and the bit above the chalk's
+        // wipe (bit 6) is unknown.
         let mut unknown = old;
         unknown[brush_at] = Brush::ALL.len() as u8;
         assert!(read_events(&unknown).is_err());
         let mut high = bytes;
-        high[flags_at] |= 64;
+        high[flags_at] |= 128;
         assert!(read_events(&high).is_err());
     }
 
@@ -1243,6 +1250,7 @@ mod tests {
             direction: Vec3::X,
             buildup: Buildup::Layer,
             fill: true,
+            wipes: false,
         };
         let mut w = Writer::new();
         Entry {
@@ -1272,6 +1280,7 @@ mod tests {
             direction: Vec3::X,
             buildup: Buildup::Layer,
             fill: false,
+            wipes: false,
         };
         let bytes = |dab: Dab| {
             let mut w = Writer::new();
@@ -1384,6 +1393,7 @@ mod tests {
             direction: Vec3::ZERO,
             buildup: Buildup::Accumulate,
             fill: false,
+            wipes: false,
         };
         let old = [Event::Falloff(Falloff::Linear), Event::Dab(dab)];
         assert_eq!(read_events(&log_bytes(&old)).unwrap(), old);
@@ -1452,6 +1462,7 @@ mod tests {
                 direction: if i == 0 { Vec3::ZERO } else { Vec3::X },
                 buildup: Buildup::Accumulate,
                 fill: false,
+                wipes: false,
             });
             s.refresh();
         }

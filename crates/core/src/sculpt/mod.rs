@@ -245,6 +245,10 @@ pub struct Dab {
     /// above the area's average, not above the point under the brush, so
     /// what is already higher (the rim of a hollow, a bump) stays.
     pub fill: bool,
+    /// Where the dab moves the clay, the chalk is gone (as far as the mask
+    /// lets it move). Older logs wear the chalk away bit by bit instead, by
+    /// the dab's weight and strength.
+    pub wipes: bool,
 }
 
 /// One undoable change: the vertices a stroke touched, before and after.
@@ -939,7 +943,11 @@ impl Sculpt {
         for i in from..self.moved.len() {
             let v = self.moved[i];
             let p = self.mesh.positions[v as usize];
-            let w = self.weight(p.distance(dab.centre), dab.radius) * dab.strength * self.free(v);
+            let w = if dab.wipes {
+                self.free(v)
+            } else {
+                self.weight(p.distance(dab.centre), dab.radius) * dab.strength * self.free(v)
+            };
             let chalk = &mut self.mesh.layers.chalk;
             let left = (chalk.get(v as usize) - w).max(0.0);
             chalk.set(v as usize, left, n);
@@ -1459,6 +1467,7 @@ mod tests {
             direction: Vec3::ZERO,
             buildup: Default::default(),
             fill: false,
+            wipes: false,
         }
     }
 
@@ -2340,6 +2349,39 @@ mod tests {
             s.undo();
             assert!(s.mesh.layers.chalk.is_empty(), "chalk removed by undo");
         }
+    }
+
+    #[test]
+    fn a_wiping_dab_takes_all_the_chalk_where_it_moves_the_clay() {
+        let one = |wipes: bool| {
+            let mut s = sculpt();
+            s.edit_layer(LayerOp::AddChalk);
+            let original = s.mesh.positions.clone();
+            s.begin_stroke();
+            s.dab(Dab {
+                strength: 0.2,
+                wipes,
+                ..dab(Brush::Clay, Vec3::Z)
+            });
+            s.end_stroke();
+            let moved: Vec<usize> = (0..original.len())
+                .filter(|&v| s.mesh.positions[v] != original[v])
+                .collect();
+            assert!(!moved.is_empty());
+            let left: Vec<f32> = moved.iter().map(|&v| s.mesh.layers.chalk.get(v)).collect();
+            let still = (0..original.len())
+                .filter(|&v| s.mesh.positions[v] == original[v])
+                .all(|v| s.mesh.layers.chalk.get(v) == 1.0);
+            (left, still)
+        };
+        // One light dab: gone wherever the clay moved, untouched elsewhere.
+        let (left, still) = one(true);
+        assert!(left.iter().all(|&c| c == 0.0), "{left:?}");
+        assert!(still);
+        // As older logs replay it: worn away by the dab's weight only.
+        let (left, still) = one(false);
+        assert!(left.iter().all(|&c| c > 0.5), "{left:?}");
+        assert!(still);
     }
 
     #[test]

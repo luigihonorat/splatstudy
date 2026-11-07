@@ -1163,6 +1163,7 @@ impl App {
             direction,
             buildup: self.tool.buildup,
             fill: self.tool.fill,
+            wipes: true,
         });
     }
 
@@ -1734,6 +1735,7 @@ mod tests {
                 direction: Vec3::X,
                 buildup: Buildup::Accumulate,
                 fill: true,
+                wipes: false,
             });
             s.refresh();
             x += spacing * r;
