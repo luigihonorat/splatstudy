@@ -27,6 +27,11 @@ const MAX_GAP: f64 = 2.0;
 pub enum Event {
     Begin,
     Dab(Dab),
+    /// A symmetric dab from a log made before both sides took the larger
+    /// of their weights: where they overlap, it applies both in full (see
+    /// `Sculpt::summed_dab`). Only read from old logs, so that they replay
+    /// as they were sculpted.
+    SummedDab(Dab),
     Grab {
         centre: Vec3,
         radius: f32,
@@ -46,6 +51,7 @@ pub enum Event {
     },
     /// The brushes fade this way from the next dab or grab on (see
     /// `Sculpt::set_falloff`). Every checkpoint goes back to the default.
+    /// Stored as its own byte (see `falloff_byte`).
     Falloff(Falloff),
     /// The scene was reopened here: everything worked out from the clay
     /// (its hierarchy, its normals) was made afresh from it, the undo
@@ -253,12 +259,15 @@ impl Entry {
             Event::Begin => {
                 w.u8(tag::BEGIN);
             }
-            Event::Dab(d) => {
-                // Bit 2 came later: older logs don't have it, which reads
-                // back as clay that accumulates.
+            Event::Dab(d) | Event::SummedDab(d) => {
+                // Bits 2 and 3 came later: older logs don't have them,
+                // which reads back as clay that accumulates and symmetric
+                // dabs that add up where they overlap.
+                let larger = matches!(self.event, Event::Dab(_)) && d.symmetry;
                 let flags = u8::from(d.invert)
                     | u8::from(d.symmetry) << 1
-                    | u8::from(d.buildup == Buildup::Layer) << 2;
+                    | u8::from(d.buildup == Buildup::Layer) << 2
+                    | u8::from(larger) << 3;
                 w.u8(tag::DAB)
                     .u8(d.brush as u8)
                     .vec3(d.centre)
@@ -299,7 +308,7 @@ impl Entry {
                 w.u8(tag::MIRROR).u8(u8::from(to_negative));
             }
             Event::Falloff(f) => {
-                w.u8(tag::FALLOFF).u8(f as u8);
+                w.u8(tag::FALLOFF).u8(falloff_byte(f));
             }
             Event::Rebuild => {
                 w.u8(tag::REBUILD);
@@ -334,10 +343,10 @@ impl Entry {
                     .ok_or_else(|| r.invalid("unknown brush"))?;
                 let (centre, radius, strength) = (r.vec3()?, r.f32()?, r.f32()?);
                 let flags = r.u8()?;
-                if flags > 7 {
+                if flags > 15 {
                     return Err(r.invalid("unknown dab flags"));
                 }
-                Event::Dab(Dab {
+                let dab = Dab {
                     brush,
                     centre,
                     radius,
@@ -350,7 +359,12 @@ impl Entry {
                     } else {
                         Buildup::Accumulate
                     },
-                })
+                };
+                if dab.symmetry && flags & 8 == 0 {
+                    Event::SummedDab(dab)
+                } else {
+                    Event::Dab(dab)
+                }
             }
             tag::GRAB => Event::Grab {
                 centre: r.vec3()?,
@@ -367,9 +381,7 @@ impl Entry {
                 to_negative: flag(r)?,
             },
             tag::FALLOFF => Event::Falloff(
-                *Falloff::ALL
-                    .get(r.u8()? as usize)
-                    .ok_or_else(|| r.invalid("unknown falloff"))?,
+                falloff_from_byte(r.u8()?).ok_or_else(|| r.invalid("unknown falloff"))?,
             ),
             tag::REBUILD => Event::Rebuild,
             tag::SUBDIVIDE => Event::Subdivide,
@@ -386,6 +398,57 @@ impl Entry {
     }
 }
 
+/// The byte a log stores for each falloff. These never change, whatever
+/// order the panel lists the falloffs in: a new falloff takes the next
+/// free byte here and in [`falloff_from_byte`].
+fn falloff_byte(falloff: Falloff) -> u8 {
+    match falloff {
+        Falloff::Smooth => 0,
+        Falloff::Linear => 1,
+        Falloff::Sharp => 2,
+        Falloff::Flat => 3,
+    }
+}
+
+/// The falloff a log's byte stands for (see [`falloff_byte`]).
+fn falloff_from_byte(byte: u8) -> Option<Falloff> {
+    Some(match byte {
+        0 => Falloff::Smooth,
+        1 => Falloff::Linear,
+        2 => Falloff::Sharp,
+        3 => Falloff::Flat,
+        _ => return None,
+    })
+}
+
+/// Logs saved by the builds that brought the flat falloff, before it had
+/// its own byte, store it as linear's 1. Those builds also brought the
+/// build-up bit, which every dab in the default "per stroke" mode sets
+/// and older builds never wrote; and a falloff is logged right before the
+/// dab or grab that first uses it. So a linear just before such a dab, or
+/// anywhere after one, was flat. (Flat used only in "accumulate" mode,
+/// or only with Move, still reads as linear.)
+fn recover_flat(entries: &mut [Entry]) {
+    let layer_dab = |entry: Option<&Entry>| {
+        matches!(
+            entry,
+            Some(Entry {
+                event: Event::Dab(dab) | Event::SummedDab(dab),
+                ..
+            }) if dab.buildup == Buildup::Layer
+        )
+    };
+    let mut layered = false;
+    for i in 0..entries.len() {
+        layered |= layer_dab(entries.get(i));
+        if entries[i].event == Event::Falloff(Falloff::Linear)
+            && (layered || layer_dab(entries.get(i + 1)))
+        {
+            entries[i].event = Event::Falloff(Falloff::Flat);
+        }
+    }
+}
+
 /// A whole log: its length, then each entry.
 pub fn write_log(w: &mut Writer, entries: &[Entry]) {
     w.len(entries.len());
@@ -398,7 +461,11 @@ pub fn write_log(w: &mut Writer, entries: &[Entry]) {
 pub fn read_log(r: &mut Reader) -> Result<Vec<Entry>, ReadError> {
     // Every entry takes at least its time and tag.
     let n = r.len(9)?;
-    (0..n).map(|_| Entry::read(r)).collect()
+    let mut entries = (0..n)
+        .map(|_| Entry::read(r))
+        .collect::<Result<Vec<_>, _>>()?;
+    recover_flat(&mut entries);
+    Ok(entries)
 }
 
 /// Every checkpoint: their count, then each one.
@@ -529,6 +596,7 @@ impl Sculpt {
         match event {
             Event::Begin => self.begin_stroke(),
             Event::Dab(dab) => self.dab(dab),
+            Event::SummedDab(dab) => self.summed_dab(dab),
             Event::Grab {
                 centre,
                 radius,
@@ -1033,14 +1101,136 @@ mod tests {
         // brush, centre, radius and strength come before the flags.
         let mut old = bytes(dab);
         let flags = 8 + 1 + 1 + 12 + 4 + 4;
-        assert_eq!(old[flags], 7);
+        assert_eq!(old[flags], 15);
         old[flags] &= 3;
+        // Their symmetric dabs added up where both sides overlap.
         assert_eq!(
             read(&old),
-            Event::Dab(Dab {
+            Event::SummedDab(Dab {
                 buildup: Buildup::Accumulate,
                 ..dab
             })
+        );
+        // Those from before the larger weight, with the build-up bit.
+        old[flags] = 7;
+        assert_eq!(read(&old), Event::SummedDab(dab));
+        let summed = Entry {
+            time: 1.0,
+            event: Event::SummedDab(dab),
+        };
+        let mut w = Writer::new();
+        summed.write(&mut w);
+        assert_eq!(w.finish(), old, "saved again as they were");
+        // Without symmetry the bit makes no difference.
+        let single = Dab {
+            symmetry: false,
+            ..dab
+        };
+        assert_eq!(bytes(single)[flags], 5);
+        assert_eq!(read(&bytes(single)), Event::Dab(single));
+    }
+
+    /// A log of `events`, as bytes.
+    fn log_bytes(events: &[Event]) -> Vec<u8> {
+        let entries: Vec<Entry> = events
+            .iter()
+            .map(|&event| Entry { time: 1.0, event })
+            .collect();
+        let mut w = Writer::new();
+        write_log(&mut w, &entries);
+        w.finish()
+    }
+
+    fn read_events(bytes: &[u8]) -> Result<Vec<Event>, ReadError> {
+        let log = read_log(&mut Reader::new(bytes))?;
+        Ok(log.into_iter().map(|e| e.event).collect())
+    }
+
+    #[test]
+    fn every_falloff_keeps_its_byte_in_the_log() {
+        // Fixed for good: changing one replays old timelapses with
+        // another falloff.
+        let pinned = [
+            (Falloff::Smooth, 0),
+            (Falloff::Linear, 1),
+            (Falloff::Sharp, 2),
+            (Falloff::Flat, 3),
+        ];
+        for (falloff, byte) in pinned {
+            let bytes = log_bytes(&[Event::Falloff(falloff)]);
+            // The count, the time and the tag come before it.
+            assert_eq!(bytes[bytes.len() - 2], tag::FALLOFF);
+            assert_eq!(bytes.last(), Some(&byte), "{falloff:?}");
+            assert_eq!(read_events(&bytes).unwrap(), [Event::Falloff(falloff)]);
+        }
+        // Every falloff the panel offers has a byte of its own.
+        for falloff in Falloff::ALL {
+            assert!(pinned.iter().any(|&(f, _)| f == falloff), "{falloff:?}");
+        }
+        let mut unknown = log_bytes(&[Event::Falloff(Falloff::Smooth)]);
+        *unknown.last_mut().unwrap() = 4;
+        assert!(read_events(&unknown).is_err());
+    }
+
+    #[test]
+    fn an_old_linear_falloff_replays_as_linear() {
+        // Logs from before the flat falloff: byte 1, then dabs without
+        // the build-up bit.
+        let dab = Dab {
+            brush: Brush::Smooth,
+            centre: Vec3::Z,
+            radius: 0.2,
+            strength: 0.5,
+            invert: false,
+            symmetry: false,
+            direction: Vec3::ZERO,
+            buildup: Buildup::Accumulate,
+        };
+        let old = [Event::Falloff(Falloff::Linear), Event::Dab(dab)];
+        assert_eq!(read_events(&log_bytes(&old)).unwrap(), old);
+        assert_eq!(Falloff::Linear.weight(0.5, 1.0), 0.5);
+        assert_eq!(Falloff::Linear.weight(0.25, 2.0), 0.875);
+        assert_eq!(Falloff::Linear.weight(1.5, 1.0), 0.0);
+
+        // Logs from the builds that wrote flat as 1 set the build-up bit
+        // on their dabs: there, 1 was flat.
+        let layered = Dab {
+            buildup: Buildup::Layer,
+            ..dab
+        };
+        let flat = |events: &[Event]| {
+            read_events(&log_bytes(events))
+                .unwrap()
+                .into_iter()
+                .filter(|e| matches!(e, Event::Falloff(_)))
+                .collect::<Vec<_>>()
+        };
+        let linear = Event::Falloff(Falloff::Linear);
+        assert_eq!(
+            flat(&[linear, Event::Dab(layered)]),
+            [Event::Falloff(Falloff::Flat)]
+        );
+        // An old session reopened and carried on in those builds: its
+        // own linear stays linear, the later 1 was flat.
+        let grab = Event::Grab {
+            centre: Vec3::Z,
+            radius: 0.2,
+            symmetry: false,
+        };
+        assert_eq!(
+            flat(&[
+                linear,
+                Event::Dab(dab),
+                Event::Falloff(Falloff::Smooth),
+                Event::Dab(layered),
+                linear,
+                grab,
+            ]),
+            [
+                Event::Falloff(Falloff::Linear),
+                Event::Falloff(Falloff::Smooth),
+                Event::Falloff(Falloff::Flat),
+            ]
         );
     }
 

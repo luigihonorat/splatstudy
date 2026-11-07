@@ -97,10 +97,14 @@ pub enum Falloff {
     Flat,
     /// A narrow peak: most of the effect near the centre.
     Sharp,
+    /// A cone, the panel's second choice before flat took its place. Only
+    /// timelapses recorded with it replay it; the panel no longer lists it.
+    Linear,
 }
 
 impl Falloff {
-    /// Every falloff, in the order the panel lists them.
+    /// Every falloff, in the order the panel lists them. A log stores
+    /// each one by its own byte, not by this order (see `record`).
     pub const ALL: [Falloff; 3] = [Falloff::Smooth, Falloff::Flat, Falloff::Sharp];
 
     /// The weight at `distance` from the centre of a brush of `radius`:
@@ -120,6 +124,7 @@ impl Falloff {
                 let s = 1.0 - t;
                 s * s * s
             }
+            Falloff::Linear => 1.0 - t,
         }
     }
 }
@@ -219,9 +224,12 @@ pub struct Sculpt {
     bvh: Bvh,
     bvh_stale: bool,
     stamp: Stamp,
-    /// Keeps a vertex from being grabbed twice when both sides overlap.
+    /// Keeps a vertex from being grabbed, or moved by a symmetric dab,
+    /// twice when both sides overlap.
     unique: Stamp,
     found: Vec<u32>,
+    /// Those of `found` a symmetric dab moves (see [`Reach`]).
+    near: Vec<u32>,
     moved: Vec<u32>,
     affected: Vec<u32>,
     smoothed: Vec<Vec3>,
@@ -287,6 +295,27 @@ fn mirror(v: Vec3) -> Vec3 {
     Vec3::new(-v.x, v.y, v.z)
 }
 
+/// A dab's mirror image across the X = 0 plane.
+fn mirrored(dab: Dab) -> Dab {
+    Dab {
+        centre: mirror(dab.centre),
+        direction: mirror(dab.direction),
+        ..dab
+    }
+}
+
+/// Which of the vertices in a dab's sphere it moves (see [`Sculpt::dab`]).
+#[derive(Clone, Copy)]
+enum Reach {
+    All,
+    /// Those on its centre's side of the X = 0 plane; the `first` of the
+    /// two symmetric dabs also those on the plane, and all of them when
+    /// its centre is on the plane, where the other moves none.
+    OwnSide {
+        first: bool,
+    },
+}
+
 /// The part of `v` that lies along a surface with normal `n`.
 fn tangent(v: Vec3, n: Vec3) -> Vec3 {
     v - n * v.dot(n)
@@ -321,6 +350,7 @@ impl Sculpt {
             stamp: Stamp::new(n),
             unique: Stamp::new(n),
             found: Vec::new(),
+            near: Vec::new(),
             moved: Vec::new(),
             affected: Vec::new(),
             smoothed: Vec::new(),
@@ -876,23 +906,42 @@ impl Sculpt {
     }
 
     /// Applies a dab of any brush but Move (and its mirror image).
+    ///
+    /// With symmetry, a vertex both dabs reach gets the larger of their two
+    /// weights, not both: each dab moves only what lies nearer its own
+    /// centre than the other's, the side of the X = 0 plane its centre is
+    /// on. The strength then stays the same as a stroke crosses the centre
+    /// line, and the two dabs become one when it runs along it.
     pub fn dab(&mut self, dab: Dab) {
         self.log_falloff();
         self.record(Event::Dab(dab));
         self.moved.clear();
-        self.dab_at(dab);
-        let mirrored = Dab {
-            centre: mirror(dab.centre),
-            direction: mirror(dab.direction),
-            ..dab
-        };
-        if dab.symmetry && mirrored.centre.distance(dab.centre) > dab.radius * 0.05 {
-            self.dab_at(mirrored);
+        if dab.symmetry {
+            self.unique.next();
+            self.dab_at(dab, Reach::OwnSide { first: true });
+            self.dab_at(mirrored(dab), Reach::OwnSide { first: false });
+        } else {
+            self.dab_at(dab, Reach::All);
         }
         self.after_move();
     }
 
-    fn dab_at(&mut self, dab: Dab) {
+    /// A dab as logs from before [`Sculpt::dab`] took the larger weight
+    /// make it: with symmetry, where both sides reach, both apply in full,
+    /// unless the two centres are all but one. Only their replays use it.
+    fn summed_dab(&mut self, dab: Dab) {
+        self.log_falloff();
+        self.record(Event::SummedDab(dab));
+        self.moved.clear();
+        self.dab_at(dab, Reach::All);
+        let mirrored = mirrored(dab);
+        if dab.symmetry && mirrored.centre.distance(dab.centre) > dab.radius * 0.05 {
+            self.dab_at(mirrored, Reach::All);
+        }
+        self.after_move();
+    }
+
+    fn dab_at(&mut self, dab: Dab, reach: Reach) {
         let mut found = std::mem::take(&mut self.found);
         found.clear();
         self.bvh.vertices_in_sphere(
@@ -902,21 +951,46 @@ impl Sculpt {
             &mut self.stamp,
             &mut found,
         );
-        if !found.is_empty() {
+        // The plane of the area comes from the whole sphere either way:
+        // only the vertices moved are those within reach.
+        let mut near = std::mem::take(&mut self.near);
+        near.clear();
+        if let Reach::OwnSide { first } = reach {
+            let x = dab.centre.x;
+            for &v in &found {
+                let side = self.mesh.positions[v as usize].x * x;
+                // The first dab marks what it takes: a vertex it moves
+                // across the plane isn't the second's to move again.
+                let take = if first {
+                    side >= 0.0 && self.unique.mark(v)
+                } else {
+                    side > 0.0 && !self.unique.is_marked(v)
+                };
+                if take {
+                    near.push(v);
+                }
+            }
+        }
+        let moving: &[u32] = match reach {
+            Reach::All => &found,
+            Reach::OwnSide { .. } => &near,
+        };
+        if !moving.is_empty() {
             let from = self.moved.len();
             match dab.brush {
-                Brush::Clay => self.clay(&found, dab),
-                Brush::Flatten => self.flatten(&found, dab),
-                Brush::Smooth => self.smooth(&found, dab),
-                Brush::Inflate => self.inflate(&found, dab),
-                Brush::Crease => self.crease(&found, dab),
-                Brush::Pinch => self.pinch(&found, dab),
-                Brush::Mask => self.mask(&found, dab),
+                Brush::Clay => self.clay(&found, moving, dab),
+                Brush::Flatten => self.flatten(&found, moving, dab),
+                Brush::Smooth => self.smooth(moving, dab),
+                Brush::Inflate => self.inflate(moving, dab),
+                Brush::Crease => self.crease(&found, moving, dab),
+                Brush::Pinch => self.pinch(&found, moving, dab),
+                Brush::Mask => self.mask(&found, moving, dab),
                 Brush::Move => {}
             }
             self.wipe_chalk(from, dab);
         }
         self.found = found;
+        self.near = near;
     }
 
     /// The area under the brush as a plane: its falloff-weighted normal and
@@ -939,8 +1013,10 @@ impl Sculpt {
         self.mesh.normals[v as usize].dot(n) > 0.0
     }
 
-    fn clay(&mut self, found: &[u32], dab: Dab) {
-        let Some((n, _)) = self.area_plane(found, dab) else {
+    // The brushes below move `found`, on the plane of `area` (see `dab_at`).
+
+    fn clay(&mut self, area: &[u32], found: &[u32], dab: Dab) {
+        let Some((n, _)) = self.area_plane(area, dab) else {
             return;
         };
         // The plane goes through the point under the brush. (Through the
@@ -984,10 +1060,10 @@ impl Sculpt {
         (self.mesh.positions[v as usize] - before).dot(n)
     }
 
-    fn flatten(&mut self, found: &[u32], dab: Dab) {
+    fn flatten(&mut self, area: &[u32], found: &[u32], dab: Dab) {
         // Through the average position, the plane cuts through the bumps and
         // passes over the hollows: flatten lowers one, fill raises the other.
-        let Some((n, origin)) = self.area_plane(found, dab) else {
+        let Some((n, origin)) = self.area_plane(area, dab) else {
             return;
         };
         for &v in found {
@@ -1033,8 +1109,8 @@ impl Sculpt {
         }
     }
 
-    fn crease(&mut self, found: &[u32], dab: Dab) {
-        let Some((n, _)) = self.area_plane(found, dab) else {
+    fn crease(&mut self, area: &[u32], found: &[u32], dab: Dab) {
+        let Some((n, _)) = self.area_plane(area, dab) else {
             return;
         };
         let sign = if dab.invert { -1.0 } else { 1.0 };
@@ -1056,8 +1132,8 @@ impl Sculpt {
         }
     }
 
-    fn pinch(&mut self, found: &[u32], dab: Dab) {
-        let Some((n, _)) = self.area_plane(found, dab) else {
+    fn pinch(&mut self, area: &[u32], found: &[u32], dab: Dab) {
+        let Some((n, _)) = self.area_plane(area, dab) else {
             return;
         };
         let sign = if dab.invert { -1.0 } else { 1.0 };
@@ -1075,8 +1151,8 @@ impl Sculpt {
     /// Raises the mask under the brush, or lowers it (`invert`), by the
     /// dab's weight on each vertex. Only the side facing the brush, as
     /// for the brushes that shape the clay.
-    fn mask(&mut self, found: &[u32], dab: Dab) {
-        let Some((n, _)) = self.area_plane(found, dab) else {
+    fn mask(&mut self, area: &[u32], found: &[u32], dab: Dab) {
+        let Some((n, _)) = self.area_plane(area, dab) else {
             return;
         };
         let sign = if dab.invert { -1.0 } else { 1.0 };
@@ -1392,6 +1468,74 @@ mod tests {
         assert_eq!(s.mesh.positions, original);
         s.redo();
         assert!(height(s.mesh.positions[centre]) > 1.01);
+    }
+
+    #[test]
+    fn a_symmetric_stroke_is_as_strong_on_the_centre_line_as_just_off_it() {
+        // A stroke down the middle of the face, `offset` radii off the
+        // centre line: the two sides used to add up wherever they
+        // overlapped, except within 0.05 radii, where only one applied.
+        let radius = 0.2;
+        let stroke = |brush: Brush, offset: f32, summed: bool| {
+            let mut s = Sculpt::new(Mesh::icosphere(5));
+            let original = s.mesh.positions.clone();
+            s.begin_stroke();
+            for i in 0..10 {
+                let at = Vec3::new(offset * radius, -0.15 + 0.03 * i as f32, 1.0).normalize();
+                let dab = Dab {
+                    radius,
+                    strength: 0.5,
+                    symmetry: true,
+                    direction: if i == 0 { Vec3::ZERO } else { Vec3::Y },
+                    buildup: Buildup::Accumulate,
+                    ..dab(brush, at)
+                };
+                if summed {
+                    s.summed_dab(dab);
+                } else {
+                    s.dab(dab);
+                }
+                s.refresh();
+            }
+            s.end_stroke();
+            let rise = s
+                .mesh
+                .positions
+                .iter()
+                .zip(&original)
+                .map(|(p, o)| p.length() - o.length())
+                .fold(0.0f32, f32::max);
+            (rise, s)
+        };
+        // Each vertex near the stroke, on the +X side, and its mirror twin.
+        let sphere = Mesh::icosphere(5).positions;
+        let twins: Vec<(usize, usize)> = (0..sphere.len())
+            .filter(|&v| sphere[v].x > 1e-4 && sphere[v].distance(Vec3::Z) < 0.5)
+            .map(|v| (v, nearest(&sphere, mirror(sphere[v]))))
+            .collect();
+        for brush in [Brush::Inflate, Brush::Clay] {
+            let (centred, ..) = stroke(brush, 0.0, false);
+            assert!(centred > 0.01, "{brush:?} built nothing");
+            // 0.001: a vertex on the plane, moved off it by the first dab,
+            // isn't moved again by the second.
+            for offset in [0.001, 0.024, 0.026, 0.05, 0.1, 0.3] {
+                let (rise, s) = stroke(brush, offset, false);
+                let ratio = rise / centred;
+                assert!(
+                    (0.95..1.05).contains(&ratio),
+                    "{brush:?} at {offset}: {ratio}× the centred stroke"
+                );
+                // Still the same on both sides.
+                for &(v, twin) in &twins {
+                    let p = &s.mesh.positions;
+                    let gap = p[twin].distance(mirror(p[v]));
+                    assert!(gap < 1e-4, "{brush:?} at {offset}: {gap}");
+                }
+            }
+            // Old logs replay as they were sculpted: stronger just off it.
+            let (summed, ..) = stroke(brush, 0.1, true);
+            assert!(summed / centred > 1.2, "{brush:?}: {}", summed / centred);
+        }
     }
 
     #[test]
