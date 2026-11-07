@@ -640,9 +640,6 @@ impl App {
         let visuals = ui.visuals().clone();
         let text = visuals.widgets.active.fg_stroke.color;
         let muted = visuals.widgets.inactive.fg_stroke.color;
-        if self.calipers.set.list.is_empty() {
-            ui.label(egui::RichText::new(tr.empty).color(muted));
-        }
         let mut remove = None;
         let mut flip = None;
         // Within the panel as it shows, though a long line elsewhere in it
