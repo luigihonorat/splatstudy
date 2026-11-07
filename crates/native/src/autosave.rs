@@ -11,10 +11,10 @@
 //! drawn. Found at start, the restore is only offered.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use splatstudy_core::App;
-use splatstudy_core::scene::autosave::{Autosave as Bytes, Trouble};
+use splatstudy_core::scene::autosave::{Autosave as Bytes, Pace, Trouble};
 use splatstudy_core::scene::{self, BlobKey};
 
 const SCENE: &str = "autosave.splatstudy";
@@ -22,8 +22,6 @@ const PREFIX: &str = "autosave-";
 const SUFFIX: &str = ".ref";
 /// There while a restore is under way, until a frame shows it.
 const RESTORING: &str = "restoring";
-/// Time without a change before saving.
-const QUIET: Duration = Duration::from_secs(2);
 
 fn blob_path(folder: &Path, key: BlobKey) -> PathBuf {
     folder.join(format!("{PREFIX}{}{SUFFIX}", key.name()))
@@ -32,8 +30,9 @@ fn blob_path(folder: &Path, key: BlobKey) -> PathBuf {
 pub struct Autosave {
     /// `None` once writing failed, or when there is no folder.
     folder: Option<PathBuf>,
-    seen: u64,
-    changed_at: Instant,
+    /// When to save; its clock counts seconds from `started`.
+    pace: Pace,
+    started: Instant,
     stored: u64,
     /// A restore was done; the `restoring` file goes once a frame shows it.
     await_frame: bool,
@@ -86,8 +85,8 @@ impl Autosave {
         let revision = app.scene_revision();
         let autosave = Self {
             folder,
-            seen: revision,
-            changed_at: Instant::now(),
+            pace: Pace::new(revision, 0.0),
+            started: Instant::now(),
             stored: revision,
             await_frame,
         };
@@ -103,7 +102,13 @@ impl Autosave {
         }
     }
 
-    /// Saves when the scene changed and has been quiet a moment, or at
+    /// Seconds since watching began.
+    fn now(&self) -> f64 {
+        self.started.elapsed().as_secs_f64()
+    }
+
+    /// Saves when the scene changed and has been quiet a moment, or has
+    /// gone unsaved for long (at the next pause between strokes), or at
     /// once when the app is `leaving`. Call it after every frame and once
     /// before quitting. Also restores the autosave when the user asks.
     pub fn tick(&mut self, app: &mut App, leaving: bool) {
@@ -111,25 +116,23 @@ impl Autosave {
             match crate::config::folder().and_then(|folder| restore_from(app, &folder)) {
                 Some(_) => {
                     self.await_frame = true;
-                    self.seen = app.scene_revision();
-                    self.stored = self.seen;
+                    self.stored = app.scene_revision();
+                    self.pace.reset(self.stored, self.now());
                 }
                 None => app.autosave_gone(),
             }
         }
         let revision = app.scene_revision();
-        if revision != self.seen {
-            self.seen = revision;
-            self.changed_at = Instant::now();
-        }
-        let quiet = leaving || self.changed_at.elapsed() >= QUIET;
-        if self.folder.is_none() || revision == self.stored || !quiet {
+        let now = self.now();
+        let due = self.pace.due(revision, now) || leaving;
+        if self.folder.is_none() || revision == self.stored || !due {
             return;
         }
         if !app.autosave_ready(leaving) {
             return;
         }
         let bytes = app.autosave_bytes();
+        self.pace.saved(now);
         let folder = self.folder.clone().expect("checked");
         match write(&folder, bytes) {
             Ok(()) => {

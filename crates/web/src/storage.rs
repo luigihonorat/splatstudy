@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use js_sys::Uint8Array;
 use splatstudy_core::App;
-use splatstudy_core::scene::autosave::{Autosave as Bytes, Trouble};
+use splatstudy_core::scene::autosave::{Autosave as Bytes, Pace, Trouble};
 use splatstudy_core::scene::{self, BlobKey};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -247,8 +247,6 @@ extern "C" {
     fn page_hidden() -> bool;
 }
 
-/// Seconds without a change before saving.
-const QUIET: f64 = 2.0;
 /// How often the revision is looked at, in ms.
 const POLL_MS: i32 = 500;
 /// Room kept free beyond the file itself when deciding whether it fits.
@@ -387,9 +385,10 @@ pub type WithApp = Rc<dyn Fn(&mut dyn FnMut(&mut App))>;
 struct State {
     /// False once storing failed: the app goes on without autosave.
     on: bool,
-    /// The revision last seen, and when it changed (seconds).
+    /// The revision last seen.
     seen: u64,
-    changed_at: f64,
+    /// When to save (seconds on the page's clock).
+    pace: Pace,
     /// The revision stored, or restored; `None` when another tab wrote
     /// since.
     stored: Option<u64>,
@@ -461,7 +460,7 @@ impl Autosave {
             state: Rc::new(RefCell::new(State {
                 on: true,
                 seen: revision,
-                changed_at: now(),
+                pace: Pace::new(revision, now()),
                 stored: Some(revision),
                 overwritten_at: None,
                 heard: 0,
@@ -518,7 +517,8 @@ impl Autosave {
         Ok(())
     }
 
-    /// Saves if the scene changed and has been quiet long enough, or at
+    /// Saves if the scene changed and has been quiet long enough, or has
+    /// gone unsaved for long (at the next pause between strokes), or at
     /// once when the page is `leaving`.
     fn poll(&self, leaving: bool) {
         let this = self.clone();
@@ -537,12 +537,9 @@ impl Autosave {
         }
         let revision = app.scene_revision();
         let t = now();
-        if revision != st.seen {
-            st.seen = revision;
-            st.changed_at = t;
-        }
-        let quiet = leaving || t - st.changed_at >= QUIET;
-        if !st.on || !st.unsaved(revision, leaving) || !quiet {
+        st.seen = revision;
+        let due = st.pace.due(revision, t) || leaving;
+        if !st.on || !st.unsaved(revision, leaving) || !due {
             return;
         }
         if !app.autosave_ready(leaving) {
@@ -562,6 +559,7 @@ impl Autosave {
         let started = now();
         let bytes = app.autosave_bytes();
         crate::timing::note("autosave scene", now() - started);
+        st.pace.saved(t);
         st.writing = true;
         st.issued += 1;
         let (issued, heard) = (st.issued, st.heard);
@@ -622,6 +620,7 @@ impl Autosave {
             st.writing = false;
             if let (Some(blob), Some(revision)) = (restored, revision) {
                 st.seen = revision;
+                st.pace.reset(revision, now());
                 st.stored = Some(revision);
                 st.overwritten_at = None;
                 st.stored_blob = blob;
