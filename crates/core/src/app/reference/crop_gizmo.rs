@@ -248,13 +248,13 @@ impl Gizmo {
 
 impl App {
     /// The crop box's handles in the reference view laid out in `rect`,
-    /// if they show: the crop is on and its group was drawn open in the
-    /// panel this pass, or one of them is being dragged.
+    /// if they show: the crop is being edited and its group was drawn open
+    /// in the panel this pass, or one of them is being dragged.
     fn crop_gizmo(&self, ctx: &egui::Context, rect: Rect) -> Option<Gizmo> {
         let state = &self.reference;
         let r = state.current.as_ref()?;
-        let editing =
-            state.crop_drag.is_some() || state.crop_shown == Some(ctx.cumulative_pass_nr());
+        let editing = state.crop_drag.is_some()
+            || (state.crop_editing && state.crop_shown == Some(ctx.cumulative_pass_nr()));
         if r.crop.is_none() || matches!(r.content, Content::Image(_)) || !editing || !shown(rect) {
             return None;
         }
@@ -561,13 +561,15 @@ mod tests {
         obj.into_bytes()
     }
 
-    /// The app with the cube as its reference, cropped to the whole range.
+    /// The app with the cube as its reference, cropped to the whole range,
+    /// the crop box being edited.
     fn cropped_cube() -> Option<Harness> {
         let mut h = Harness::new()?;
         h.app.load_reference("cube.obj", cube_obj().into());
         let state = &mut h.app.reference;
         let r = state.current.as_mut().unwrap();
         r.crop = state.crop.to_box(r.align.up);
+        state.crop_editing = true;
         r.fit();
         h.frames(2);
         Some(h)
@@ -580,6 +582,29 @@ mod tests {
         let r = state.current.as_ref().unwrap();
         let mirror = app.study.views[REFERENCE].mirror;
         Gizmo::new(&app.cameras[REFERENCE], rect, mirror, r.align, state.crop).unwrap()
+    }
+
+    #[test]
+    fn done_editing_the_crop_holds_and_its_handles_go() {
+        let Some(mut h) = cropped_cube() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let g = gizmo_of(&h.app);
+        let at = g.screen(g.place(Handle::Face(1))).unwrap();
+        let d = g.face_axis(1).unwrap();
+        h.app.reference.crop_editing = false;
+        h.frames(1);
+        let crop = h.app.reference.current.as_ref().unwrap().crop;
+        let sides = h.app.reference.crop.sides;
+        let camera = h.app.cameras[REFERENCE];
+        // Where the handle was, a drag now turns the view.
+        h.drag(at, at - d * 0.2);
+        assert_eq!(h.app.reference.crop.sides, sides);
+        assert_ne!(h.app.cameras[REFERENCE], camera, "the view turned");
+        let r = h.app.reference.current.as_ref().unwrap();
+        assert!(crop.is_some());
+        assert_eq!(r.crop, crop, "the crop holds");
     }
 
     #[test]

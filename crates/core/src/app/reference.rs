@@ -56,6 +56,9 @@ pub(super) struct ReferenceState {
     /// The egui pass in which the crop group was last drawn open: its
     /// handles show over the view in that pass.
     crop_shown: Option<u64>,
+    /// Whether the crop box is being edited: its handles over the view and
+    /// its sides in the panel. The crop holds either way.
+    crop_editing: bool,
     /// The egui pass in which a crop slider was last being dragged.
     crop_sliding: Option<u64>,
     /// A mesh reference cut by its crop box and capped, in the file's
@@ -550,7 +553,9 @@ impl App {
         }
     }
 
-    /// The crop box, on or off, and its six sides.
+    /// The crop box: editing it on or off, its six sides while it is
+    /// edited, and taking the crop away. Done editing, the crop holds; only
+    /// the handles and sides go.
     fn reference_crop(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         let state = &mut self.reference;
@@ -559,16 +564,19 @@ impl App {
         let Some(r) = state.current.as_mut() else {
             return;
         };
-        let on = r.crop.is_some();
-        if ui::choice(ui, tr.refs.crop_box, on).clicked() {
-            r.crop = if on {
-                None
-            } else {
-                state.crop.to_box(r.align.up)
-            };
+        if ui::choice(ui, tr.refs.crop_box, state.crop_editing).clicked() {
+            state.crop_editing = !state.crop_editing;
+            if state.crop_editing && r.crop.is_none() {
+                r.crop = state.crop.to_box(r.align.up);
+                r.fit();
+            }
+        }
+        if r.crop.is_some() && ui::choice(ui, tr.refs.remove_crop, false).clicked() {
+            r.crop = None;
+            state.crop_editing = false;
             r.fit();
         }
-        if r.crop.is_none() {
+        if r.crop.is_none() || !state.crop_editing {
             return;
         }
         let labels = [
