@@ -386,6 +386,7 @@ impl App {
         let name = format!("{}-timelapse", self.scene_stem());
         let job = Job::new(
             &self.device,
+            &self.queue,
             settings,
             replay,
             self.cameras,
