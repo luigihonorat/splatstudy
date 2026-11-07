@@ -146,11 +146,12 @@ pub struct StudyView {
     /// Where each plumb line hangs, as a share of its view's width.
     pub plumb_x: [f32; 2],
     pub grid_divisions: u32,
-    /// The sculpt view's own: the reference over it, the wireframe and
-    /// the silhouette difference.
+    /// The sculpt view's own: the reference over it, the wireframe, the
+    /// silhouette difference and the flat shading.
     pub ghost: bool,
     pub wireframe: bool,
     pub tint: bool,
+    pub flat_shading: bool,
 }
 
 /// The aids one view has of its own.
@@ -196,7 +197,7 @@ impl StudyView {
             let flags = bits(&[aids.mirror, aids.plumb, aids.grid, aids.silhouette, ortho]);
             w.u8(flags).u8(aids.lighting);
         }
-        w.u8(bits(&[self.wireframe, self.tint]));
+        w.u8(bits(&[self.wireframe, self.tint, self.flat_shading]));
     }
 }
 
@@ -900,6 +901,7 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
             ghost: on(6),
             wireframe: false,
             tint: false,
+            flat_shading: false,
         };
         if !r.is_empty() {
             for (aids, camera) in study.views.iter_mut().zip(&mut cameras) {
@@ -918,6 +920,8 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
             let flags = r.u8()?;
             study.wireframe = flags & 1 != 0;
             study.tint = flags & 2 != 0;
+            // Absent from files from before it: smooth.
+            study.flat_shading = flags & 4 != 0;
         }
         Some(study)
     };
@@ -1020,6 +1024,7 @@ mod tests {
                 ghost: false,
                 wireframe: true,
                 tint: true,
+                flat_shading: true,
             }),
         }
     }
@@ -1555,7 +1560,7 @@ mod tests {
         assert_eq!(study.views, [both; 2]);
         assert!(study.swapped && study.ghost && !study.link);
         assert_eq!((study.layout, study.grid_divisions), (2, 3));
-        assert!(!study.wireframe && !study.tint);
+        assert!(!study.wireframe && !study.tint && !study.flat_shading);
     }
 
     /// Readers from before each view had its own aids read the shared

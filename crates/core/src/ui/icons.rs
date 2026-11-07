@@ -105,6 +105,30 @@ pub fn wireframe(painter: &Painter, rect: Rect, colour: Color32) {
     pen.ellipse((8.0, 8.0), 2.5, 6.5);
 }
 
+/// A faceted ball: an octagon around a flat front face, its corners
+/// joined to the outline, as flat shading shows a coarse sphere.
+pub fn flat_shading(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    let outline = [
+        (5.5, 1.5),
+        (10.5, 1.5),
+        (14.5, 5.5),
+        (14.5, 10.5),
+        (10.5, 14.5),
+        (5.5, 14.5),
+        (1.5, 10.5),
+        (1.5, 5.5),
+    ];
+    pen.polyline(&outline, true);
+    let face = [(5.5, 5.5), (10.5, 5.5), (10.5, 10.5), (5.5, 10.5)];
+    pen.polyline(&face, true);
+    // Each corner of the face to the two outline corners nearest it.
+    for (k, &corner) in face.iter().enumerate() {
+        pen.line(corner, outline[2 * k]);
+        pen.line(corner, outline[(2 * k + 7) % 8]);
+    }
+}
+
 /// Where the light comes from, for the lightings in
 /// [`crate::render::clay::Lighting`] order: studio (above left), raking
 /// (low from the side) and top.

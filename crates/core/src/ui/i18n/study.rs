@@ -38,6 +38,8 @@ pub struct StudyTr {
     pub top_light: &'static str,
     /// The mesh's edges drawn over the clay, in the view menu.
     pub wireframe: &'static str,
+    /// The clay shaded facet by facet; off, it is shaded smooth.
+    pub flat_shading: &'static str,
     /// The perspective, on; off, the view is orthographic.
     pub perspective: &'static str,
     /// The viewpoint from below, beside front, back and top (in `Tr`).
@@ -90,6 +92,7 @@ pub const JA: StudyTr = StudyTr {
     raking: "斜光",
     top_light: "天窓",
     wireframe: "ワイヤーフレーム",
+    flat_shading: "フラットシェーディング",
     perspective: "パース表示",
     bottom: "下",
     frame_reference: "モチーフに合わせる",
@@ -129,6 +132,7 @@ pub const EN: StudyTr = StudyTr {
     raking: "raking",
     top_light: "top",
     wireframe: "wireframe",
+    flat_shading: "flat shading",
     perspective: "perspective",
     bottom: "bottom",
     frame_reference: "frame reference",
@@ -168,6 +172,7 @@ pub const FR: StudyTr = StudyTr {
     raking: "rasant",
     top_light: "zénithal",
     wireframe: "fil de fer",
+    flat_shading: "ombrage plat",
     perspective: "perspective",
     bottom: "dessous",
     frame_reference: "cadrer le modèle",

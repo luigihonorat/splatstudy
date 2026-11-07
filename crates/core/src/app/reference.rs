@@ -872,6 +872,7 @@ impl App {
                     opacity,
                     vertex_colours: *coloured && !flat,
                     lighting,
+                    faceted: false,
                 };
                 if over {
                     clay.prepare_ghost(&self.queue, slot, camera, aspect, &look);

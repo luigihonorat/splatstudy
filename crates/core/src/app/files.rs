@@ -401,6 +401,7 @@ impl App {
             ghost: s.ghost,
             wireframe: s.wireframe,
             tint: s.matching.tint,
+            flat_shading: s.flat_shading,
         }
     }
 
@@ -428,6 +429,7 @@ impl App {
         s.ghost = view.ghost;
         s.wireframe = view.wireframe;
         s.matching.tint = view.tint;
+        s.flat_shading = view.flat_shading;
     }
 
     /// Scene items at the top of the file menu.
@@ -781,7 +783,7 @@ mod tests {
             "another file",
         );
 
-        let toggles: [fn(&mut StudyView); 17] = [
+        let toggles: [fn(&mut StudyView); 18] = [
             |s| s.swapped = true,
             |s| s.link = true,
             |s| s.views[0].mirror = true,
@@ -794,6 +796,7 @@ mod tests {
             |s| s.ghost = true,
             |s| s.wireframe = true,
             |s| s.tint = true,
+            |s| s.flat_shading = true,
             |s| s.layout = 1,
             |s| s.plumb_x[0] = 0.3,
             |s| s.plumb_x[1] = 0.7,

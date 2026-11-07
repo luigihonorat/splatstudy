@@ -17,8 +17,8 @@
 //!   - an aid each view has of its own: `silhouette`, `mirror`, `plumb`,
 //!     `grid`, `ortho` (or `perspective`), and a lighting: `studio`,
 //!     `raking`, `top-light`;
-//!   - an aid both views share: `ghost`, `wireframe`, `difference`,
-//!     `link`, `swap`, `measure`;
+//!   - an aid both views share: `ghost`, `wireframe`, `flat-shading`,
+//!     `difference`, `link`, `swap`, `measure`;
 //!   - in `view=` only, the views that show: `both`, `sculpt`,
 //!     `reference`.
 //!
@@ -64,6 +64,7 @@ struct ViewSettings {
 struct Shared {
     ghost: Option<bool>,
     wireframe: Option<bool>,
+    flat_shading: Option<bool>,
     difference: Option<bool>,
     link: Option<bool>,
     swap: Option<bool>,
@@ -162,6 +163,7 @@ impl Shared {
         let switch = match name {
             "ghost" => &mut self.ghost,
             "wireframe" => &mut self.wireframe,
+            "flat-shading" => &mut self.flat_shading,
             "difference" => &mut self.difference,
             "link" => &mut self.link,
             "swap" => &mut self.swap,
@@ -348,6 +350,7 @@ impl App {
         let shared = &o.shared;
         set(&mut st.ghost, shared.ghost);
         set(&mut st.wireframe, shared.wireframe);
+        set(&mut st.flat_shading, shared.flat_shading);
         set(&mut st.matching.tint, shared.difference);
         set(&mut st.swapped, shared.swap);
         set(&mut st.link, shared.link);
@@ -439,7 +442,7 @@ mod tests {
     #[test]
     fn shared_aids_layout_and_the_rest() {
         let o = StartOptions::parse(
-            "sample=brutus&view=Link,ghost,no-swap,reference&sculpt=wireframe,perspective\
+            "sample=brutus&view=Link,ghost,no-swap,reference&sculpt=wireframe,flat-shading,perspective\
              &grid=3&hide=panels&tool=Smooth&symmetry&timer=10x3",
         );
         assert_eq!(o.sample, Some("brutus"));
@@ -447,6 +450,9 @@ mod tests {
         assert_eq!(o.shared.ghost, Some(true));
         assert_eq!(o.shared.swap, Some(false));
         assert_eq!(o.shared.wireframe, Some(true));
+        assert_eq!(o.shared.flat_shading, Some(true));
+        let off = StartOptions::parse("sculpt=flat-shading,no-flat-shading");
+        assert_eq!(off.shared.flat_shading, Some(false));
         assert_eq!(o.views[SCULPT].ortho, Some(false));
         assert_eq!(o.layout, Some(Layout::Reference));
         assert_eq!(o.grid_divisions, Some(3));

@@ -68,6 +68,9 @@ pub(super) struct StudyState {
     pub(super) matching: SilhouetteMatch,
     /// The clay's edges drawn over it: quads as quads.
     pub(super) wireframe: bool,
+    /// The clay shaded flat, each triangle as one plane, rather than
+    /// smooth.
+    pub(super) flat_shading: bool,
 }
 
 /// How near the plumb line's bob a press must land to take the line, in
@@ -335,6 +338,7 @@ impl Default for StudyState {
             measure: Measure::default(),
             matching: SilhouetteMatch::default(),
             wireframe: false,
+            flat_shading: false,
         }
     }
 }
@@ -370,6 +374,7 @@ impl App {
             Look::lit(theme::CLAY)
         };
         look.with_lighting(aids.lighting)
+            .with_facets(self.study.flat_shading)
     }
 
     /// Draws the clay's edges over the clay just drawn into `slot` as the
@@ -547,6 +552,7 @@ impl App {
         for option in [
             ViewOption::Ghost,
             ViewOption::Wireframe,
+            ViewOption::FlatShading,
             ViewOption::Difference,
         ] {
             self.option_item(ui, option, SCULPT);
@@ -1720,6 +1726,7 @@ pub(super) mod tests {
         };
         st.views[SCULPT].plumb = true;
         st.wireframe = true;
+        st.flat_shading = true;
         h.app.cameras[REFERENCE].ortho = true;
         let before = h.app.scene_revision();
         h.app.apply(ViewOption::Perspective, SCULPT);
@@ -1730,10 +1737,11 @@ pub(super) mod tests {
         h.app.new_scene();
         h.app.study.views = Default::default();
         h.app.study.wireframe = false;
+        h.app.study.flat_shading = false;
         h.app.cameras[REFERENCE].ortho = false;
         assert!(h.app.restore_autosave(&saved, None));
         assert_eq!(h.app.study.views, views);
-        assert!(h.app.study.wireframe);
+        assert!(h.app.study.wireframe && h.app.study.flat_shading);
         assert!(h.app.cameras[REFERENCE].ortho && !h.app.cameras[SCULPT].ortho);
     }
 }
