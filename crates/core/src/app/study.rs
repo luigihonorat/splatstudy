@@ -13,6 +13,7 @@ use crate::camera::OrbitCamera;
 use crate::input::Modifiers;
 use crate::reference::{Aabb, Alignment, Content};
 use crate::render::clay::{self, Lighting, Look, Overlap};
+use crate::render::difference::{Canvas, Difference, Masks};
 use crate::render::readback::Readback;
 use crate::render::{Slot, ViewTarget};
 use crate::ui::{fonts, guides, menu, theme};
@@ -121,9 +122,11 @@ fn from_heights(rect: Rect, at: Vec2) -> Pos2 {
 
 /// The silhouette match: with the cameras linked, the clay and the
 /// reference are rendered flat from the same camera, small, and read back;
-/// the score is how much their outlines overlap. Compared again once the
-/// views have been still for a moment after a stroke or a turn, never
-/// every frame.
+/// the score is how much their outlines overlap. With the tint on, they
+/// are rendered flat again as large as the sculpt view and compared on
+/// the GPU, for a tint as sharp as the view. Compared again once the views
+/// have been still for a moment after a stroke or a turn, never every
+/// frame.
 #[derive(Default)]
 pub(super) struct SilhouetteMatch {
     /// Tint the sculpt view where the clay is too big and too small.
@@ -132,6 +135,11 @@ pub(super) struct SilhouetteMatch {
     seen: Option<(MatchKey, f64)>,
     /// The two small flat renders, kept between comparisons.
     targets: Option<[ViewTarget; 2]>,
+    /// The pass that draws the tint, made the first time it is on.
+    difference: Option<Difference>,
+    /// The tint's textures, the sculpt view's size, while it is on; and
+    /// the tint as egui shows it.
+    canvas: Option<(Canvas, egui::TextureId)>,
     pending: Option<PendingMatch>,
     result: Option<MatchResult>,
 }
@@ -142,6 +150,8 @@ struct MatchKey {
     camera: OrbitCamera,
     /// The flat renders' size, which has the sculpt view's shape.
     size: [u32; 2],
+    /// The sculpt view's size in pixels, the tint's.
+    display: [u32; 2],
     /// The clay: its log's length, its vertex count and a sample of its
     /// positions (opening a scene can bring a log as long).
     clay: (usize, usize, u64),
@@ -156,14 +166,16 @@ struct PendingMatch {
     key: MatchKey,
     readbacks: [Readback; 2],
     pixels: [Option<Vec<u8>>; 2],
+    /// The tint was drawn too, into the canvas.
+    tinted: bool,
 }
 
 struct MatchResult {
     key: MatchKey,
     /// 0..1; `None` when neither outline shows.
     iou: Option<f32>,
-    /// Where the clay is too big and too small, the size of the renders.
-    difference: egui::TextureHandle,
+    /// The canvas holds the tint for this comparison.
+    tinted: bool,
 }
 
 /// How long the views stay still before the silhouettes are compared, in
@@ -180,25 +192,6 @@ fn match_size(aspect: f32) -> [u32; 2] {
         (side * root).round().max(16.0) as u32,
         (side / root).round().max(16.0) as u32,
     ]
-}
-
-/// The difference between two flat renders, pixel by pixel: where the clay
-/// alone is inked, where the reference alone is, and clear elsewhere.
-fn difference_image(size: [u32; 2], clay: &[u8], reference: &[u8]) -> egui::ColorImage {
-    let over = theme::CLAY_OVER.gamma_multiply(0.6);
-    let under = theme::CLAY_UNDER.gamma_multiply(0.6);
-    let pixels = clay
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(reference.as_chunks::<4>().0)
-        .map(|(c, r)| match (clay::inked(c), clay::inked(r)) {
-            (true, false) => over,
-            (false, true) => under,
-            _ => Color32::TRANSPARENT,
-        })
-        .collect();
-    egui::ColorImage::new([size[0] as usize, size[1] as usize], pixels)
 }
 
 /// Round lengths offered, in minutes, and numbers of rounds.
@@ -845,6 +838,11 @@ impl App {
         Some(MatchKey {
             camera: self.cameras[SCULPT],
             size: match_size(rect.aspect_ratio()),
+            // As `fit_views` sizes the view.
+            display: {
+                let pixels = (rect.size() * self.ctx.pixels_per_point()).round();
+                [pixels.x.max(1.0) as u32, pixels.y.max(1.0) as u32]
+            },
             clay: (self.sculpt.log().len(), positions.len(), sample),
             reference: (
                 std::sync::Arc::as_ptr(&reference.source.bytes).cast::<u8>() as usize,
@@ -861,9 +859,13 @@ impl App {
         let Some(key) = self.match_key(rects) else {
             let matching = &mut self.study.matching;
             (matching.seen, matching.pending, matching.result) = (None, None, None);
+            self.drop_tint();
             return;
         };
         self.take_match();
+        if !self.study.matching.tint && self.study.matching.pending.is_none() {
+            self.drop_tint();
+        }
         let now = self.now;
         let still = self.drags.iter().all(Option::is_none);
         let matching = &mut self.study.matching;
@@ -875,10 +877,12 @@ impl App {
             }
         };
         let fresh = matching.result.as_ref().is_some_and(|r| r.key == key);
+        // The tint turned on over a fresh score: drawn then.
+        let untinted = matching.tint && matching.result.as_ref().is_some_and(|r| !r.tinted);
         if matching.pending.is_some() {
             // The browser maps the buffers between frames: look again.
             ui.ctx().request_repaint();
-        } else if !fresh {
+        } else if !fresh || untinted {
             let wait = MATCH_STILL - (now - since);
             if still && wait <= 0.0 {
                 self.start_match(key);
@@ -890,6 +894,17 @@ impl App {
             }
         }
         self.match_ui(ui, rects[SCULPT], fresh);
+    }
+
+    /// Lets the tint's textures go, while it is off or nothing is compared.
+    fn drop_tint(&mut self) {
+        let matching = &mut self.study.matching;
+        if let Some((_, id)) = matching.canvas.take() {
+            self.renderer.free_texture(&id);
+        }
+        if let Some(result) = &mut matching.result {
+            result.tinted = false;
+        }
     }
 
     /// Renders the clay and the reference flat into the small targets from
@@ -942,11 +957,80 @@ impl App {
         for readback in &readbacks {
             readback.map();
         }
+        let tinted = self.study.matching.tint;
+        if tinted {
+            self.draw_tint(&camera, key.display);
+        }
         self.study.matching.pending = Some(PendingMatch {
             key,
             readbacks,
             pixels: [None, None],
+            tinted,
         });
+    }
+
+    /// Renders the clay and the reference flat again, as large as the
+    /// sculpt view, and draws the tint from the two. Its own submit after
+    /// the score's, whose renders have their own size and so their own
+    /// uniforms.
+    fn draw_tint(&mut self, camera: &OrbitCamera, size: [u32; 2]) {
+        let matching = &mut self.study.matching;
+        matching
+            .difference
+            .get_or_insert_with(|| Difference::new(&self.device));
+        match &mut matching.canvas {
+            Some((canvas, id)) if canvas.size() != size => {
+                *canvas = Canvas::new(&self.device, size);
+                self.renderer.update_egui_texture_from_wgpu_texture(
+                    &self.device,
+                    &canvas.tint_view,
+                    wgpu::FilterMode::Nearest,
+                    *id,
+                );
+            }
+            Some(_) => {}
+            None => {
+                let canvas = Canvas::new(&self.device, size);
+                let id = self.renderer.register_native_texture(
+                    &self.device,
+                    &canvas.tint_view,
+                    wgpu::FilterMode::Nearest,
+                );
+                matching.canvas = Some((canvas, id));
+            }
+        }
+        let matching = &self.study.matching;
+        let (Some(difference), Some((canvas, _))) = (&matching.difference, &matching.canvas) else {
+            return;
+        };
+        let masks = Masks::new(&self.device, size);
+        let aspect = size[0] as f32 / size[1].max(1) as f32;
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.clay.prepare(
+            &self.queue,
+            Slot::SculptView,
+            camera,
+            aspect,
+            &Look::flat(theme::SILHOUETTE_INK),
+        );
+        {
+            let mut pass = masks.mask.begin_pass(&mut encoder, theme::VIEW_BG);
+            self.clay.draw(&mut pass, Slot::SculptView, &self.gpu_mesh);
+        }
+        masks.keep_clay(&mut encoder);
+        {
+            let mut pass = masks.mask.begin_pass(&mut encoder, theme::VIEW_BG);
+            let look = ReferenceLook {
+                flat: true,
+                ink: theme::SILHOUETTE_INK,
+                opacity: 1.0,
+                over: false,
+                lighting: Lighting::default(),
+            };
+            self.draw_reference_sized(&mut pass, Slot::ReferenceView, camera, size, &look);
+        }
+        difference.draw(&self.device, &mut encoder, &masks, canvas);
+        self.queue.submit([encoder.finish()]);
     }
 
     /// Takes the flat renders' pixels as they arrive, and scores them once
@@ -972,17 +1056,11 @@ impl App {
         let [Some(clay), Some(reference)] = &pending.pixels else {
             return;
         };
-        let size = pending.key.size;
         let iou = Overlap::of(clay, reference).iou();
-        let difference = self.ctx.load_texture(
-            "silhouette difference",
-            difference_image(size, clay, reference),
-            egui::TextureOptions::LINEAR,
-        );
         matching.result = Some(MatchResult {
             key: pending.key.clone(),
             iou,
-            difference,
+            tinted: pending.tinted && matching.canvas.is_some(),
         });
         matching.pending = None;
     }
@@ -997,13 +1075,17 @@ impl App {
         let st = self.lang.tr().study;
         let painter = ui.painter().with_clip_rect(rect);
         let tint = self.study.matching.tint;
-        if tint && fresh {
+        if let Some((_, id)) = &self.study.matching.canvas
+            && tint
+            && fresh
+            && result.tinted
+        {
             let uv = if self.study.views[SCULPT].mirror {
                 Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))
             } else {
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
             };
-            painter.image(result.difference.id(), rect, uv, Color32::WHITE);
+            painter.image(*id, rect, uv, Color32::WHITE);
         }
         let score = result
             .iou
@@ -1167,6 +1249,7 @@ pub(super) mod tests {
     /// GPU adapter, and the tests that need one skip.
     pub(in crate::app) struct Harness {
         pub(in crate::app) app: App,
+        target: wgpu::Texture,
         view: wgpu::TextureView,
         time: f64,
     }
@@ -1192,13 +1275,14 @@ pub(super) mod tests {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             let app = App::new(device, queue, format, crate::Lang::En);
             let mut h = Self {
                 app,
                 view: target.create_view(&Default::default()),
+                target,
                 time: 0.0,
             };
             h.frames(2);
@@ -1210,6 +1294,16 @@ pub(super) mod tests {
                 self.time += 1.0 / 60.0;
                 self.app.frame(self.time, &self.view, SIZE, 1.0);
             }
+        }
+
+        /// The last frame's pixels, RGBA8 rows from the top.
+        pub(in crate::app) fn screen(&self) -> Vec<u8> {
+            let device = &self.app.device;
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let readback = Readback::copy_texture(device, &mut encoder, &self.target);
+            self.app.queue.submit([encoder.finish()]);
+            readback.map();
+            readback.wait(device).expect("the frame's pixels")
         }
 
         /// One frame, and what it asked the shell for.
@@ -1323,19 +1417,6 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn the_difference_tints_too_big_and_too_small_apart() {
-        let ink = theme::SILHOUETTE_INK.to_array();
-        let bg = theme::VIEW_BG.to_array();
-        let clay = [ink, ink, bg, bg].concat();
-        let reference = [ink, bg, ink, bg].concat();
-        let image = difference_image([4, 1], &clay, &reference);
-        assert_eq!(image.pixels[0], Color32::TRANSPARENT, "both");
-        assert_eq!(image.pixels[1], theme::CLAY_OVER.gamma_multiply(0.6));
-        assert_eq!(image.pixels[2], theme::CLAY_UNDER.gamma_multiply(0.6));
-        assert_eq!(image.pixels[3], Color32::TRANSPARENT, "neither");
-    }
-
     /// The sphere the clay starts as, written as an OBJ.
     fn clay_as_obj() -> Vec<u8> {
         let (mesh, _) = super::super::sculpting::start_clay();
@@ -1398,6 +1479,105 @@ pub(super) mod tests {
         h.app.follow_camera(SCULPT);
         let turned = h.settled_match().expect("a score");
         assert!((turned - smaller).abs() < 0.06, "{turned}");
+    }
+
+    #[test]
+    fn the_difference_tint_is_as_sharp_as_the_view() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        // The clay as the reference at 70 %: a ring of "too big" round it.
+        h.app.load_reference("clay.obj", clay_as_obj().into());
+        h.app.reference.current.as_mut().unwrap().align = Alignment::default();
+        h.app.reference.current.as_mut().unwrap().align.scale *= 0.7;
+        h.app.study.link = true;
+        h.app.study.matching.tint = true;
+        h.app.follow_camera(SCULPT);
+        h.settled_match().expect("a score");
+        assert!(h.app.study.matching.result.as_ref().unwrap().tinted);
+
+        let (canvas, _) = h.app.study.matching.canvas.as_ref().expect("a tint");
+        let size = canvas.size();
+        assert_eq!(size, h.app.views[SCULPT].size, "the view's own pixels");
+        let device = &h.app.device;
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let readback = Readback::copy_texture(device, &mut encoder, &canvas.tint);
+        h.app.queue.submit([encoder.finish()]);
+        readback.map();
+        let pixels = readback.wait(device).unwrap();
+        let alpha = |x: u32, y: u32| pixels[((y * size[0] + x) * 4 + 3) as usize];
+        let full = theme::CLAY_OVER.gamma_multiply(0.6).a();
+
+        // Across the middle row and column, the ring's four edges each go
+        // from clear to the full tone within two pixels.
+        let (cx, cy) = (size[0] / 2, size[1] / 2);
+        let row: Vec<u8> = (0..size[0]).map(|x| alpha(x, cy)).collect();
+        let column: Vec<u8> = (0..size[1]).map(|y| alpha(cx, y)).collect();
+        for (name, line) in [("row", row), ("column", column)] {
+            let solid = line.iter().filter(|&&a| a + 4 >= full).count();
+            assert!(solid > 40, "{name}: the ring shows ({solid} px)");
+            assert!(line[line.len() / 2] < 4, "{name}: clear where both are");
+            let mut edges = 0;
+            let mut run = 0;
+            for &a in &line {
+                if a > 4 && a + 4 < full {
+                    run += 1;
+                } else {
+                    if run > 0 {
+                        edges += 1;
+                    }
+                    assert!(run <= 2, "{name}: an edge {run} pixels wide in {line:?}");
+                    run = 0;
+                }
+            }
+            assert!(edges <= 4, "{name}: {edges} soft edges");
+        }
+
+        // Off again: the tint's textures go.
+        h.app.study.matching.tint = false;
+        h.frames(2);
+        assert!(h.app.study.matching.canvas.is_none());
+    }
+
+    /// The difference tint over the sculpt view, written as PNGs (the
+    /// frame, and an edge enlarged eight times) into the folder that
+    /// `SPLATSTUDY_SILHOUETTE_PNG` names; skipped without it.
+    #[test]
+    fn the_difference_tint_as_pngs() {
+        let Ok(dir) = std::env::var("SPLATSTUDY_SILHOUETTE_PNG") else {
+            return;
+        };
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.load_reference("clay.obj", clay_as_obj().into());
+        h.app.reference.current.as_mut().unwrap().align = Alignment::default();
+        h.app.reference.current.as_mut().unwrap().align.scale *= 0.7;
+        h.app.study.link = true;
+        h.app.study.matching.tint = true;
+        h.app.follow_camera(SCULPT);
+        h.settled_match().expect("a score");
+        h.frames(2);
+        let pixels = h.screen();
+        let dir = std::path::Path::new(&dir);
+        let png = crate::export::png(&pixels, SIZE).unwrap();
+        std::fs::write(dir.join("frame.png"), png).unwrap();
+        // 96 × 64 pixels up and right of the middle of the sculpt view,
+        // where both edges of the tint ring run slanted, eight times as large.
+        let rect = h.app.view_rects[SCULPT];
+        let (x0, y0) = (rect.center().x as u32 + 70, rect.center().y as u32 - 165);
+        let (w, h8) = (96u32, 64u32);
+        let mut zoom = Vec::new();
+        for y in 0..h8 * 8 {
+            for x in 0..w * 8 {
+                let at = (((y0 + y / 8) * SIZE[0] + x0 + x / 8) * 4) as usize;
+                zoom.extend_from_slice(&pixels[at..at + 4]);
+            }
+        }
+        let png = crate::export::png(&zoom, [w * 8, h8 * 8]).unwrap();
+        std::fs::write(dir.join("edge.png"), png).unwrap();
     }
 
     /// A `.splat` file of a few small grey splats around the origin.
