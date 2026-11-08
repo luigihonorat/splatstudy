@@ -175,12 +175,17 @@ impl Panels {
 
     /// Shift+Tab: one view alone (`alone`, the sculpt or the reference),
     /// without panels, or back to what there was before, panels and views
-    /// as they were.
+    /// as they were. Already that view alone, as a scene saved that way
+    /// reopens with nothing to go back to: both views and the panels.
     pub(super) fn toggle_focus(&mut self, layout: &mut Layout, alone: Layout) {
         match self.focus.take() {
             Some(before) => {
                 *layout = before.layout;
                 self.hidden = before.hidden;
+            }
+            None if *layout == alone => {
+                self.hidden = false;
+                *layout = Layout::Both;
             }
             None => {
                 self.focus = Some(Before {
@@ -320,7 +325,7 @@ mod tests {
             (false, Layout::Both),
             (true, Layout::Both),
             (false, Layout::Reference),
-            (true, Layout::Sculpt),
+            (true, Layout::Reference),
         ] {
             let mut panels = Panels {
                 hidden,
@@ -333,6 +338,26 @@ mod tests {
             panels.toggle_focus(&mut layout, Layout::Sculpt);
             assert_eq!((panels.hidden(), layout), (hidden, layout_before));
             assert!(!panels.focused());
+        }
+    }
+
+    #[test]
+    fn shift_tab_after_a_restart_in_the_sculpt_alone_brings_back_both_views() {
+        // A scene saved with one view alone reopens that way, panels shown
+        // or not, with nothing remembered from before.
+        for (alone, hidden) in [
+            (Layout::Sculpt, false),
+            (Layout::Sculpt, true),
+            (Layout::Reference, false),
+        ] {
+            let mut panels = Panels {
+                hidden,
+                ..Panels::default()
+            };
+            let mut layout = alone;
+            panels.toggle_focus(&mut layout, alone);
+            assert_eq!(layout, Layout::Both);
+            assert!(!panels.hidden() && !panels.focused());
         }
     }
 
