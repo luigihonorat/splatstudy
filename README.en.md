@@ -64,7 +64,7 @@ Eight were scanned by SMK, the National Gallery of Denmark, from its Royal Cast 
 - Calipers: measure between two points, shown in both views and kept with the scene
 - Pose timer (session length, rounds, pause)
 - Lighting presets: studio, raking, top; a background colour for each view
-- Each view has its own aids; Shift + click switches an aid in both views
+- A toolbar click switches an aid in both views; Shift + click in that view only
 
 ### Timelapse
 

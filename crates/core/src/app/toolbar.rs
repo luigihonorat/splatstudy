@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
 //! The toolbars over the views: a thin strip of icons inside each view's
-//! outer edge, the sculpt view's and the reference view's, each switching
-//! its own view's options. The view menu and the keys switch the same
-//! options, through [`App::apply`]. The sculpt's starts with the tool in
-//! hand; it and the lighting open a column of choices beside the toolbar
-//! (see [`crate::ui::flyout`]).
+//! outer edge, the sculpt view's and the reference view's. A click switches
+//! an option both views have in both, Shift + click in its own view only.
+//! The view menu and the keys switch the same options, through
+//! [`App::apply`]. The sculpt's starts with the tool in hand; it and the
+//! lighting open a column of choices beside the toolbar (see
+//! [`crate::ui::flyout`]).
 
 use egui::{Color32, CursorIcon, Rect, RectAlign, RichText, Sense, pos2, vec2};
 
@@ -95,8 +96,8 @@ impl ViewOption {
         }
     }
 
-    /// Whether each view has this of its own, so that Shift + click can
-    /// give both views the same.
+    /// Whether each view has this of its own, so that a click gives both
+    /// views the same, and Shift + click switches its own view only.
     pub(super) fn per_view(self) -> bool {
         use ViewOption::*;
         matches!(
@@ -375,11 +376,18 @@ impl App {
     }
 
     /// Switches `option` in view `index`, or does it, and does the same in
-    /// the other view if it has the option too: Shift + click on a toolbar
-    /// button.
+    /// the other view if it has the option too: a click on a toolbar
+    /// button. The other view takes view `index`'s new state, so views
+    /// that differed end alike.
     pub(super) fn apply_to_both(&mut self, option: ViewOption, index: usize) {
-        use ViewOption::*;
         self.apply(option, index);
+        self.match_other_view(option, index);
+    }
+
+    /// Gives the other view view `index`'s `option`, or does it there, if
+    /// that view has the option too.
+    fn match_other_view(&mut self, option: ViewOption, index: usize) {
+        use ViewOption::*;
         let other = if index == SCULPT { REFERENCE } else { SCULPT };
         if !groups(other, self.reference_kind())
             .concat()
@@ -399,7 +407,8 @@ impl App {
                 let shown = &mut self.calipers.set.shown;
                 shown[other] = shown[index];
             }
-            Frame | Reset => self.apply(option, other),
+            // Linked, the other camera already followed.
+            Frame | Reset if !self.study.link => self.apply(option, other),
             _ => {}
         }
     }
@@ -543,16 +552,17 @@ impl App {
             }
             flyout::Outcome::Closed => self.flyout = None,
             flyout::Outcome::Picked(k) => {
-                // Shift + click lights both views alike.
-                let both = ui.input(|i| i.modifiers.shift);
+                // Both views alike if the other has a lighting too; with
+                // Shift, this view only.
+                let one = ui.input(|i| i.modifiers.shift);
                 match option {
                     ViewOption::Tool => self.choose_brush(BRUSHES[k].0),
-                    _ if both => {
-                        for aids in &mut self.study.views {
-                            aids.lighting = Light::ALL[k];
+                    _ => {
+                        self.study.views[index].lighting = Light::ALL[k];
+                        if !one {
+                            self.match_other_view(option, index);
                         }
                     }
-                    _ => self.study.views[index].lighting = Light::ALL[k],
                 }
                 self.flyout = None;
                 self.dirty = true;
@@ -615,7 +625,8 @@ impl App {
                 };
                 option.icon(&painter, button, colour, shows);
                 if response.clicked() {
-                    let both = option.per_view() && ui.input(|i| i.modifiers.shift);
+                    // Shift + click: this view only.
+                    let both = option.per_view() && !ui.input(|i| i.modifiers.shift);
                     if option.has_flyout() {
                         self.toggle_flyout(option, index);
                     } else if both {
@@ -662,7 +673,7 @@ impl App {
                         Some(tr.mesh.tool_pie_hint)
                     } else {
                         (option.per_view() && self.study.layout == Layout::Both)
-                            .then_some(tr.study.both_views_hint)
+                            .then_some(tr.study.this_view_hint)
                     };
                     if let Some(hint) = hint {
                         ui.label(RichText::new(hint).font(fonts::regular(13.0)).color(muted));
@@ -839,57 +850,156 @@ mod tests {
         assert!(h.app.view_rects[SCULPT].contains_rect(panel));
     }
 
+    fn hold_shift(h: &mut Harness, held: bool) {
+        h.app
+            .push_event(crate::InputEvent::Modifiers(crate::input::Modifiers {
+                shift: held,
+                ..Default::default()
+            }));
+    }
+
+    fn press(h: &mut Harness, option: ViewOption, index: usize) {
+        let at = button_of(h, option, index).center();
+        click(h, at);
+    }
+
+    /// An octahedron as an OBJ: a mesh reference, which has a lighting.
+    fn octahedron() -> Vec<u8> {
+        let mut obj = String::new();
+        for v in ["1 0 0", "-1 0 0", "0 1 0", "0 -1 0", "0 0 1", "0 0 -1"] {
+            obj += &format!("v {v}\n");
+        }
+        for f in [
+            "1 3 5", "3 2 5", "2 4 5", "4 1 5", "3 1 6", "2 3 6", "4 2 6", "1 4 6",
+        ] {
+            obj += &format!("f {f}\n");
+        }
+        obj.into_bytes()
+    }
+
     #[test]
-    fn shift_click_switches_an_aid_in_both_views() {
+    fn a_click_switches_an_aid_in_both_views_and_shift_click_in_its_own() {
         let Some(mut h) = Harness::new() else {
             eprintln!("no GPU adapter; skipping app test");
             return;
         };
-        let shift = |h: &mut Harness, held: bool| {
-            h.app
-                .push_event(crate::InputEvent::Modifiers(crate::input::Modifiers {
-                    shift: held,
-                    ..Default::default()
-                }));
-        };
-        let press = |h: &mut Harness, option, index| {
-            let at = button_of(h, option, index).center();
-            click(h, at);
-        };
         let views = |h: &Harness| h.app.study.views.map(|v| (v.grid, v.silhouette));
 
-        shift(&mut h, true);
+        // A click: both views.
         press(&mut h, ViewOption::Grid, SCULPT);
         assert_eq!(views(&h), [(true, false); 2]);
         press(&mut h, ViewOption::Silhouette, REFERENCE);
         assert_eq!(views(&h), [(true, true); 2]);
-        // Both ortho, then both perspective again from either side.
-        press(&mut h, ViewOption::Perspective, SCULPT);
-        assert!(h.app.cameras.iter().all(|c| c.ortho));
-        // Already on in one view and off in the other: both take the
-        // clicked view's new state.
-        h.app.cameras[SCULPT].ortho = false;
-        press(&mut h, ViewOption::Perspective, REFERENCE);
-        assert!(h.app.cameras.iter().all(|c| !c.ortho));
-
-        // A plain click switches its own view only.
-        shift(&mut h, false);
         press(&mut h, ViewOption::Grid, REFERENCE);
-        assert_eq!(views(&h), [(true, true), (false, true)]);
+        assert_eq!(views(&h), [(false, true); 2]);
+        for option in [ViewOption::Plumb, ViewOption::Mirror] {
+            let was = h.app.option_on(option, SCULPT);
+            press(&mut h, option, SCULPT);
+            assert!(h.app.option_on(option, SCULPT) != was);
+            assert!(h.app.option_on(option, REFERENCE) != was, "{option:?}");
+        }
 
-        // Shift + a lighting lights both views.
-        press(&mut h, ViewOption::Lighting, SCULPT);
+        // Shift + click: its own view only.
+        hold_shift(&mut h, true);
+        press(&mut h, ViewOption::Grid, REFERENCE);
+        assert_eq!(views(&h), [(false, true), (true, true)]);
+        press(&mut h, ViewOption::Silhouette, SCULPT);
+        assert_eq!(views(&h), [(false, false), (true, true)]);
+        // Linked, the cameras share their projection anyway.
+        h.app.study.link = false;
+        press(&mut h, ViewOption::Perspective, SCULPT);
+        assert!(h.app.cameras[SCULPT].ortho && !h.app.cameras[REFERENCE].ortho);
+        hold_shift(&mut h, false);
+
+        // Views that differ end alike: both take the opposite of the
+        // clicked view's state.
+        press(&mut h, ViewOption::Grid, SCULPT);
+        assert_eq!(views(&h), [(true, false), (true, true)]);
+        press(&mut h, ViewOption::Silhouette, REFERENCE);
+        assert_eq!(views(&h), [(true, false); 2]);
+        press(&mut h, ViewOption::Perspective, REFERENCE);
+        assert!(h.app.cameras.iter().all(|c| c.ortho));
+        press(&mut h, ViewOption::Perspective, SCULPT);
+        assert!(h.app.cameras.iter().all(|c| !c.ortho));
+    }
+
+    #[test]
+    fn a_lighting_picked_lights_both_views_and_with_shift_its_own() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.load_reference("octahedron.obj", octahedron().into());
         h.frames(1);
-        let rows = h.app.flyout.clone().unwrap().rows;
-        shift(&mut h, true);
-        click(&mut h, rows[2].center());
+        let pick = |h: &mut Harness, index: usize, k: usize, shift: bool| {
+            press(h, ViewOption::Lighting, index);
+            h.frames(1);
+            let rows = h.app.flyout.clone().expect("open").rows;
+            hold_shift(h, shift);
+            click(h, rows[k].center());
+            hold_shift(h, false);
+        };
+        let lights = |h: &Harness| h.app.study.views.map(|v| v.lighting);
+        pick(&mut h, SCULPT, 2, false);
+        assert_eq!(lights(&h), [Light::ALL[2]; 2]);
+        pick(&mut h, REFERENCE, 1, true);
+        assert_eq!(lights(&h), [Light::ALL[2], Light::ALL[1]]);
+        pick(&mut h, REFERENCE, 0, false);
+        assert_eq!(lights(&h), [Light::ALL[0]; 2]);
+    }
+
+    #[test]
+    fn an_option_of_one_view_only_switches_that_view() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        let aids = h.app.study.views;
+        for shift in [false, true] {
+            hold_shift(&mut h, shift);
+            press(&mut h, ViewOption::Wireframe, SCULPT);
+            assert!(h.app.study.wireframe);
+            press(&mut h, ViewOption::Ghost, SCULPT);
+            assert!(h.app.study.ghost);
+            press(&mut h, ViewOption::Wireframe, SCULPT);
+            press(&mut h, ViewOption::Ghost, SCULPT);
+            assert!(!h.app.study.wireframe && !h.app.study.ghost);
+            assert_eq!(h.app.study.views, aids, "the views' aids untouched");
+        }
+        hold_shift(&mut h, false);
+        // With nothing in the reference view, the calipers are the
+        // sculpt's alone.
         assert!(
-            h.app
-                .study
-                .views
-                .iter()
-                .all(|v| v.lighting == Light::ALL[2])
+            !groups(REFERENCE, RefKind::Nothing)
+                .concat()
+                .contains(&ViewOption::Calipers)
         );
+        let shown = h.app.calipers.set.shown;
+        press(&mut h, ViewOption::Calipers, SCULPT);
+        assert_eq!(h.app.calipers.set.shown, [!shown[SCULPT], shown[REFERENCE]]);
+    }
+
+    #[test]
+    fn framing_both_views_keeps_the_clicked_views_framing_when_linked() {
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.load_reference("octahedron.obj", octahedron().into());
+        h.frames(1);
+        let at = |c: &crate::camera::OrbitCamera| (c.distance, c.target);
+        h.app.frame_sculpt();
+        let clay = at(&h.app.cameras[SCULPT]);
+        h.app.frame_reference();
+        let motif = at(&h.app.cameras[REFERENCE]);
+        assert_ne!(clay, motif, "framed apart");
+
+        h.app.study.link = true;
+        h.app.cameras[SCULPT].distance = 9.0;
+        h.app.follow_camera(SCULPT);
+        press(&mut h, ViewOption::Frame, SCULPT);
+        assert_eq!(at(&h.app.cameras[SCULPT]), clay);
+        assert_eq!(at(&h.app.cameras[REFERENCE]), clay, "linked");
     }
 
     #[test]

@@ -996,11 +996,7 @@ mod tests {
         h.app.load_reference("octahedron.obj", octahedron().into());
         h.frames(1);
         assert!(h.app.calipers_drawn(SCULPT) && h.app.calipers_drawn(REFERENCE));
-        press(&mut h, ViewOption::Calipers, REFERENCE);
-        assert_eq!(h.app.calipers.set.shown, [true, false]);
-        assert!(!h.app.calipers_drawn(REFERENCE));
-        assert!(!h.app.option_on(ViewOption::Calipers, REFERENCE));
-        // Shift + click: both views alike.
+        // Shift + click: this view only.
         let shift = |h: &mut Harness, shift| {
             let m = crate::input::Modifiers {
                 shift,
@@ -1009,11 +1005,16 @@ mod tests {
             h.app.push_event(crate::InputEvent::Modifiers(m));
         };
         shift(&mut h, true);
-        press(&mut h, ViewOption::Calipers, SCULPT);
-        assert_eq!(h.app.calipers.set.shown, [false; 2]);
+        press(&mut h, ViewOption::Calipers, REFERENCE);
+        assert_eq!(h.app.calipers.set.shown, [true, false]);
+        assert!(!h.app.calipers_drawn(REFERENCE));
+        assert!(!h.app.option_on(ViewOption::Calipers, REFERENCE));
+        // A click: both views alike, the clicked one's new state.
         shift(&mut h, false);
         press(&mut h, ViewOption::Calipers, SCULPT);
-        assert_eq!(h.app.calipers.set.shown, [true, false]);
+        assert_eq!(h.app.calipers.set.shown, [false; 2]);
+        press(&mut h, ViewOption::Calipers, SCULPT);
+        assert_eq!(h.app.calipers.set.shown, [true; 2]);
         // Hidden, an end can't be taken: the press sculpts.
         let c = h.app.view_rects[SCULPT].center();
         let point = h.app.pick(h.app.view_rects[SCULPT], c).unwrap().point;
