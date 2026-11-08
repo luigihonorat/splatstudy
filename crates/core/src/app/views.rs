@@ -492,7 +492,7 @@ impl App {
                 // The preset may change the action mid-drag (ZBrush style:
                 // let go of Alt to scale).
                 let action = self.nav.during(action, button_of(button), m);
-                let snaps = self.nav.snaps(m);
+                let snaps = self.nav.snaps(button_of(button), m);
                 let camera = &mut self.cameras[index];
                 match action {
                     // While snapping, the turn goes on out of sight and
@@ -662,4 +662,127 @@ mod tests {
         }
     }
 
+    #[test]
+    fn blender_style_turns_with_alt_and_left_and_snaps_with_alt_and_middle() {
+        use super::super::study::tests::Harness;
+        use crate::sculpt::{Brush, Event};
+        use crate::{InputEvent, PointerEvent, PointerPhase};
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.nav = crate::navigation::NavStyle::Blender;
+        h.frames(1);
+        let held = |h: &mut Harness, m: Modifiers| h.app.push_event(InputEvent::Modifiers(m));
+        // A drag with `button` from the clay's middle, `m` held, and
+        // optionally `during` held from the second step on.
+        let drag = |h: &mut Harness, button: Button, m: Modifiers, during: Option<Modifiers>| {
+            let from = h.app.view_rects[SCULPT].center();
+            let to = from + egui::vec2(120.0, 40.0);
+            held(h, m);
+            let send = |h: &mut Harness, phase, pos: Pos2| {
+                h.app.push_event(InputEvent::Pointer(PointerEvent {
+                    id: 1,
+                    kind: PointerKind::Mouse,
+                    phase,
+                    pos: [pos.x, pos.y],
+                    button: matches!(phase, PointerPhase::Down | PointerPhase::Up)
+                        .then_some(button),
+                    pressure: if phase == PointerPhase::Up { 0.0 } else { 1.0 },
+                    eraser: false,
+                }));
+                h.frames(1);
+            };
+            send(h, PointerPhase::Move, from);
+            send(h, PointerPhase::Down, from);
+            for k in 1..=4 {
+                if k == 2
+                    && let Some(m) = during
+                {
+                    held(h, m);
+                }
+                send(h, PointerPhase::Move, from.lerp(to, k as f32 / 4.0));
+            }
+            send(h, PointerPhase::Up, to);
+            held(h, Modifiers::default());
+            h.frames(1);
+        };
+        let none = Modifiers::default();
+        let alt = Modifiers { alt: true, ..none };
+        let ctrl = Modifiers { ctrl: true, ..none };
+        let shift = Modifiers {
+            shift: true,
+            ..none
+        };
+        let strokes = |h: &Harness| h.app.sculpt.log().len();
+
+        // Alt + left on the clay: turns, pans with Shift, zooms with Ctrl;
+        // sculpts nothing.
+        let (before, camera) = (strokes(&h), h.app.cameras[SCULPT]);
+        drag(&mut h, Button::Primary, alt, None);
+        let turned = h.app.cameras[SCULPT];
+        assert_ne!(turned.yaw, camera.yaw, "turned");
+        assert_eq!(turned.target, camera.target);
+        let free = |c: OrbitCamera| {
+            let (yaw, pitch) = snap_view(c.yaw, c.pitch);
+            (c.yaw - yaw).abs() > 0.05 || (c.pitch - pitch).abs() > 0.05
+        };
+        assert!(free(turned), "Alt + left turns free");
+        drag(
+            &mut h,
+            Button::Primary,
+            Modifiers { shift: true, ..alt },
+            None,
+        );
+        let panned = h.app.cameras[SCULPT];
+        assert_ne!(panned.target, turned.target, "panned");
+        assert_eq!((panned.yaw, panned.distance), (turned.yaw, turned.distance));
+        drag(
+            &mut h,
+            Button::Primary,
+            Modifiers { ctrl: true, ..alt },
+            None,
+        );
+        let zoomed = h.app.cameras[SCULPT];
+        assert_ne!(zoomed.distance, panned.distance, "zoomed");
+        assert_eq!((zoomed.yaw, zoomed.target), (panned.yaw, panned.target));
+        assert_eq!(strokes(&h), before, "no stroke");
+
+        // Without Alt the left button sculpts as before: plain, inverted
+        // with Ctrl, smoothing with Shift; the camera stays.
+        h.app.reset_view(SCULPT);
+        h.app.follow_camera(SCULPT);
+        h.frames(1);
+        let camera = h.app.cameras[SCULPT];
+        for (m, brush, invert) in [
+            (none, h.app.tool.tool, false),
+            (ctrl, h.app.tool.tool, true),
+            (shift, Brush::Smooth, false),
+        ] {
+            let before = strokes(&h);
+            drag(&mut h, Button::Primary, m, None);
+            let dabs: Vec<_> = h.app.sculpt.log()[before..]
+                .iter()
+                .filter_map(|e| match e.event {
+                    Event::Dab(d) => Some(d),
+                    _ => None,
+                })
+                .collect();
+            assert!(!dabs.is_empty(), "{m:?} sculpts");
+            assert!(
+                dabs.iter().all(|d| d.brush == brush && d.invert == invert),
+                "{m:?}"
+            );
+            assert_eq!(h.app.cameras[SCULPT], camera, "{m:?}");
+        }
+
+        // The middle button turns free; Alt pressed while turning snaps.
+        drag(&mut h, Button::Middle, none, None);
+        assert!(free(h.app.cameras[SCULPT]), "middle turns free");
+        h.app.reset_view(SCULPT);
+        h.frames(1);
+        drag(&mut h, Button::Middle, none, Some(alt));
+        let c = h.app.cameras[SCULPT];
+        assert!(!free(c), "Alt snaps: {} {}", c.yaw, c.pitch);
+    }
 }

@@ -51,13 +51,21 @@ impl NavStyle {
             } else {
                 Orbit
             }),
-            (NavStyle::Blender, Button::Middle) => Some(if m.shift {
-                Pan
-            } else if m.ctrl {
-                Zoom
-            } else {
-                Orbit
-            }),
+            // Alt + left stands in for the middle button, as Blender's
+            // "emulate 3 button mouse" does, so a pen or a trackpad can
+            // turn. Without Alt the left button sculpts (Ctrl inverts,
+            // Shift smooths) and drags nothing on the background.
+            (NavStyle::Blender, Button::Middle | Button::Primary)
+                if button == Button::Middle || m.alt =>
+            {
+                Some(if m.shift {
+                    Pan
+                } else if m.ctrl {
+                    Zoom
+                } else {
+                    Orbit
+                })
+            }
             (NavStyle::Maya, Button::Primary) if m.alt => Some(Orbit),
             (NavStyle::Maya, Button::Middle) if m.alt => Some(Pan),
             (NavStyle::Maya, Button::Secondary) if m.alt => Some(Zoom),
@@ -90,10 +98,17 @@ impl NavStyle {
         }
     }
 
-    /// Whether a turn in progress snaps to the nearest front, side, back,
-    /// top or bottom view: Shift in ZBrush style.
-    pub fn snaps(self, m: Modifiers) -> bool {
-        self == NavStyle::ZBrush && m.shift
+    /// Whether a turn in progress that `button` started snaps to the
+    /// nearest front, side, back, top or bottom view: Shift in ZBrush
+    /// style, Alt in Blender style with the middle button. A turn with
+    /// Alt + left (the middle button's stand-in) holds Alt all along, so
+    /// it stays free, as in Blender with its emulated middle button.
+    pub fn snaps(self, button: Button, m: Modifiers) -> bool {
+        match self {
+            NavStyle::ZBrush => m.shift,
+            NavStyle::Blender => button == Button::Middle && m.alt,
+            NavStyle::Maya => false,
+        }
     }
 
     /// The key held for a brush's opposite action: Alt in ZBrush style,
@@ -321,16 +336,73 @@ mod tests {
     }
 
     #[test]
+    fn alt_and_left_stand_in_for_the_middle_button_in_blender_style() {
+        let b = NavStyle::Blender;
+        let ctrl = Modifiers { ctrl: true, ..NONE };
+        let shift = Modifiers {
+            shift: true,
+            ..NONE
+        };
+        let with_alt = |m: Modifiers| Modifiers { alt: true, ..m };
+        for on_clay in [false, true] {
+            assert_eq!(
+                b.action(Button::Primary, ALT, on_clay),
+                Some(NavAction::Orbit)
+            );
+            assert_eq!(
+                b.action(Button::Primary, with_alt(shift), on_clay),
+                Some(NavAction::Pan)
+            );
+            assert_eq!(
+                b.action(Button::Primary, with_alt(ctrl), on_clay),
+                Some(NavAction::Zoom)
+            );
+            // Without Alt the left button doesn't navigate: on the clay
+            // it sculpts, Ctrl inverting and Shift smoothing.
+            for m in [NONE, ctrl, shift] {
+                assert_eq!(b.action(Button::Primary, m, on_clay), None, "{m:?}");
+            }
+            // The middle button, as before, Alt or not.
+            for (m, action) in [
+                (NONE, NavAction::Orbit),
+                (shift, NavAction::Pan),
+                (ctrl, NavAction::Zoom),
+                (ALT, NavAction::Orbit),
+            ] {
+                assert_eq!(b.action(Button::Middle, m, on_clay), Some(action));
+            }
+            assert_eq!(b.action(Button::Secondary, ALT, on_clay), None);
+        }
+        assert!(b.inverts(ctrl) && !b.inverts(ALT));
+        // Alt while turning with the middle button snaps; a turn with
+        // Alt + left holds Alt all along and stays free.
+        assert!(b.snaps(Button::Middle, ALT));
+        assert!(!b.snaps(Button::Middle, NONE));
+        assert!(!b.snaps(Button::Primary, ALT));
+        // A drag keeps what it started as.
+        let orbit = b.action(Button::Primary, ALT, true).unwrap();
+        assert_eq!(b.during(orbit, Button::Primary, NONE), NavAction::Orbit);
+    }
+
+    #[test]
     fn shift_snaps_a_turn_in_zbrush_style() {
         use std::f32::consts::{FRAC_PI_2, PI};
         let shift = Modifiers {
             shift: true,
             ..NONE
         };
-        assert!(NavStyle::ZBrush.snaps(shift));
-        assert!(!NavStyle::ZBrush.snaps(NONE));
-        assert!(!NavStyle::Blender.snaps(shift), "Shift + middle pans there");
-        assert!(!NavStyle::Maya.snaps(shift));
+        for button in [Button::Primary, Button::Secondary] {
+            assert!(NavStyle::ZBrush.snaps(button, shift));
+            assert!(!NavStyle::ZBrush.snaps(button, NONE));
+        }
+        assert!(
+            !NavStyle::Blender.snaps(Button::Middle, shift),
+            "Shift + middle pans there"
+        );
+        for button in [Button::Primary, Button::Middle, Button::Secondary] {
+            assert!(!NavStyle::Maya.snaps(button, shift));
+            assert!(!NavStyle::Maya.snaps(button, ALT));
+        }
 
         let close =
             |(a, b): (f32, f32), (c, d): (f32, f32)| (a - c).abs() < 1e-5 && (b - d).abs() < 1e-5;
