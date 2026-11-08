@@ -47,6 +47,9 @@ pub struct StudyTr {
     pub perspective: &'static str,
     /// The viewpoint from below, beside front, back and top (in `Tr`).
     pub bottom: &'static str,
+    /// In the keyboard shortcuts: numpad 9, which turns to the opposite
+    /// side of the current view (top to bottom, front to back).
+    pub opposite_view: &'static str,
     /// Fits the reference view to the reference.
     pub frame_reference: &'static str,
     /// In the view menu, over the items that switch one view's own aids.
@@ -99,6 +102,7 @@ pub const JA: StudyTr = StudyTr {
     matcap: "マットキャップ",
     perspective: "パース表示",
     bottom: "下",
+    opposite_view: "反対側",
     frame_reference: "モチーフに合わせる",
     sculpt_view: "塑像のビュー",
     reference_view: "モチーフのビュー",
@@ -140,6 +144,7 @@ pub const EN: StudyTr = StudyTr {
     matcap: "matcap",
     perspective: "perspective",
     bottom: "bottom",
+    opposite_view: "opposite side",
     frame_reference: "frame reference",
     sculpt_view: "sculpt view",
     reference_view: "reference view",
@@ -181,6 +186,7 @@ pub const FR: StudyTr = StudyTr {
     matcap: "matcap",
     perspective: "perspective",
     bottom: "dessous",
+    opposite_view: "côté opposé",
     frame_reference: "cadrer le modèle",
     sculpt_view: "vue sculpture",
     reference_view: "vue modèle",

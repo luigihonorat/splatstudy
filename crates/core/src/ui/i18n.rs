@@ -194,10 +194,14 @@ Ctrl＋背景をクリック：マスクを反転
 Ctrl＋背景をドラッグ：マスクを消す",
     hint_blender: "中ボタン：回転
 Shift＋中：移動
-Ctrl＋中：拡大",
+Ctrl＋中：拡大
+回転中に Alt：正面・側面・上面にそろえる
+Alt＋左：中ボタンとして使う
+ホイール：拡大",
     hint_maya: "Alt＋左：回転
 Alt＋中：移動
-Alt＋右：拡大",
+Alt＋右：拡大
+ホイール：拡大",
     menu_file: "ファイル",
     menu_edit: "編集",
     menu_view: "表示",
@@ -296,10 +300,14 @@ Ctrl + click the background: invert the mask
 Ctrl + drag the background: clear the mask",
     hint_blender: "middle: turn
 Shift + middle: pan
-Ctrl + middle: zoom",
+Ctrl + middle: zoom
+Alt while turning: snap to front, side or top
+Alt + left: same as middle
+wheel: zoom",
     hint_maya: "Alt + left: turn
 Alt + middle: pan
-Alt + right: zoom",
+Alt + right: zoom
+wheel: zoom",
     menu_file: "file",
     menu_edit: "edit",
     menu_view: "view",
@@ -398,10 +406,14 @@ Ctrl + clic sur le fond : inverser le masque
 Ctrl + glisser le fond : effacer le masque",
     hint_blender: "milieu : tourner
 Maj + milieu : déplacer
-Ctrl + milieu : zoomer",
+Ctrl + milieu : zoomer
+Alt en tournant : aligner sur face, côté ou dessus
+Alt + gauche : comme le milieu
+molette : zoomer",
     hint_maya: "Alt + gauche : tourner
 Alt + milieu : déplacer
-Alt + droit : zoomer",
+Alt + droit : zoomer
+molette : zoomer",
     menu_file: "fichier",
     menu_edit: "édition",
     menu_view: "affichage",
