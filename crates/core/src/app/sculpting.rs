@@ -244,9 +244,11 @@ pub(super) struct ToolSettings {
     pub(super) smoothness: f32,
     /// Quad remesh: about how many quads.
     pub(super) quads: f32,
-    /// Asked for in the frame at this time, done at the start of the next,
-    /// so the notice saying so shows while it runs.
-    pending: Option<(Pending, f64)>,
+    /// Asked for in the frame of this number (see
+    /// [`egui::Context::cumulative_frame_nr`]), done at the start of a
+    /// later one, so what says so shows while it runs (see
+    /// [`App::run_pending`]).
+    pending: Option<(Pending, u64)>,
     /// The tool pie menu, while it is open.
     pie: Option<crate::ui::pie::Pie>,
     /// The size and strength at the pointer (Shift + Space), while open.
@@ -274,6 +276,19 @@ pub(super) enum Pending {
     SaveScene,
     /// Saving a copy of it without its timelapse.
     SaveCopy,
+}
+
+impl Pending {
+    /// What the window shown while it waits says, for the operations slow
+    /// enough to stop the app for seconds; the others say so in a notice.
+    fn working(self, m: &crate::ui::i18n::mesh::MeshTr) -> Option<&'static str> {
+        match self {
+            Pending::FromReference => Some(m.working_from_reference),
+            Pending::Remesh => Some(m.working_remesh),
+            Pending::QuadRemesh => Some(m.working_quad_remesh),
+            _ => None,
+        }
+    }
 }
 
 impl Default for ToolSettings {
@@ -626,23 +641,40 @@ impl App {
         self.ask(Pending::Remesh, self.lang.tr().mesh.remesh);
     }
 
-    /// Runs a slow operation at the next frame, after a notice saying so.
+    /// Runs a slow operation at the next frame, after a notice saying so;
+    /// the slowest, after a window saying so (see [`Pending::working`]).
     /// Edits of the clay wait while the timelapse shows.
     pub(super) fn ask(&mut self, pending: Pending, what: &str) {
         if self.playback.is_none() || matches!(pending, Pending::SaveScene | Pending::SaveCopy) {
-            self.tool.pending = Some((pending, self.now));
-            self.notify(format!("{what}…"));
+            self.tool.pending = Some((pending, self.ctx.cumulative_frame_nr()));
+            if pending.working(self.lang.tr().mesh).is_some() {
+                self.dirty = true;
+            } else {
+                self.notify(format!("{what}…"));
+            }
         }
+    }
+
+    /// True while a slow operation waits to run: the views take no input.
+    pub(super) fn busy(&self) -> bool {
+        self.tool.pending.is_some()
     }
 
     /// Does the operation asked for in an earlier frame. One asked for in
     /// this frame (from a menu, which comes before the panel) waits for
-    /// the next, so the frame showing its notice is drawn first.
+    /// the next, so the frame showing its notice is drawn first; one with
+    /// a window, for the one after, as egui lays a new window out unseen
+    /// in its first frame.
     fn run_pending(&mut self) {
         let Some((pending, asked)) = self.tool.pending else {
             return;
         };
-        if asked >= self.now {
+        let wait = if pending.working(self.lang.tr().mesh).is_some() {
+            2
+        } else {
+            1
+        };
+        if self.ctx.cumulative_frame_nr() < asked + wait {
             return;
         }
         self.tool.pending = None;
@@ -818,7 +850,43 @@ impl App {
     pub(super) fn sculpt_upkeep(&mut self, ui: &egui::Ui) {
         self.run_pending();
         self.sync_clay();
+        self.working_ui(ui.ctx());
         self.advance_playback(ui);
+    }
+
+    /// While a slow operation waits to run, a window in the middle saying
+    /// so, over everything, which takes every press: the app stops while
+    /// it runs, and this is what shows meanwhile.
+    fn working_ui(&self, ctx: &egui::Context) {
+        let m = self.lang.tr().mesh;
+        let Some(what) = self
+            .tool
+            .pending
+            .and_then(|(pending, _)| pending.working(m))
+        else {
+            return;
+        };
+        let p = self.theme.palette();
+        let frame = egui::Frame::NONE
+            .fill(p.bg)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(egui::Margin::symmetric(28, 20));
+        egui::Modal::new(egui::Id::unique("working"))
+            .backdrop_color(p.bg.gamma_multiply(0.5))
+            .frame(frame)
+            .show(ctx, |ui| {
+                let muted = ui.visuals().widgets.inactive.fg_stroke.color;
+                let what = egui::RichText::new(what).font(ui::fonts::light(18.0));
+                let note = egui::RichText::new(m.working_note)
+                    .font(ui::fonts::regular(12.0))
+                    .color(muted);
+                // A centred area lays out in almost no width: the lines
+                // would wrap word by word.
+                ui.add(egui::Label::new(what).extend());
+                ui.add_space(6.0);
+                ui.add(egui::Label::new(note).extend());
+            });
+        ctx.request_repaint();
     }
 
     /// The sculpt panel, in groups that fold away: the current tool's
@@ -2143,5 +2211,47 @@ mod tests {
             dabs.iter().all(|d| d.strength == full),
             "a mouse or touch dab pressed less than fully"
         );
+    }
+
+    #[test]
+    fn a_remesh_shows_its_window_before_the_clay_changes_and_the_views_wait() {
+        use super::super::study::tests::Harness;
+        use crate::PointerPhase::{Down, Move, Up};
+        let Some(mut h) = Harness::new() else {
+            eprintln!("no GPU adapter; skipping app test");
+            return;
+        };
+        h.app.tool.resolution = 48.0;
+        h.frames(1);
+        let before = h.app.sculpt.mesh.triangles.len();
+        let strokes = |h: &Harness| {
+            h.app
+                .sculpt
+                .log()
+                .iter()
+                .filter(|e| matches!(e.event, crate::sculpt::record::Event::Begin))
+                .count()
+        };
+        let strokes_before = strokes(&h);
+        let window = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("working"));
+        let shown = |h: &Harness| h.app.ctx.memory(|m| m.areas().visible_last_frame(&window));
+        let centre = h.app.view_rects[SCULPT].center();
+
+        h.app.ask_remesh();
+        // A press on the clay meanwhile: the views wait too.
+        let mut frames_shown = 0;
+        for phase in [Move, Down] {
+            h.pointer(phase, centre);
+            assert_eq!(h.app.sculpt.mesh.triangles.len(), before);
+            frames_shown += usize::from(shown(&h));
+        }
+        assert!(
+            frames_shown >= 1,
+            "the window never showed before the remesh"
+        );
+        h.pointer(Up, centre);
+        assert_ne!(h.app.sculpt.mesh.triangles.len(), before);
+        assert!(!shown(&h));
+        assert_eq!(strokes(&h), strokes_before);
     }
 }

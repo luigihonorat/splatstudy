@@ -104,6 +104,13 @@ pub struct MeshTr {
     /// chalk line, which sculpting wipes off; and that tint taken off.
     pub add_chalk: &'static str,
     pub remove_chalk: &'static str,
+    /// The window shown while a slow mesh operation runs (the app stops
+    /// meanwhile): what it does...
+    pub working_from_reference: &'static str,
+    pub working_remesh: &'static str,
+    pub working_quad_remesh: &'static str,
+    /// ...and, under it, that it takes a moment.
+    pub working_note: &'static str,
 }
 
 pub const JA: MeshTr = MeshTr {
@@ -158,6 +165,10 @@ pub const JA: MeshTr = MeshTr {
     blur_mask: "マスクをぼかす",
     add_chalk: "チョークを塗る",
     remove_chalk: "チョークを消す",
+    working_from_reference: "モチーフからメッシュを作っています…",
+    working_remesh: "リメッシュしています…",
+    working_quad_remesh: "クアッドでリメッシュしています…",
+    working_note: "しばらくかかることがあります",
 };
 
 pub const EN: MeshTr = MeshTr {
@@ -212,6 +223,10 @@ pub const EN: MeshTr = MeshTr {
     blur_mask: "blur mask",
     add_chalk: "add chalk",
     remove_chalk: "remove chalk",
+    working_from_reference: "making the mesh from the reference…",
+    working_remesh: "remeshing…",
+    working_quad_remesh: "quad remeshing…",
+    working_note: "this can take a little while",
 };
 
 pub const FR: MeshTr = MeshTr {
@@ -266,4 +281,8 @@ pub const FR: MeshTr = MeshTr {
     blur_mask: "flouter le masque",
     add_chalk: "ajouter la craie",
     remove_chalk: "enlever la craie",
+    working_from_reference: "création du maillage à partir du modèle…",
+    working_remesh: "remaillage en cours…",
+    working_quad_remesh: "remaillage en quads en cours…",
+    working_note: "cela peut prendre un moment",
 };
