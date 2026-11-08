@@ -7,7 +7,7 @@ use egui::{Align2, Key, RichText};
 
 use super::sculpting::{BRUSHES, TOOL_PIE_KEY, brush_keys, brush_name};
 use super::toolbar::ViewOption;
-use super::views::{numpad_name, viewpoints};
+use super::views::{BLENDER_NUMPAD, OPPOSITE_KEY, numpad_name, viewpoints};
 use super::{App, REPO_URL, SITE_URL, WEB};
 use crate::navigation::NavStyle;
 use crate::ui;
@@ -23,8 +23,10 @@ impl App {
             self.flyout_keys(ui);
             self.background_keys(ui);
             self.sculpt_shortcuts(ui);
+            // Ctrl + 1, 3 or 7 is Blender's other side (Cmd too on a Mac).
+            let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
             for digit in numpad {
-                self.numpad_view(digit);
+                self.numpad_view(digit, ctrl);
             }
             // In the view under the pointer.
             if pressed(M::NONE, Key::F) {
@@ -104,11 +106,19 @@ impl App {
                     (tr.undo, self.keys("Z")),
                     (tr.redo, self.keys("Shift+Z")),
                 ]);
-                for (label, key, _, _) in viewpoints(tr) {
-                    if let Some(key) = key {
-                        rows.push((label, numpad_name(key)));
-                    }
+                for (label, key, yaw, pitch) in viewpoints(tr) {
+                    let Some(key) = key else { continue };
+                    // Blender's key for the same view, after ours.
+                    let blender = BLENDER_NUMPAD
+                        .iter()
+                        .find(|&&(_, _, y, p)| (y, p) == (yaw, pitch))
+                        .map(|&(digit, ctrl, _, _)| {
+                            let ctrl = if ctrl { "Ctrl+" } else { "" };
+                            format!(" / {ctrl}{}", numpad_name(digit))
+                        });
+                    rows.push((label, numpad_name(key) + &blender.unwrap_or_default()));
                 }
+                rows.push((tr.study.opposite_view, numpad_name(OPPOSITE_KEY)));
                 rows.push((tr.study.hide_panels, "Tab".to_owned()));
                 rows.push((tr.study.hide_panels_and_reference, "Shift+Tab".to_owned()));
                 rows.push((tr.frame_sculpt, "F".to_owned()));
@@ -275,11 +285,60 @@ mod tests {
         h.app.cameras[SCULPT].yaw = 0.2;
         h.numpad(5);
         assert_eq!(looks(&h), (0.0, 0.0));
-        // Digits without a view do nothing; none picks a tool.
-        for digit in [0, 1, 3, 7, 9] {
+        // 0 has no view.
+        h.numpad(0);
+        assert_eq!(looks(&h), (0.0, 0.0));
+        // Ctrl held doesn't change ours.
+        let ctrl = |h: &mut Harness, on: bool| {
+            h.app
+                .push_event(crate::InputEvent::Modifiers(crate::input::Modifiers {
+                    ctrl: on,
+                    command: on,
+                    ..Default::default()
+                }));
+        };
+        ctrl(&mut h, true);
+        h.numpad(6);
+        assert_eq!(looks(&h), (FRAC_PI_2, 0.0), "Ctrl + 6: still right");
+        ctrl(&mut h, false);
+        // Blender's: 1 front, 3 right, 7 top; with Ctrl the other side.
+        for (digit, with_ctrl, view, name) in [
+            (1, false, (0.0, 0.0), "front"),
+            (1, true, (PI, 0.0), "back"),
+            (3, false, (FRAC_PI_2, 0.0), "right"),
+            (3, true, (-FRAC_PI_2, 0.0), "left"),
+        ] {
+            ctrl(&mut h, with_ctrl);
             h.numpad(digit);
-            assert_eq!(looks(&h), (0.0, 0.0));
+            ctrl(&mut h, false);
+            assert_eq!(looks(&h), view, "{name}");
         }
+        h.numpad(7);
+        let (yaw, pitch) = looks(&h);
+        assert!(yaw == 0.0 && pitch > 1.5, "top");
+        ctrl(&mut h, true);
+        h.numpad(7);
+        ctrl(&mut h, false);
+        let (yaw, pitch) = looks(&h);
+        assert!(yaw == 0.0 && pitch < -1.5, "bottom");
+        // 9: the opposite side. Bottom and top swap...
+        h.numpad(9);
+        let (yaw, top) = looks(&h);
+        assert!(yaw == 0.0 && top > 1.5, "bottom to top");
+        h.numpad(9);
+        assert_eq!(looks(&h), (0.0, -top), "top to bottom");
+        // ...and anywhere else turns half round, keeping the height.
+        h.numpad(1);
+        h.numpad(9);
+        assert_eq!(looks(&h), (PI, 0.0), "front to back");
+        h.app.cameras[SCULPT].look_from(0.4, 0.3);
+        h.numpad(9);
+        let (yaw, pitch) = looks(&h);
+        assert!(
+            (yaw - (0.4 + PI)).abs() < 1e-5 && pitch == 0.3,
+            "{yaw} {pitch}"
+        );
+        // No numpad digit picks a tool.
         assert_eq!(h.app.tool.tool, tool);
     }
 }

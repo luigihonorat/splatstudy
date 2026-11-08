@@ -40,6 +40,25 @@ pub(super) fn viewpoints(tr: &Tr) -> [(&'static str, Option<u8>, f32, f32); 7] {
     ]
 }
 
+/// Blender's numpad views, turned to in every preset beside SplatStudy's
+/// own keys: digit, Ctrl held, yaw and pitch. SplatStudy's right is
+/// Blender's: from the front, the camera moves to the viewer's right.
+/// Numpad 9 turns to the opposite side (`numpad_view`).
+pub(super) const BLENDER_NUMPAD: [(u8, bool, f32, f32); 6] = {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    [
+        (1, false, 0.0, 0.0),
+        (1, true, PI, 0.0),
+        (3, false, FRAC_PI_2, 0.0),
+        (3, true, -FRAC_PI_2, 0.0),
+        (7, false, 0.0, FRAC_PI_2),
+        (7, true, 0.0, -FRAC_PI_2),
+    ]
+};
+
+/// The numpad key that turns to the opposite side.
+pub(super) const OPPOSITE_KEY: u8 = 9;
+
 /// The viewpoints' names in URL options (`view=three-quarter`), in
 /// `viewpoints` order.
 pub(super) const VIEWPOINT_IDS: [&str; 7] = [
@@ -128,11 +147,32 @@ impl App {
         }
     }
 
-    /// The viewpoint on numpad `digit`, for both views. Where several
-    /// share the key, each press turns to the next, as the sculpt view
-    /// sees it: from the front, 5 turns to the back, from anywhere else to
-    /// the front.
-    pub(super) fn numpad_view(&mut self, digit: u8) {
+    /// The viewpoint on numpad `digit`, with Ctrl held or not, for both
+    /// views. Where several share the key, each press turns to the next,
+    /// as the sculpt view sees it: from the front, 5 turns to the back,
+    /// from anywhere else to the front. 1, 3 and 7 (Ctrl: the other side)
+    /// are Blender's, and 9 turns to the opposite side as Blender does:
+    /// from the top to the bottom and back, from anywhere else half a turn
+    /// around the vertical, keeping the height.
+    pub(super) fn numpad_view(&mut self, digit: u8, ctrl: bool) {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        if digit == OPPOSITE_KEY {
+            let camera = &self.cameras[SCULPT];
+            let (yaw, pitch) = (camera.yaw, camera.pitch);
+            if looks_from(camera, yaw, FRAC_PI_2) || looks_from(camera, yaw, -FRAC_PI_2) {
+                self.view_from(yaw, -pitch);
+            } else {
+                self.view_from(yaw + PI, pitch);
+            }
+            return;
+        }
+        if let Some(&(_, _, yaw, pitch)) = BLENDER_NUMPAD
+            .iter()
+            .find(|&&(key, with_ctrl, _, _)| key == digit && with_ctrl == ctrl)
+        {
+            self.view_from(yaw, pitch);
+            return;
+        }
         let views: Vec<(f32, f32)> = viewpoints(self.lang.tr())
             .into_iter()
             .filter(|&(_, key, _, _)| key == Some(digit))
@@ -621,4 +661,5 @@ mod tests {
             assert!(!shown(sculpt));
         }
     }
+
 }
