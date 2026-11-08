@@ -1089,4 +1089,95 @@ mod tests {
         assert!((wrap_angle(PI + 0.5) - (-PI + 0.5)).abs() < 1e-5);
         assert!((wrap_angle(-FRAC_PI_2) + FRAC_PI_2).abs() < 1e-6);
     }
+
+    #[test]
+    fn panels_fit_in_every_language() {
+        use super::super::study::tests::Harness;
+        use crate::ui::i18n::Lang;
+        let Some(mut h) = Harness::new() else { return };
+        let mut obj = String::new();
+        for v in ["1 0 0", "-1 0 0", "0 1 0", "0 -1 0", "0 0 1", "0 0 -1"] {
+            obj += &format!("v {v}\n");
+        }
+        for f in ["1 3 5", "3 2 5", "2 4 5", "4 1 5", "3 1 6", "2 3 6", "4 2 6", "1 4 6"] {
+            obj += &format!("f {f}\n");
+        }
+        h.app.load_reference("octahedron.obj", obj.into_bytes().into());
+        h.frames(2);
+        {
+            let st = &mut h.app.reference;
+            st.crop_editing = true;
+            let sliders = st.crop;
+            let r = st.current.as_mut().unwrap();
+            r.crop = sliders.to_box(r.align.up);
+        }
+        h.app.calipers.set.add([Vec3::ZERO, Vec3::Y * 12.345]);
+        h.app.calipers.set.add([Vec3::ZERO, Vec3::Y * 100.0]);
+        h.app.calipers.set.add([Vec3::ZERO, Vec3::Y * 0.5]);
+        let width = 1280.0;
+        let sculpt = 0.0 + 20.0..=super::super::PANEL_WIDTH - 16.0;
+        let refs = width - super::super::PANEL_WIDTH + 20.0..=width - 16.0;
+        let mut bad = Vec::new();
+        for lang in [Lang::Ja, Lang::En, Lang::Fr] {
+            h.app.lang = lang;
+            h.frames(3);
+            let rects: Vec<(egui::Rect, bool)> = h.app.ctx.viewport(|v| {
+                v.this_pass
+                    .widgets
+                    .layers()
+                    .flat_map(|(_, w)| w.iter())
+                    .map(|w| (w.rect, w.sense.senses_click() || w.sense.senses_drag()))
+                    .collect()
+            });
+            for (r, interactive) in rects {
+                // Only controls: layout containers (a scroll area with its
+                // bar) may reach the panel's edge.
+                if !interactive || r.top() < 30.0 || !r.is_finite() {
+                    continue;
+                }
+                let in_sculpt = r.left() >= *sculpt.start() - 0.5 && r.left() < *sculpt.end();
+                let in_refs = r.left() >= *refs.start() - 0.5 && r.left() < *refs.end();
+                if in_sculpt && r.right() > *sculpt.end() + 0.5 {
+                    bad.push(format!("{lang:?} sculpt panel: {r:?} interactive={interactive}"));
+                }
+                if in_refs && r.right() > *refs.end() + 0.5 {
+                    bad.push(format!("{lang:?} reference panel: {r:?} interactive={interactive}"));
+                }
+            }
+            // The texts the new controls show, in the body font.
+            let tr = h.app.lang.tr();
+            let font = egui::TextStyle::Body.resolve(&h.app.ctx.global_style());
+            let painter = egui::Painter::new(
+                h.app.ctx.clone(),
+                egui::LayerId::debug(),
+                egui::Rect::EVERYTHING,
+            );
+            for text in [
+                tr.mesh.from_reference,
+                tr.mesh.quad_remesh,
+                tr.mesh.remesh,
+                tr.mesh.delete_higher,
+                tr.mesh.delete_lower,
+                tr.refs.remove_crop,
+                tr.refs.panel_gallery,
+                tr.refs.crop_box,
+                tr.open_reference,
+                tr.remove_reference,
+                tr.calipers.add,
+                tr.calipers.delete_all,
+            ] {
+                let w = painter
+                    .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x;
+                if w > 160.0 {
+                    bad.push(format!("{lang:?} text {text:?} is {w:.0} wide (room 160)"));
+                }
+            }
+        }
+        for b in &bad {
+            eprintln!("{b}");
+        }
+        assert!(bad.is_empty());
+    }
 }
