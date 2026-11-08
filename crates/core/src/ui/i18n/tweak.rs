@@ -17,8 +17,8 @@ pub const JA: TweakTr = TweakTr {
     tweak: "微調整",
     smooth: "スムーズ",
     sharpen: "シャープ",
-    shrink: "シュリンク",
-    inflate: "インフレート",
+    shrink: "縮める",
+    inflate: "膨らます",
 };
 
 pub const EN: TweakTr = TweakTr {
