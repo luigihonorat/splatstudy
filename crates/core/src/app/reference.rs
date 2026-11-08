@@ -56,8 +56,8 @@ pub(super) struct ReferenceState {
     /// The egui pass in which the crop group was last drawn open: its
     /// handles show over the view in that pass.
     crop_shown: Option<u64>,
-    /// Whether the crop box is being edited: its handles over the view and
-    /// its sides in the panel. The crop holds either way.
+    /// Whether the crop box is being edited: the box and its handles over
+    /// the view, and its sides in the panel. The crop holds either way.
     crop_editing: bool,
     /// The egui pass in which a crop slider was last being dragged.
     crop_sliding: Option<u64>,
@@ -554,8 +554,8 @@ impl App {
     }
 
     /// The crop box: editing it on or off, its six sides while it is
-    /// edited, and taking the crop away. Done editing, the crop holds; only
-    /// the handles and sides go.
+    /// edited, and taking the crop away. Done editing, the crop holds; the
+    /// box over the view and its sides in the panel go.
     fn reference_crop(&mut self, ui: &mut egui::Ui) {
         let tr = self.lang.tr();
         let state = &mut self.reference;
@@ -635,9 +635,10 @@ impl App {
     }
 
     /// What is drawn over the reference view, in `rect` as laid out this
-    /// frame: a picture with its pan and zoom, the crop box, and the credit
-    /// line along the bottom. The views call it once the reference view's
-    /// image is drawn, so it never trails the view by a frame.
+    /// frame: a picture with its pan and zoom, the crop box while it is
+    /// edited, and the credit line along the bottom. The views call it once
+    /// the reference view's image is drawn, so it never trails the view by
+    /// a frame.
     pub(super) fn reference_overlay(&mut self, ui: &egui::Ui, rect: Rect) {
         if !rect.is_positive() || self.reference.current.is_none() {
             return;
@@ -684,7 +685,9 @@ impl App {
         let Some(r) = &self.reference.current else {
             return;
         };
-        if let Some(crop) = r.crop {
+        if let Some(crop) = r.crop
+            && self.crop_box_shown(ui.ctx())
+        {
             let camera = &self.cameras[REFERENCE];
             // The box belongs to the 3D view, so it flips with it.
             crop_box(

@@ -247,15 +247,25 @@ impl Gizmo {
 }
 
 impl App {
+    /// Whether the crop box shows over the reference view, its edges and
+    /// handles alike: there is a crop, it is being edited and its group
+    /// was drawn open in the panel this pass, or a handle is being
+    /// dragged. Done editing, the crop holds unseen.
+    pub(super) fn crop_box_shown(&self, ctx: &egui::Context) -> bool {
+        let state = &self.reference;
+        let cropped = state.current.as_ref().is_some_and(|r| r.crop.is_some());
+        let editing = state.crop_drag.is_some()
+            || (state.crop_editing && state.crop_shown == Some(ctx.cumulative_pass_nr()));
+        cropped && editing
+    }
+
     /// The crop box's handles in the reference view laid out in `rect`,
     /// if they show: the crop is being edited and its group was drawn open
     /// in the panel this pass, or one of them is being dragged.
     fn crop_gizmo(&self, ctx: &egui::Context, rect: Rect) -> Option<Gizmo> {
         let state = &self.reference;
         let r = state.current.as_ref()?;
-        let editing = state.crop_drag.is_some()
-            || (state.crop_editing && state.crop_shown == Some(ctx.cumulative_pass_nr()));
-        if r.crop.is_none() || matches!(r.content, Content::Image(_)) || !editing || !shown(rect) {
+        if !self.crop_box_shown(ctx) || matches!(r.content, Content::Image(_)) || !shown(rect) {
             return None;
         }
         let camera = &self.cameras[REFERENCE];
@@ -584,8 +594,52 @@ mod tests {
         Gizmo::new(&app.cameras[REFERENCE], rect, mirror, r.align, state.crop).unwrap()
     }
 
+    /// The lines and the dots in the crop's orange among what the
+    /// reference view's overlay paints, in a pass of its own with the crop
+    /// group drawn open, as the panel draws it.
+    fn crop_ink_painted(app: &mut App) -> (usize, usize) {
+        fn count(shape: &egui::Shape) -> (usize, usize) {
+            let orange = |c: egui::Color32| c == theme::CROP_LINE;
+            match shape {
+                egui::Shape::Vec(shapes) => shapes
+                    .iter()
+                    .map(count)
+                    .fold((0, 0), |(l, d), (a, b)| (l + a, d + b)),
+                egui::Shape::LineSegment { stroke, .. } => (usize::from(orange(stroke.color)), 0),
+                egui::Shape::Path(p) => (
+                    usize::from(
+                        orange(p.fill)
+                            || matches!(p.stroke.color, egui::epaint::ColorMode::Solid(c) if orange(c)),
+                    ),
+                    0,
+                ),
+                egui::Shape::Circle(c) => {
+                    (0, usize::from(orange(c.fill) || orange(c.stroke.color)))
+                }
+                _ => (0, 0),
+            }
+        }
+        let rect = app.view_rects[REFERENCE];
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 720.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ui| {
+            app.reference.crop_shown = Some(ui.ctx().cumulative_pass_nr());
+            app.reference_overlay(ui, rect);
+        });
+        // Not drawn: the fonts' texture is not wanted.
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .map(|c| count(&c.shape))
+            .fold((0, 0), |(l, d), (a, b)| (l + a, d + b))
+    }
+
     #[test]
-    fn done_editing_the_crop_holds_and_its_handles_go() {
+    fn done_editing_the_crop_holds_and_its_box_goes() {
         let Some(mut h) = cropped_cube() else {
             eprintln!("no GPU adapter; skipping app test");
             return;
@@ -593,8 +647,15 @@ mod tests {
         let g = gizmo_of(&h.app);
         let at = g.screen(g.place(Handle::Face(1))).unwrap();
         let d = g.face_axis(1).unwrap();
+        // Its twelve edges, and a dot for each handle.
+        assert_eq!(crop_ink_painted(&mut h.app), (12, g.handles().len()));
         h.app.reference.crop_editing = false;
         h.frames(1);
+        assert_eq!(
+            crop_ink_painted(&mut h.app),
+            (0, 0),
+            "nothing of the box shows"
+        );
         let crop = h.app.reference.current.as_ref().unwrap().crop;
         let sides = h.app.reference.crop.sides;
         let camera = h.app.cameras[REFERENCE];
@@ -605,6 +666,12 @@ mod tests {
         let r = h.app.reference.current.as_ref().unwrap();
         assert!(crop.is_some());
         assert_eq!(r.crop, crop, "the crop holds");
+        // Editing again, the box is back.
+        h.app.reference.crop_editing = true;
+        h.frames(1);
+        // The view has turned: the handles of the faces it now sees.
+        let handles = gizmo_of(&h.app).handles().len();
+        assert_eq!(crop_ink_painted(&mut h.app), (12, handles));
     }
 
     #[test]
