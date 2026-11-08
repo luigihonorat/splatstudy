@@ -87,13 +87,12 @@ pub fn load(name: &str, bytes: &[u8]) -> Result<Content, LoadError> {
     }
 }
 
-/// Which way is up in a file, as most files of its kind come: splat
-/// captures in camera coordinates (Y down), `.spz` already Y up, STL from
-/// CAD and 3D printing Z up.
-pub fn usual_up(name: &str, content: &Content) -> UpAxis {
-    match (extension(name).as_str(), content) {
-        ("ply" | "splat", Content::Splats(s)) if !s.is_point_cloud() => UpAxis::NegY,
-        ("stl", _) => UpAxis::Z,
+/// Which way is up in a file, as it is first shown: Y, as splats exported
+/// by most tools and meshes come, and STL from CAD and 3D printing Z up.
+/// A capture still in camera coordinates (Y down) is one click away.
+pub fn usual_up(name: &str, _content: &Content) -> UpAxis {
+    match extension(name).as_str() {
+        "stl" => UpAxis::Z,
         _ => UpAxis::Y,
     }
 }
@@ -108,6 +107,7 @@ impl Splats {
     }
 
     /// Points loaded as splats are all round and the same size.
+    #[cfg(test)]
     fn is_point_cloud(&self) -> bool {
         let Some(&first) = self.scales.first() else {
             return true;
@@ -247,5 +247,15 @@ mod tests {
         let cloud = point_cloud(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[255; 4]; 3]).unwrap();
         assert!(cloud.is_point_cloud());
         assert!(cloud.scales[0].x > 0.0);
+    }
+
+    #[test]
+    fn splats_and_meshes_open_y_up_and_stl_z_up() {
+        let splats = point_cloud(vec![Vec3::ZERO], vec![[255; 4]]).unwrap();
+        let content = Content::Splats(splats);
+        for name in ["capture.ply", "capture.splat", "capture.spz", "cast.obj"] {
+            assert_eq!(usual_up(name, &content), UpAxis::Y, "{name}");
+        }
+        assert_eq!(usual_up("part.STL", &content), UpAxis::Z);
     }
 }
