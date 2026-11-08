@@ -373,8 +373,9 @@ impl App {
         let camera_before = self.cameras[index];
 
         // An open pie menu takes every press; the toolbar takes its own.
-        // While a flyout is open, a press anywhere only closes it.
-        let mut started = false;
+        // While a flyout is open, a press anywhere only closes it. A stroke
+        // started this frame has used this many of the frame's samples.
+        let mut started = None;
         if self.drags[index].is_none()
             && response.hovered()
             && !self.popup_open()
@@ -401,7 +402,7 @@ impl App {
                 }
                 let hit = match (index, ours, pointer) {
                     (SCULPT, Button::Primary, Some(pos)) if self.playback.is_none() => {
-                        self.pick(rect, pos).map(|h| (pos, h))
+                        self.stroke_start(index, rect, pos)
                     }
                     _ => None,
                 };
@@ -415,9 +416,9 @@ impl App {
                             free,
                         })
                     }
-                    (None, Some((pos, hit))) => {
+                    (None, Some((pos, hit, used))) => {
                         self.start_stroke(rect, pos, hit);
-                        started = true;
+                        started = Some(used);
                     }
                     (None, None)
                         if index == SCULPT
@@ -479,7 +480,8 @@ impl App {
                 });
             }
             Some(Drag::Stroke { .. }) if ui.input(|i| i.pointer.primary_down()) => {
-                for (pos, pressure) in self.stroke_samples(index, rect, started) {
+                let samples = self.stroke_samples(index, rect, started.is_some());
+                for (pos, pressure) in samples.into_iter().skip(started.unwrap_or(0)) {
                     self.stroke_to(rect, pos, pressure);
                 }
             }

@@ -71,6 +71,8 @@ pub(super) struct StudyState {
     /// The clay shaded flat, each triangle as one plane, rather than
     /// smooth.
     pub(super) flat_shading: bool,
+    /// The clay lit by the matcap rather than the plainer light.
+    pub(super) matcap: bool,
 }
 
 /// How near the plumb line's bob a press must land to take the line, in
@@ -339,6 +341,7 @@ impl Default for StudyState {
             matching: SilhouetteMatch::default(),
             wireframe: false,
             flat_shading: false,
+            matcap: false,
         }
     }
 }
@@ -373,8 +376,14 @@ impl App {
         } else {
             Look::lit(theme::CLAY)
         };
+        let edge = if self.study.matcap {
+            clay::typical_edge(&self.sculpt.mesh)
+        } else {
+            0.0
+        };
         look.with_lighting(aids.lighting)
             .with_facets(self.study.flat_shading)
+            .with_matcap(self.study.matcap, edge)
     }
 
     /// Draws the clay's edges over the clay just drawn into `slot` as the
@@ -557,6 +566,7 @@ impl App {
             ViewOption::Ghost,
             ViewOption::Wireframe,
             ViewOption::FlatShading,
+            ViewOption::Matcap,
             ViewOption::Difference,
         ] {
             self.option_item(ui, option, SCULPT);
@@ -1724,6 +1734,7 @@ pub(super) mod tests {
         st.views[SCULPT].plumb = true;
         st.wireframe = true;
         st.flat_shading = true;
+        st.matcap = true;
         h.app.cameras[REFERENCE].ortho = true;
         let before = h.app.scene_revision();
         h.app.apply(ViewOption::Perspective, SCULPT);
@@ -1735,10 +1746,11 @@ pub(super) mod tests {
         h.app.study.views = Default::default();
         h.app.study.wireframe = false;
         h.app.study.flat_shading = false;
+        h.app.study.matcap = false;
         h.app.cameras[REFERENCE].ortho = false;
         assert!(h.app.restore_autosave(&saved, None));
         assert_eq!(h.app.study.views, views);
-        assert!(h.app.study.wireframe && h.app.study.flat_shading);
+        assert!(h.app.study.wireframe && h.app.study.flat_shading && h.app.study.matcap);
         assert!(h.app.cameras[REFERENCE].ortho && !h.app.cameras[SCULPT].ortho);
     }
 }

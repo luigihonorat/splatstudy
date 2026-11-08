@@ -390,7 +390,7 @@ impl App {
 
                 // Where it goes.
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 18.0;
+                    ui.spacing_mut().item_spacing.x = 14.0;
                     for (k, target) in Target::ALL.into_iter().enumerate() {
                         let label = match target {
                             Target::Sculpt => st.to_sculpt,
@@ -721,5 +721,36 @@ mod tests {
             .unwrap()
             .write_image_data(&pixels)
             .unwrap();
+    }
+
+    #[test]
+    fn background_window_fits_in_every_language() {
+        use crate::ui::i18n::Lang;
+        let Some(mut h) = Harness::new() else { return };
+        let mut bad = Vec::new();
+        for lang in [Lang::Ja, Lang::En, Lang::Fr] {
+            h.app.lang = lang;
+            h.frames(1);
+            let d = open(&mut h, SCULPT);
+            h.frames(1);
+            let d2 = h.app.background.picker.expect("open").drawn;
+            eprintln!(
+                "{lang:?}: square {:?} targets {:?} window {:?}",
+                d.square, d2.targets, d2.window
+            );
+            if d2.targets[2].right() > d2.square.right() + 0.5 {
+                bad.push(format!(
+                    "{lang:?}: choices reach {} past the picker's {}",
+                    d2.targets[2].right(),
+                    d2.square.right()
+                ));
+            }
+            h.app.background.picker = None;
+            h.frames(1);
+        }
+        for b in &bad {
+            eprintln!("{b}");
+        }
+        assert!(bad.is_empty());
     }
 }

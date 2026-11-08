@@ -40,6 +40,9 @@ pub struct StudyTr {
     pub wireframe: &'static str,
     /// The clay shaded facet by facet; off, it is shaded smooth.
     pub flat_shading: &'static str,
+    /// The clay lit like a sculptor's matcap ball, its hollows shaded;
+    /// off, by the plainer light.
+    pub matcap: &'static str,
     /// The perspective, on; off, the view is orthographic.
     pub perspective: &'static str,
     /// The viewpoint from below, beside front, back and top (in `Tr`).
@@ -93,6 +96,7 @@ pub const JA: StudyTr = StudyTr {
     top_light: "天窓",
     wireframe: "ワイヤーフレーム",
     flat_shading: "フラットシェーディング",
+    matcap: "マットキャップ",
     perspective: "パース表示",
     bottom: "下",
     frame_reference: "モチーフに合わせる",
@@ -133,6 +137,7 @@ pub const EN: StudyTr = StudyTr {
     top_light: "top",
     wireframe: "wireframe",
     flat_shading: "flat shading",
+    matcap: "matcap",
     perspective: "perspective",
     bottom: "bottom",
     frame_reference: "frame reference",
@@ -173,6 +178,7 @@ pub const FR: StudyTr = StudyTr {
     top_light: "zénithal",
     wireframe: "fil de fer",
     flat_shading: "ombrage plat",
+    matcap: "matcap",
     perspective: "perspective",
     bottom: "dessous",
     frame_reference: "cadrer le modèle",

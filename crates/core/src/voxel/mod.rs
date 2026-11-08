@@ -48,11 +48,17 @@ pub const DEFAULT_THRESHOLD: f32 = 0.7;
 /// surface and the clay comes out spongy; 1 is never quite reached.
 pub const THRESHOLDS: std::ops::RangeInclusive<f32> = 0.3..=0.95;
 
-/// How much the clay from a reference is smoothed: passes of
-/// [`grid::Grid::blur`] over its field, each smoothing the shape by
-/// about half a cell; 0 keeps it as found.
+/// How much the clay from a reference is smoothed, each step by about
+/// half a cell; 0 keeps it as found. For splats, passes of
+/// [`grid::Grid::blur`] over the fused solid. For a mesh, [`MESH_PASSES`]
+/// of [`nets::smooth`] over the clay itself: an open scan's field is only a
+/// thin shell around its surface, which blurring would wear away.
 pub const MAX_SMOOTHNESS: u32 = 10;
 pub const DEFAULT_SMOOTHNESS: u32 = 1;
+
+/// Passes of [`nets::smooth`] per step of smoothness for a mesh
+/// reference: about as smooth as a pass of blur over the field.
+const MESH_PASSES: usize = 3;
 
 /// Holes in a reference mesh up to about twice this many cells wide are
 /// sealed (scans are often open).
@@ -111,31 +117,48 @@ pub fn clay_from_reference(reference: &Reference, how: FromReference) -> Option<
         .resolution
         .clamp(MIN_RESOLUTION / 4, max_resolution(reference));
     let smoothness = how.smoothness.min(MAX_SMOOTHNESS);
-    let mut field = match &reference.content {
-        Content::Splats(splats) => fusion::field(
-            splats,
-            &reference.align,
-            reference.crop,
-            resolution,
-            how.threshold,
-            smoothness,
-        )?,
+    // Splats are smoothed in their field, a solid; a mesh on its clay.
+    let (mut field, mesh_passes) = match &reference.content {
+        Content::Splats(splats) => {
+            let field = fusion::field(
+                splats,
+                &reference.align,
+                reference.crop,
+                resolution,
+                how.threshold,
+                smoothness,
+            )?;
+            (field, 0)
+        }
         _ => {
             let (positions, triangles) = reference.world_triangles()?;
-            let mut field =
-                sdf::signed_distance(&positions, &triangles, resolution, REFERENCE_CLOSE)?;
-            for _ in 0..smoothness {
-                field.blur();
-            }
-            field
+            let field = sdf::signed_distance(&positions, &triangles, resolution, REFERENCE_CLOSE)?;
+            (field, smoothness as usize * MESH_PASSES)
         }
     };
-    mesh_level(&mut field)
+    let mut mesh = mesh_level(&mut field)?;
+    if mesh_passes > 0 {
+        // Not pulled back onto the level, so the shape itself smooths; the
+        // triangles stay as they are, so a thin shell keeps all of itself.
+        nets::smooth(&mut mesh.positions, &mesh.triangles, mesh_passes, None);
+        mesh.recompute_normals();
+    }
+    Some(mesh)
 }
 
 /// Meshes the zero level of `field`, keeps the largest piece and smooths
 /// it along itself, pulling the vertices back onto the level each pass.
+///
+/// The grid's outer nodes are first put outside, as surface nets needs:
+/// sealing an open sheet hard (see [`sdf::signed_distance`]) can thicken
+/// its walls past the grid's padding, and a node left inside there would
+/// leave a hole in the mesh. The shape is then closed flat at the border.
 fn mesh_level(field: &mut grid::Grid) -> Option<Mesh> {
+    let outside = field.step * 0.05;
+    for node in field.border() {
+        let v = &mut field.values[node];
+        *v = v.max(outside);
+    }
     nets::untangle(field);
     let (positions, triangles) = nets::surface_nets(field);
     let (mut positions, triangles) = nets::keep_largest(&positions, &triangles);
@@ -351,6 +374,377 @@ mod tests {
             .filter(|p| (p.length() - 1.0).abs() < 0.06)
             .count();
         assert!(near as f32 > mesh.positions.len() as f32 * 0.95);
+    }
+
+    /// A mesh reference made of these triangles.
+    fn mesh_reference(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> Reference {
+        let mesh = RefMesh {
+            positions,
+            triangles,
+            colors: None,
+        };
+        Reference::new(source(), Content::Mesh(mesh))
+    }
+
+    /// The clay from `reference` at `resolution` and `smoothness`.
+    fn clay(reference: &Reference, resolution: u32, smoothness: u32) -> Mesh {
+        let how = FromReference {
+            smoothness,
+            ..at(resolution)
+        };
+        clay_from_reference(reference, how).unwrap()
+    }
+
+    /// Closed, and all one piece.
+    fn one_closed_piece(mesh: &Mesh) -> bool {
+        let (_, largest) = nets::keep_largest(&mesh.positions, &mesh.triangles);
+        is_closed(&mesh.triangles) && largest.len() == mesh.triangles.len()
+    }
+
+    /// The corners of the box around `mesh`.
+    fn bounds(mesh: &Mesh) -> (Vec3, Vec3) {
+        let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+        for &p in &mesh.positions {
+            (lo, hi) = (lo.min(p), hi.max(p));
+        }
+        (lo, hi)
+    }
+
+    /// An open scan too wide to seal comes out as a thin shell around its
+    /// surface: smoothing it must not wear it away.
+    fn smoothing_keeps(reference: &Reference, resolution: u32) {
+        let found = clay(reference, resolution, 0);
+        assert!(one_closed_piece(&found));
+        for smoothness in [DEFAULT_SMOOTHNESS, 3] {
+            let smoothed = clay(reference, resolution, smoothness);
+            assert!(one_closed_piece(&smoothed), "{smoothness}");
+            let (before, after) = (found.positions.len(), smoothed.positions.len());
+            assert!(
+                after as f32 >= before as f32 * 0.8,
+                "{smoothness}: {after} vertices, {before} unsmoothed"
+            );
+            // Rounded off at its rim at most, not shrunk.
+            let (lo, hi) = (bounds(&found), bounds(&smoothed));
+            assert!(
+                lo.0.distance(hi.0) < 0.05 && lo.1.distance(hi.1) < 0.05,
+                "{smoothness}"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_keeps_an_open_hemisphere_scan() {
+        // A face mask: the upper half of a sphere, open all along its rim.
+        let sphere = Mesh::icosphere(4);
+        let triangles = sphere
+            .triangles
+            .iter()
+            .filter(|t| t.iter().all(|&v| sphere.positions[v as usize].y > -0.01))
+            .copied()
+            .collect();
+        let reference = mesh_reference(sphere.positions.clone(), triangles);
+        smoothing_keeps(&reference, 96);
+    }
+
+    #[test]
+    fn smoothing_keeps_an_open_relief() {
+        // A relief: one bumpy sheet, a height field over a square.
+        let n = 48;
+        let mut positions = Vec::new();
+        for i in 0..=n {
+            for j in 0..=n {
+                let (x, z) = (
+                    i as f32 / n as f32 * 2.0 - 1.0,
+                    j as f32 / n as f32 * 2.0 - 1.0,
+                );
+                positions.push(Vec3::new(x, 0.4 * (3.0 * x).sin() * (3.0 * z).cos(), z));
+            }
+        }
+        let at = |i: u32, j: u32| i * (n + 1) + j;
+        let mut triangles = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                triangles.push([at(i, j), at(i, j + 1), at(i + 1, j)]);
+                triangles.push([at(i + 1, j), at(i, j + 1), at(i + 1, j + 1)]);
+            }
+        }
+        smoothing_keeps(&mesh_reference(positions, triangles), 96);
+    }
+
+    #[test]
+    fn smoothing_smooths_a_closed_mesh_reference() {
+        // A ball with a bumpy skin, its bumps a few cells across.
+        let sphere = Mesh::icosphere(5);
+        let positions = sphere
+            .positions
+            .iter()
+            .map(|&p| {
+                let bump = (p * 12.0).to_array().map(f32::sin);
+                p * (1.0 + 0.04 * bump[0] * bump[1] * bump[2])
+            })
+            .collect();
+        let reference = mesh_reference(positions, sphere.triangles.clone());
+        // How far the vertices stray from a sphere.
+        let roughness = |mesh: &Mesh| {
+            let n = mesh.positions.len() as f32;
+            let mean = mesh.positions.iter().map(|p| p.length()).sum::<f32>() / n;
+            let var = mesh
+                .positions
+                .iter()
+                .map(|p| (p.length() - mean).powi(2))
+                .sum::<f32>()
+                / n;
+            (mean, var.sqrt())
+        };
+        let (radius, mut last) = roughness(&clay(&reference, 64, 0));
+        for smoothness in [DEFAULT_SMOOTHNESS, 3, MAX_SMOOTHNESS] {
+            let mesh = clay(&reference, 64, smoothness);
+            assert!(one_closed_piece(&mesh), "{smoothness}");
+            let (mean, rough) = roughness(&mesh);
+            assert!(rough < last * 0.95, "{smoothness}: {rough} after {last}");
+            // Smoothed, not shrunk.
+            assert!(
+                (mean - radius).abs() < 0.02,
+                "{smoothness}: {mean} from {radius}"
+            );
+            last = rough;
+        }
+    }
+
+    #[test]
+    fn no_smoothing_keeps_the_clay_as_found() {
+        // Smoothness 0 is the mesh straight from the field.
+        let sphere = Mesh::icosphere(3);
+        let reference = mesh_reference(sphere.positions.clone(), sphere.triangles.clone());
+        let mesh = clay(&reference, 48, 0);
+        let direct =
+            from_triangles(&sphere.positions, &sphere.triangles, 48, REFERENCE_CLOSE).unwrap();
+        assert_eq!(mesh.positions, direct.positions);
+        assert_eq!(mesh.triangles, direct.triangles);
+    }
+
+    /// What keeps `triangles` from being a solid: open edges (a directed
+    /// edge without exactly one partner going the other way), pinched
+    /// vertices (whose triangles don't make a single fan) and pieces past
+    /// the first. Empty for a closed, manifold mesh in one piece.
+    fn flaws(triangles: &[[u32; 3]]) -> Vec<String> {
+        let mut flaws = Vec::new();
+        let mut edges = std::collections::HashMap::new();
+        for &[a, b, c] in triangles {
+            for e in [(a, b), (b, c), (c, a)] {
+                *edges.entry(e).or_insert(0) += 1;
+            }
+        }
+        let open = edges
+            .iter()
+            .filter(|&(&(a, b), &n)| n != 1 || edges.get(&(b, a)) != Some(&1))
+            .count();
+        if open > 0 {
+            flaws.push(format!("{open} open edges"));
+        }
+        let vertices = triangles
+            .iter()
+            .flatten()
+            .max()
+            .map_or(0, |&v| v as usize + 1);
+        // Around each vertex, from one neighbour to the next.
+        let mut fan: Vec<Vec<(u32, u32)>> = vec![Vec::new(); vertices];
+        for &[a, b, c] in triangles {
+            fan[a as usize].push((b, c));
+            fan[b as usize].push((c, a));
+            fan[c as usize].push((a, b));
+        }
+        let pinched = fan
+            .iter()
+            .filter(|pairs| {
+                let Some(&(first, _)) = pairs.first() else {
+                    return false;
+                };
+                let (mut at, mut steps) = (first, 0);
+                loop {
+                    match pairs.iter().find(|p| p.0 == at) {
+                        Some(&(_, next)) => at = next,
+                        None => return true,
+                    }
+                    steps += 1;
+                    if at == first || steps > pairs.len() {
+                        return steps != pairs.len();
+                    }
+                }
+            })
+            .count();
+        if pinched > 0 {
+            flaws.push(format!("{pinched} pinched or open vertices"));
+        }
+        // Pieces: triangles joined through shared vertices.
+        let mut by_vertex: Vec<Vec<usize>> = vec![Vec::new(); vertices];
+        for (t, tri) in triangles.iter().enumerate() {
+            tri.iter().for_each(|&v| by_vertex[v as usize].push(t));
+        }
+        let mut seen = vec![false; triangles.len()];
+        let mut pieces = 0;
+        for start in 0..triangles.len() {
+            if seen[start] {
+                continue;
+            }
+            pieces += 1;
+            seen[start] = true;
+            let mut todo = vec![start];
+            while let Some(t) = todo.pop() {
+                for &v in &triangles[t] {
+                    for &u in &by_vertex[v as usize] {
+                        if !seen[u] {
+                            seen[u] = true;
+                            todo.push(u);
+                        }
+                    }
+                }
+            }
+        }
+        if pieces != 1 {
+            flaws.push(format!("{pieces} pieces"));
+        }
+        flaws
+    }
+
+    /// Positions and triangles.
+    type Triangles = (Vec<Vec3>, Vec<[u32; 3]>);
+
+    /// A 2 × 2 relief on a 60 × 60 height field, open all round.
+    fn relief(height: impl Fn(f32, f32) -> f32) -> Triangles {
+        let n = 60u32;
+        let mut positions = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                let (x, z) = (
+                    i as f32 / (n - 1) as f32 * 2.0 - 1.0,
+                    j as f32 / (n - 1) as f32 * 2.0 - 1.0,
+                );
+                positions.push(Vec3::new(x, height(x, z), z));
+            }
+        }
+        let mut triangles = Vec::new();
+        for j in 0..n - 1 {
+            for i in 0..n - 1 {
+                let at = j * n + i;
+                triangles.push([at, at + n, at + 1]);
+                triangles.push([at + 1, at + n, at + n + 1]);
+            }
+        }
+        (positions, triangles)
+    }
+
+    /// A relief `amplitude` high: gentle waves.
+    fn shallow(amplitude: f32) -> Triangles {
+        relief(|x, z| amplitude * (x * 3.0).sin() * (z * 2.0).cos())
+    }
+
+    /// Open sheets: reliefs on height fields (bumpy, shallow, flat), a
+    /// single triangle, half a sphere.
+    fn open_sheets() -> Vec<(&'static str, Triangles)> {
+        let (bumpy, grid) = relief(|x, z| {
+            0.08 * (x * 6.0).sin() * (z * 4.5).cos() + 0.1 * (-(x * x + z * z) * 5.0).exp()
+        });
+        let (gentle, gentle_grid) = shallow(0.15);
+        let (flat, flat_grid) = shallow(0.0);
+        let sphere = Mesh::icosphere(4);
+        let half: Vec<[u32; 3]> = sphere
+            .triangles
+            .iter()
+            .filter(|t| t.iter().all(|&v| sphere.positions[v as usize].y > -0.01))
+            .copied()
+            .collect();
+        vec![
+            ("relief", (bumpy, grid)),
+            ("shallow relief", (gentle, gentle_grid)),
+            ("flat relief", (flat, flat_grid)),
+            (
+                "triangle",
+                (
+                    vec![
+                        Vec3::ZERO,
+                        Vec3::new(1.0, 0.0, 0.0),
+                        Vec3::new(0.3, 0.2, 0.8),
+                    ],
+                    vec![[0, 1, 2]],
+                ),
+            ),
+            ("hemisphere", (sphere.positions, half)),
+        ]
+    }
+
+    #[test]
+    fn clay_from_an_open_sheet_is_solid() {
+        let mut failed = Vec::new();
+        for (name, (positions, triangles)) in open_sheets() {
+            assert!(!is_closed(&triangles));
+            for resolution in [32, 96] {
+                for close in [0, 1] {
+                    let mesh = from_triangles(&positions, &triangles, resolution, close)
+                        .unwrap_or_else(|| panic!("{name}"));
+                    let flaws = flaws(&mesh.triangles);
+                    if !flaws.is_empty() {
+                        failed.push(format!("{name} at {resolution}, close {close}: {flaws:?}"));
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn clay_from_an_open_sheet_reference_is_solid() {
+        let mut failed = Vec::new();
+        for (name, (positions, triangles)) in open_sheets() {
+            let sheet = RefMesh {
+                positions,
+                triangles,
+                colors: None,
+            };
+            let reference = Reference::new(source(), Content::Mesh(sheet));
+            for resolution in [32, 96] {
+                let mesh = clay_from_reference(&reference, at(resolution))
+                    .unwrap_or_else(|| panic!("{name}"));
+                let flaws = flaws(&mesh.triangles);
+                if !flaws.is_empty() {
+                    failed.push(format!("{name} at {resolution}: {flaws:?}"));
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn clay_from_a_flat_or_shallow_relief_reference_is_solid() {
+        // Thin in one axis: the sealing reaches the grid's border.
+        let mut failed = Vec::new();
+        for amplitude in [0.0, 0.15] {
+            let (positions, triangles) = shallow(amplitude);
+            let sheet = RefMesh {
+                positions,
+                triangles,
+                colors: None,
+            };
+            let reference = Reference::new(source(), Content::Mesh(sheet));
+            for resolution in [64, 160] {
+                for smoothness in [0, DEFAULT_SMOOTHNESS] {
+                    let how = FromReference {
+                        smoothness,
+                        ..at(resolution)
+                    };
+                    let mesh = clay_from_reference(&reference, how)
+                        .unwrap_or_else(|| panic!("{amplitude}"));
+                    let flaws = flaws(&mesh.triangles);
+                    if !flaws.is_empty() {
+                        let what = format!(
+                            "amplitude {amplitude} at {resolution}, smoothness {smoothness}"
+                        );
+                        failed.push(format!("{what}: {flaws:?}"));
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
     }
 
     /// `cargo test --release -p splatstudy-core remesh_timing -- --ignored --nocapture`

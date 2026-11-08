@@ -12,6 +12,7 @@ pub mod mesh;
 pub mod record;
 pub mod sphere;
 pub mod subdivide;
+pub mod tweak;
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +25,7 @@ pub use levels::Levels;
 pub use mesh::{Mesh, Stamp, Vertex};
 pub use record::{Checkpoint, Entry, Event, Replay};
 pub use sphere::{START_LEVEL, cube_sphere};
+pub use tweak::Tweak;
 
 /// Subdivision level of the icosphere the first versions started from
 /// (163,842 vertices). A replay of a log without a start of its own still

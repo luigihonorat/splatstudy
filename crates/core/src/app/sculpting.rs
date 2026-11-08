@@ -894,7 +894,8 @@ impl App {
 
     /// The sculpt panel, in groups that fold away: the current tool's
     /// settings (the tool is picked on the toolbar), the subdivision levels,
-    /// and the remeshes; those the window menu left in.
+    /// the remeshes, the tweaks and the calipers; those the window menu
+    /// left in.
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
         if self.playback.is_some() {
             self.playback_panel(ui);
@@ -923,6 +924,7 @@ impl App {
                 self.quad_remesh_controls(ui)
             });
         }
+        self.tweak_group(ui);
         self.calipers_group(ui);
     }
 
@@ -1133,6 +1135,38 @@ impl App {
             .find(|s| s.phase == PointerPhase::Down && s.button == Some(Button::Primary))
             .or(self.input.last.as_ref())
             .copied()
+    }
+
+    /// Where a left press this frame in view `index` takes hold of the
+    /// clay, in view points, and how many of the stroke's samples this
+    /// frame (see [`Self::stroke_samples`]) that start has used. A pen
+    /// reports several samples a frame: a stroke started where `pointer`
+    /// is by the frame's end would walk back to its press and lay its
+    /// start twice. So it starts at the press; one pressed beside the
+    /// clay starts where it first meets it, as long as the pointer is on
+    /// the clay by the frame's end. Without samples of the press, it
+    /// starts at `pointer`.
+    pub(super) fn stroke_start(
+        &self,
+        index: usize,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> Option<(Pos2, Hit, usize)> {
+        let mut samples = stroke_samples(&self.input.samples, self.stroke_press(), true)
+            .map(|s| self.view_pos_in(index, rect, egui::pos2(s.pos[0], s.pos[1])));
+        let press = samples.next();
+        if let Some(pos) = press
+            && let Some(hit) = self.pick(rect, pos)
+        {
+            return Some((pos, hit, 1));
+        }
+        let hit = self.pick(rect, pointer)?;
+        let reached = samples
+            .enumerate()
+            .find_map(|(n, pos)| self.pick(rect, pos).map(|hit| (pos, hit, n + 2)));
+        // The pointer may not be one of the stroke's samples (another
+        // pointer's): then the stroke starts there, with all of them used.
+        Some(reached.unwrap_or((pointer, hit, usize::MAX)))
     }
 
     /// The samples of this frame that go on with the stroke under way, in
@@ -2031,25 +2065,40 @@ mod tests {
         }
     }
 
-    /// The dabs that `frames` of pointer events lay, each frame's events
-    /// pushed and then the frame drawn. `frames` gets the sculpt view.
-    fn dabs_of(frames: impl FnOnce(Rect) -> Vec<Vec<crate::PointerEvent>>) -> Option<Vec<Dab>> {
+    /// What the clay's log records while `frames` of pointer events go
+    /// in, each frame's events pushed and then the frame drawn. `frames`
+    /// gets the app, to set it up and find where to point.
+    fn log_of(
+        frames: impl FnOnce(&mut App) -> Vec<Vec<crate::PointerEvent>>,
+    ) -> Option<Vec<crate::sculpt::Event>> {
         use super::super::study::tests::Harness;
-        use crate::sculpt::Event;
         let Some(mut h) = Harness::new() else {
             eprintln!("no GPU adapter; skipping app test");
             return None;
         };
         let start = h.app.sculpt.log().len();
-        for events in frames(h.app.view_rects[SCULPT]) {
+        for events in frames(&mut h.app) {
             for event in events {
                 h.app.push_event(crate::InputEvent::Pointer(event));
             }
             h.frames(1);
         }
-        let dabs: Vec<Dab> = h.app.sculpt.log()[start..]
+        Some(
+            h.app.sculpt.log()[start..]
+                .iter()
+                .map(|e| e.event)
+                .collect(),
+        )
+    }
+
+    /// The dabs that `frames` of pointer events lay, each frame's events
+    /// pushed and then the frame drawn. `frames` gets the sculpt view.
+    fn dabs_of(frames: impl FnOnce(Rect) -> Vec<Vec<crate::PointerEvent>>) -> Option<Vec<Dab>> {
+        use crate::sculpt::Event;
+        let log = log_of(|app| frames(app.view_rects[SCULPT]))?;
+        let dabs: Vec<Dab> = log
             .iter()
-            .filter_map(|e| match e.event {
+            .filter_map(|e| match *e {
                 Event::Dab(dab) => Some(dab),
                 _ => None,
             })
@@ -2214,6 +2263,122 @@ mod tests {
             dabs.iter().all(|d| d.strength == full),
             "a mouse or touch dab pressed less than fully"
         );
+    }
+
+    /// A straight pen stroke from `from` to `to`, points of the view: its
+    /// press and 20 moves, a frame each or all in the press's frame (as a
+    /// pen reports faster than the frames come), then its lift.
+    fn straight_stroke(from: Pos2, to: Pos2, one_frame: bool) -> Vec<Vec<crate::PointerEvent>> {
+        use crate::PointerPhase::{Down, Move, Up};
+        let moves = (1..=20).map(|i| pen(Move, from.lerp(to, i as f32 / 20.0), 1.0));
+        let mut frames = vec![vec![pen(Move, from, 0.0)]];
+        if one_frame {
+            frames.push(std::iter::once(pen(Down, from, 1.0)).chain(moves).collect());
+        } else {
+            frames.push(vec![pen(Down, from, 1.0)]);
+            frames.extend(moves.map(|m| vec![m]));
+        }
+        frames.push(vec![pen(Up, to, 0.0)]);
+        frames
+    }
+
+    /// Asserts that the dabs of a stroke drawn left to right across the
+    /// front of the clay never step back.
+    fn assert_forwards(dabs: &[Dab]) {
+        let xs: Vec<f32> = dabs.iter().map(|d| d.centre.x).collect();
+        assert!(
+            xs.windows(2).all(|p| p[1] >= p[0] - 1e-3),
+            "the stroke went back over itself: {xs:?}"
+        );
+    }
+
+    #[test]
+    fn a_stroke_moved_within_its_press_frame_starts_at_the_press() {
+        // A pen reports several samples a frame: the stroke starts where
+        // it pressed, not where the pen got to by the frame's end, and so
+        // does not walk back over its start, laying it twice.
+        let stroke = |one_frame| {
+            dabs_of(|rect| {
+                let side = egui::vec2(60.0, 0.0);
+                straight_stroke(rect.center() - side, rect.center() + side, one_frame)
+            })
+        };
+        let (Some(slow), Some(fast)) = (stroke(false), stroke(true)) else {
+            return;
+        };
+        assert_forwards(&slow);
+        assert_forwards(&fast);
+        assert!(
+            fast.len().abs_diff(slow.len()) <= 1,
+            "{} dabs in one frame, {} a frame at a time",
+            fast.len(),
+            slow.len()
+        );
+        assert!((fast[0].centre - slow[0].centre).length() < 1e-3);
+    }
+
+    #[test]
+    fn a_stroke_pressed_beside_the_clay_starts_where_it_reaches_it() {
+        // Pressed off the clay and moved onto it within the frame: the
+        // stroke starts where it first meets the clay and goes on from
+        // there, not back from where the pen got to.
+        use crate::sculpt::Event;
+        let mut edge = None;
+        let Some(log) = log_of(|app| {
+            let rect = app.view_rects[SCULPT];
+            let from = egui::pos2(rect.left() + 4.0, rect.center().y);
+            assert!(app.pick(rect, from).is_none(), "the press is on the clay");
+            let frames = straight_stroke(from, rect.center(), true);
+            edge = frames[1]
+                .iter()
+                .map(|e| egui::pos2(e.pos[0], e.pos[1]))
+                .find_map(|pos| app.pick(rect, pos));
+            frames
+        }) else {
+            return;
+        };
+        let dabs: Vec<Dab> = log
+            .iter()
+            .filter_map(|e| match *e {
+                Event::Dab(dab) => Some(dab),
+                _ => None,
+            })
+            .collect();
+        assert_forwards(&dabs);
+        let edge = edge.expect("the stroke never meets the clay");
+        assert!((dabs[0].centre - edge.point).length() < 1e-3);
+    }
+
+    #[test]
+    fn a_grab_moved_within_its_press_frame_takes_hold_at_the_press() {
+        use crate::sculpt::Event;
+        // The Move tool takes hold of the clay under the press, and the
+        // samples after it in the frame already move it.
+        let grab = |one_frame| {
+            let log = log_of(|app| {
+                app.tool.tool = Brush::Move;
+                let c = app.view_rects[SCULPT].center();
+                straight_stroke(
+                    c - egui::vec2(30.0, 0.0),
+                    c + egui::vec2(30.0, 20.0),
+                    one_frame,
+                )
+            })?;
+            let centre = log.iter().find_map(|e| match *e {
+                Event::Grab { centre, .. } => Some(centre),
+                _ => None,
+            });
+            let moved = log.iter().rev().find_map(|e| match *e {
+                Event::Drag(offset) => Some(offset),
+                _ => None,
+            });
+            Some((centre.expect("no grab"), moved.expect("no drag")))
+        };
+        let (Some(slow), Some(fast)) = (grab(false), grab(true)) else {
+            return;
+        };
+        assert!((fast.0 - slow.0).length() < 1e-4, "{fast:?} {slow:?}");
+        assert!((fast.1 - slow.1).length() < 1e-4, "{fast:?} {slow:?}");
     }
 
     #[test]
