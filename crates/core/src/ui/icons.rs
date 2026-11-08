@@ -126,6 +126,15 @@ pub fn flat_shading(painter: &Painter, rect: Rect, colour: Color32) {
     }
 }
 
+/// A matcap ball: an outline, its highlight up on the left, and the
+/// shade turning round its lower right.
+pub fn matcap(painter: &Painter, rect: Rect, colour: Color32) {
+    let pen = Pen::new(painter, rect, colour);
+    pen.circle((8.0, 8.0), 6.5);
+    pen.disc((5.8, 5.8), 1.4);
+    pen.arc((8.0, 8.0), 4.3, -0.1, 1.7);
+}
+
 /// Where the light comes from, for the lightings in
 /// [`crate::render::clay::Lighting`] order: studio (above left), raking
 /// (low from the side) and top.

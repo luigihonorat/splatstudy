@@ -52,7 +52,9 @@ struct Uniforms {
     /// The chalk's colour, linear RGB, and how much light fully masked
     /// clay keeps.
     layers: [f32; 4],
-    /// x: faceted; y, z, w: unused.
+    /// x: faceted; y: the matcap; z: the matcap's curvature scale
+    /// (see [`cavity_scale`]); w: the mesh's typical edge (see
+    /// [`Look::edge`]).
     shading: [f32; 4],
 }
 
@@ -75,6 +77,15 @@ pub struct Look {
     /// Flat shading: each triangle lit as one plane, so the facets show,
     /// rather than by its corners' normals smoothed across it.
     pub faceted: bool,
+    /// The matcap: a soft studio clay ball's light, read from the normal
+    /// as the eye sees it, with hollows shaded and ridges caught, so
+    /// small forms read; off, the plainer light of [`Lighting`] alone.
+    pub matcap: bool,
+    /// The mesh's typical edge length (see [`typical_edge`]), for the
+    /// matcap: the curvature it reads is one value per triangle, so its
+    /// hollows and ridges fade out where triangles grow many pixels wide
+    /// and would show as bands. 0 keeps them everywhere.
+    pub edge: f32,
 }
 
 impl Look {
@@ -87,6 +98,8 @@ impl Look {
             vertex_colours: false,
             lighting: Lighting::Studio,
             faceted: false,
+            matcap: false,
+            edge: 0.0,
         }
     }
 
@@ -98,6 +111,16 @@ impl Look {
     /// The same look, faceted or smooth.
     pub const fn with_facets(self, faceted: bool) -> Self {
         Self { faceted, ..self }
+    }
+
+    /// The same look, with the matcap or without, for a mesh whose
+    /// typical edge is `edge` long.
+    pub const fn with_matcap(self, matcap: bool, edge: f32) -> Self {
+        Self {
+            matcap,
+            edge,
+            ..self
+        }
     }
 
     /// Filled flat with one colour, opaque: a silhouette.
@@ -425,6 +448,33 @@ fn pull(projection: &Mat4, distance: f32) -> f32 {
     projection.w_axis.z * (1.0 - s) / s
 }
 
+/// The length the matcap scales curvature by into its hollows and
+/// ridges: a share of the camera's distance, so detail reads the same way
+/// at every zoom. A bump a few hundredths of the distance across is
+/// caught at half strength; broad forms, hardly at all.
+fn cavity_scale(distance: f32) -> f32 {
+    CAVITY_SHARE * distance
+}
+
+const CAVITY_SHARE: f32 = 0.01;
+
+/// The mean length of the edges of up to a few hundred of `mesh`'s
+/// triangles, spread through it: cheap enough for every frame.
+pub fn typical_edge(mesh: &Mesh) -> f32 {
+    let n = mesh.triangles.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let step = n.div_ceil(256);
+    let (mut sum, mut count) = (0.0, 0);
+    for t in mesh.triangles.iter().step_by(step) {
+        let [a, b, c] = t.map(|i| mesh.positions[i as usize]);
+        sum += a.distance(b) + b.distance(c) + c.distance(a);
+        count += 3;
+    }
+    sum / count as f32
+}
+
 /// An orthographic projection keeps w at 1.
 pub fn is_ortho(projection: &Mat4) -> bool {
     projection.z_axis.w == 0.0
@@ -699,7 +749,12 @@ impl ClayPass {
                 let [r, g, b, _] = super::linear(theme::CHALK);
                 [r, g, b, theme::MASK_SHADE]
             },
-            shading: [flag(look.faceted), 0.0, 0.0, 0.0],
+            shading: [
+                flag(look.faceted),
+                flag(look.matcap),
+                cavity_scale(camera.distance),
+                look.edge,
+            ],
         };
         let (buffer, _) = &self.slots[slot.index()][layer as usize];
         queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -974,6 +1029,174 @@ mod tests {
         // Away from every edge, the clay is as it was.
         assert!(darker(0.1, -0.15).abs() <= 2, "{}", darker(0.1, -0.15));
         assert!(darker(-0.6, 0.2).abs() <= 2, "{}", darker(-0.6, 0.2));
+    }
+
+    /// The start clay sculpted a little: a broad mound, a ridge over it,
+    /// a groove down one side, a row of small bumps and fine ripples, the
+    /// sizes of a sculpt's forms and details.
+    fn sculpted(level: usize) -> Mesh {
+        let (mut mesh, _) = crate::sculpt::cube_sphere(level);
+        let bump =
+            |p: Vec3, at: Vec3, size: f32| (-(p - at).length_squared() / (size * size)).exp();
+        for p in &mut mesh.positions {
+            let n = p.normalize();
+            let front = n.z.max(0.0);
+            let mut h = 0.12 * bump(n, Vec3::new(0.0, -0.1, 1.0), 0.3);
+            h += 0.05 * (-((n.y - 0.35) / 0.06).powi(2)).exp() * front;
+            h -= 0.03 * (-((n.x - 0.3) / 0.025).powi(2)).exp() * front * (n.y < 0.2) as u8 as f32;
+            for k in 0..5 {
+                let at = Vec3::new(-0.6 + 0.09 * k as f32, -0.45, 0.66).normalize();
+                h += 0.02 * bump(n, at, 0.03);
+            }
+            if n.x < -0.25 && n.y > 0.0 {
+                h += 0.006 * (n.y * 90.0).sin() * front;
+            }
+            *p = n * (1.0 + h);
+        }
+        mesh.recompute_normals();
+        mesh
+    }
+
+    /// The renders the matcap was judged by, the classic light beside it:
+    /// set `SPLATSTUDY_MATCAP_PNGS` to a folder to have them written
+    /// there (`cargo test -p splatstudy-core matcap -- --nocapture`).
+    /// Checks that hollows read darker with the matcap than without, and
+    /// that the chalk, the mask and the silhouette still show through it.
+    #[test]
+    fn the_matcap_darkens_hollows_and_keeps_the_chalk_and_mask() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Some((device, queue)) =
+            pollster::block_on(instance.request_adapter(&Default::default()))
+                .ok()
+                .and_then(|a| pollster::block_on(a.request_device(&Default::default())).ok())
+        else {
+            eprintln!("no GPU adapter; skipping render test");
+            return;
+        };
+        let out = std::env::var_os("SPLATSTUDY_MATCAP_PNGS").map(std::path::PathBuf::from);
+        let side = if out.is_some() { 640 } else { 160 };
+        let size = [side, side];
+        let target = ViewTarget::new(&device, size);
+        let clay = ClayPass::new(&device);
+        let camera = OrbitCamera {
+            pitch: 0.0,
+            distance: 4.2,
+            ..OrbitCamera::default()
+        };
+        let render = |gpu: &GpuMesh, look: &Look, background: Color32, camera: &OrbitCamera| {
+            clay.prepare(&queue, Slot::SculptView, camera, 1.0, look);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = target.begin_pass(&mut encoder, background);
+                clay.draw(&mut pass, Slot::SculptView, gpu);
+            }
+            let readback = Readback::copy(&device, &mut encoder, &target);
+            queue.submit([encoder.finish()]);
+            readback.map();
+            readback.wait(&device).expect("pixels")
+        };
+        let mut mesh = sculpted(if out.is_some() { 8 } else { 6 });
+        // Chalk on the upper left, the mask on the upper right.
+        let n = mesh.positions.len();
+        for i in 0..n {
+            let p = mesh.positions[i];
+            if p.y > 0.55 && p.x < -0.2 {
+                mesh.layers.chalk.set(i, 1.0, n);
+            }
+            if p.y > 0.55 && p.x > 0.2 {
+                mesh.layers.mask.set(i, 1.0, n);
+            }
+        }
+        let gpu = GpuMesh::new(&device, &mesh);
+        let plain = Look::lit(theme::CLAY);
+        let matcap = plain.with_matcap(true, typical_edge(&mesh));
+        if let Some(dir) = &out {
+            std::fs::create_dir_all(dir).unwrap();
+            let start_mesh = crate::sculpt::cube_sphere(7).0;
+            let start_gpu = GpuMesh::new(&device, &start_mesh);
+            let start = (&start_gpu, typical_edge(&start_mesh));
+            let turned = OrbitCamera {
+                yaw: 0.9,
+                pitch: 0.25,
+                ..camera
+            };
+            let light = Color32::from_gray(0xE8);
+            // Coarse and close: each triangle many pixels wide.
+            let coarse_mesh = sculpted(5);
+            let coarse_gpu = GpuMesh::new(&device, &coarse_mesh);
+            let coarse = (&coarse_gpu, typical_edge(&coarse_mesh));
+            let fine = (&gpu, matcap.edge);
+            let close = OrbitCamera {
+                distance: 2.2,
+                target: Vec3::new(0.2, 0.0, 0.0),
+                ..camera
+            };
+            for (name, gpu, camera, background) in [
+                ("start", &start, &camera, theme::VIEW_BG),
+                ("coarse", &coarse, &close, theme::VIEW_BG),
+                ("sculpted", &fine, &camera, theme::VIEW_BG),
+                ("turned", &fine, &turned, theme::VIEW_BG),
+                ("light-bg", &fine, &turned, light),
+            ] {
+                let (gpu, edge) = *gpu;
+                let matcap = plain.with_matcap(true, edge);
+                for lighting in Lighting::ALL {
+                    for (shader, look) in [("classic", plain), ("matcap", matcap)] {
+                        let look = look.with_lighting(lighting);
+                        let pixels = render(gpu, &look, background, camera);
+                        let file = format!("{name}-{lighting:?}-{shader}.png").to_lowercase();
+                        let png = crate::export::png(&pixels, size).unwrap();
+                        std::fs::write(dir.join(file), png).unwrap();
+                    }
+                }
+                let faceted = matcap.with_facets(true);
+                let png = crate::export::png(&render(gpu, &faceted, background, camera), size);
+                std::fs::write(dir.join(format!("{name}-faceted-matcap.png")), png.unwrap())
+                    .unwrap();
+            }
+        }
+
+        let grey = |pixels: &[u8], p: Vec3| {
+            let q = (camera.projection(1.0) * camera.view()).project_point3(p);
+            let x = ((q.x * 0.5 + 0.5) * size[0] as f32) as usize;
+            let y = ((0.5 - q.y * 0.5) * size[1] as f32) as usize;
+            let i = (y * size[0] as usize + x) * 4;
+            [0, 1, 2].map(|c| i32::from(pixels[i + c]))
+        };
+        let on_clay = |n: Vec3| {
+            let n = n.normalize();
+            mesh.positions
+                .iter()
+                .copied()
+                .max_by(|a, b| a.normalize().dot(n).total_cmp(&b.normalize().dot(n)))
+                .unwrap()
+        };
+        let (before, after) = (
+            render(&gpu, &plain, theme::VIEW_BG, &camera),
+            render(&gpu, &matcap, theme::VIEW_BG, &camera),
+        );
+        // The groove, against the clay just beside it.
+        let groove = on_clay(Vec3::new(0.3, -0.2, 0.93));
+        let beside = on_clay(Vec3::new(0.38, -0.2, 0.9));
+        let depth = |pixels: &[u8]| grey(pixels, beside)[1] - grey(pixels, groove)[1];
+        assert!(
+            depth(&after) > depth(&before) + 6,
+            "{} {}",
+            depth(&after),
+            depth(&before)
+        );
+        // Chalk is blue and the mask dark, as without the matcap.
+        let [r, _, b] = grey(&after, on_clay(Vec3::new(-0.45, 0.8, 0.4)));
+        assert!(b > r + 10, "chalk {r} {b}");
+        let masked = grey(&after, on_clay(Vec3::new(0.45, 0.8, 0.4)))[1];
+        let unmasked = grey(&after, on_clay(Vec3::new(0.0, 0.8, 0.6)))[1];
+        assert!(masked + 20 < unmasked, "mask {masked} {unmasked}");
+        // A silhouette is flat whichever light.
+        let ink = Look::flat(theme::SILHOUETTE_INK);
+        assert_eq!(
+            render(&gpu, &ink, theme::VIEW_BG, &camera),
+            render(&gpu, &ink.with_matcap(true, 0.0), theme::VIEW_BG, &camera)
+        );
     }
 
     #[test]
