@@ -155,11 +155,12 @@ pub struct StudyView {
     pub plumb_x: [f32; 2],
     pub grid_divisions: u32,
     /// The sculpt view's own: the reference over it, the wireframe, the
-    /// silhouette difference and the flat shading.
+    /// silhouette difference, the flat shading and the matcap.
     pub ghost: bool,
     pub wireframe: bool,
     pub tint: bool,
     pub flat_shading: bool,
+    pub matcap: bool,
 }
 
 /// The aids one view has of its own.
@@ -205,7 +206,12 @@ impl StudyView {
             let flags = bits(&[aids.mirror, aids.plumb, aids.grid, aids.silhouette, ortho]);
             w.u8(flags).u8(aids.lighting);
         }
-        w.u8(bits(&[self.wireframe, self.tint, self.flat_shading]));
+        w.u8(bits(&[
+            self.wireframe,
+            self.tint,
+            self.flat_shading,
+            self.matcap,
+        ]));
     }
 }
 
@@ -927,6 +933,7 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
             wireframe: false,
             tint: false,
             flat_shading: false,
+            matcap: false,
         };
         if !r.is_empty() {
             for (aids, camera) in study.views.iter_mut().zip(&mut cameras) {
@@ -947,6 +954,8 @@ fn read_view(r: &mut Reader) -> Result<View, ReadError> {
             study.tint = flags & 2 != 0;
             // Absent from files from before it: smooth.
             study.flat_shading = flags & 4 != 0;
+            // Likewise: the plainer light.
+            study.matcap = flags & 8 != 0;
         }
         Some(study)
     };
@@ -1051,6 +1060,7 @@ mod tests {
                 wireframe: true,
                 tint: true,
                 flat_shading: true,
+                matcap: true,
             }),
         }
     }
@@ -1591,7 +1601,7 @@ mod tests {
         assert_eq!(study.views, [both; 2]);
         assert!(study.swapped && study.ghost && !study.link);
         assert_eq!((study.layout, study.grid_divisions), (2, 3));
-        assert!(!study.wireframe && !study.tint && !study.flat_shading);
+        assert!(!study.wireframe && !study.tint && !study.flat_shading && !study.matcap);
     }
 
     /// Readers from before each view had its own aids read the shared

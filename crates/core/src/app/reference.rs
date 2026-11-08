@@ -881,6 +881,8 @@ impl App {
                     vertex_colours: *coloured && !flat,
                     lighting,
                     faceted: false,
+                    matcap: false,
+                    edge: 0.0,
                 };
                 if over {
                     clay.prepare_ghost(&self.queue, slot, camera, aspect, &look);
