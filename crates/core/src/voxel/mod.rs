@@ -20,8 +20,20 @@ use crate::sculpt::Mesh;
 
 /// Remesh resolutions, in cells along the longest side of the shape.
 pub const MIN_RESOLUTION: u32 = 32;
-pub const MAX_RESOLUTION: u32 = 384;
+pub const MAX_RESOLUTION: u32 = 256;
 pub const DEFAULT_RESOLUTION: u32 = 160;
+/// Splats go finer: their detail blend (see [`fusion::field`]) keeps a
+/// face's features well past 256 cells, and they are fused coarser where
+/// they are thin.
+pub const MAX_SPLAT_RESOLUTION: u32 = 384;
+
+/// The finest resolution clay from `reference` can be made at.
+pub fn max_resolution(reference: &Reference) -> u32 {
+    match reference.content {
+        Content::Splats(_) => MAX_SPLAT_RESOLUTION,
+        _ => MAX_RESOLUTION,
+    }
+}
 
 /// Smoothing passes after surface nets, each pulled back onto the level:
 /// they even out the triangles and take off the grid's stair steps.
@@ -95,7 +107,9 @@ impl Default for FromReference {
 /// inside the crop box counts, closed flat where the box cuts it. `None`
 /// for an image, or if nothing is left.
 pub fn clay_from_reference(reference: &Reference, how: FromReference) -> Option<Mesh> {
-    let resolution = how.resolution.clamp(MIN_RESOLUTION / 4, MAX_RESOLUTION);
+    let resolution = how
+        .resolution
+        .clamp(MIN_RESOLUTION / 4, max_resolution(reference));
     let smoothness = how.smoothness.min(MAX_SMOOTHNESS);
     let mut field = match &reference.content {
         Content::Splats(splats) => fusion::field(

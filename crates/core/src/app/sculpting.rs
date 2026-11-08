@@ -930,7 +930,7 @@ impl App {
         if ui::choice(ui, m.remesh, false).clicked() {
             self.ask_remesh();
         }
-        self.resolution_slider(ui);
+        self.resolution_slider(ui, voxel::MAX_RESOLUTION);
     }
 
     /// The quad remesh, its button over its number of quads.
@@ -946,13 +946,16 @@ impl App {
     }
 
     /// The voxel resolution, which the remesh and the mesh from the
-    /// reference share.
-    fn resolution_slider(&mut self, ui: &mut egui::Ui) {
+    /// reference share, up to `max`: splats go finer than the remesh,
+    /// which shows (and uses) a finer value as its own finest.
+    fn resolution_slider(&mut self, ui: &mut egui::Ui, max: u32) {
         let m = self.lang.tr().mesh;
-        let range = voxel::MIN_RESOLUTION as f32..=voxel::MAX_RESOLUTION as f32;
-        ui::slider(ui, m.resolution, &mut self.tool.resolution, range, |v| {
-            format!("{v:.0}")
-        });
+        let range = voxel::MIN_RESOLUTION as f32..=max as f32;
+        let mut shown = self.tool.resolution.min(max as f32);
+        let slider = ui::slider(ui, m.resolution, &mut shown, range, |v| format!("{v:.0}"));
+        if slider.changed() {
+            self.tool.resolution = shown;
+        }
     }
 
     /// The mesh from the reference, in the reference panel: the button,
@@ -968,7 +971,12 @@ impl App {
         {
             self.ask(Pending::FromReference, m.from_reference);
         }
-        self.resolution_slider(ui);
+        let max = self
+            .reference
+            .current
+            .as_ref()
+            .map_or(voxel::MAX_RESOLUTION, voxel::max_resolution);
+        self.resolution_slider(ui, max);
         let range = 0.0..=voxel::MAX_SMOOTHNESS as f32;
         ui::slider(ui, m.smoothness, &mut self.tool.smoothness, range, |v| {
             format!("{v:.0}")
