@@ -59,7 +59,7 @@ mod tests {
     use super::*;
 
     /// The language tables, as subset.py reads them.
-    const TABLES: [&str; 8] = [
+    const TABLES: [&str; 9] = [
         include_str!("i18n.rs"),
         include_str!("i18n/calipers.rs"),
         include_str!("i18n/export.rs"),
@@ -68,6 +68,7 @@ mod tests {
         include_str!("i18n/mesh.rs"),
         include_str!("i18n/refs.rs"),
         include_str!("i18n/study.rs"),
+        include_str!("i18n/tweak.rs"),
     ];
 
     /// The contents of every string literal outside comments.
