@@ -32,6 +32,8 @@
 //! pixel are merged first, a pixel-sized cell at a time. On desktop the
 //! views and the grid are shared out between threads.
 
+use std::ops::Range;
+
 use glam::{Mat3, UVec3, Vec3};
 
 use super::grid::{self, Grid};
@@ -216,31 +218,49 @@ pub fn field(
     } else {
         // Where the splats are dense enough, the field fused as finely as
         // asked; where they are thin or fuzzy, the coarser one; in
-        // between, a blend (see [`sharpness`]).
-        let mut sharp = fused(splats, align, (min, max), resolution, level)?;
-        sharp.blur();
-        // Worked out on the coarse grid: it changes slowly.
+        // between, a blend (see [`sharpness`]). Worked out on the coarse
+        // grid: it changes slowly.
         let blend = Grid {
             origin: coarse.origin,
             step: coarse.step,
             dims: coarse.dims,
             values: sharpness(&coarse, &inside, g.step * PIXEL),
         };
+        // Fused finely only around where the blend is not 0 (a node
+        // more for the blur), and not at all where it is 0 everywhere.
+        let sharp = match reach(&blend, &g, 2) {
+            Some(window) => {
+                let mut sharp =
+                    fused_within(splats, align, (min, max), resolution, level, &window)?;
+                sharp.blur();
+                Some((window, sharp))
+            }
+            None => None,
+        };
 
         let [nx, ny, _] = g.dims;
         let (origin, step) = (g.origin, g.step);
-        let layers: Vec<(usize, &mut [f32], &[f32])> = g
-            .values
-            .chunks_mut(nx * ny)
-            .zip(sharp.values.chunks(nx * ny))
-            .enumerate()
-            .map(|(k, (out, fine))| (k, out, fine))
-            .collect();
-        parallel_mut(layers, |(k, out, fine)| {
+        let layers: Vec<(usize, &mut [f32])> = g.values.chunks_mut(nx * ny).enumerate().collect();
+        parallel_mut(layers, |(k, out)| {
             for (at, v) in out.iter_mut().enumerate() {
-                let p = origin + Vec3::new((at % nx) as f32, (at / nx) as f32, *k as f32) * step;
-                let a = blend.value_at(p);
-                *v = a * fine[at] + (1.0 - a) * coarse.value_at(p);
+                let (i, j) = (at % nx, at / nx);
+                let p = origin + Vec3::new(i as f32, j as f32, *k as f32) * step;
+                let fine = sharp.as_ref().and_then(|(w, sharp)| {
+                    let [x, y, z] = [i, j, *k];
+                    (w[0].contains(&x) && w[1].contains(&y) && w[2].contains(&z)).then(|| {
+                        sharp.values[sharp.index(x - w[0].start, y - w[1].start, z - w[2].start)]
+                    })
+                });
+                *v = match fine {
+                    Some(fine) => {
+                        let a = blend.value_at(p);
+                        a * fine + (1.0 - a) * coarse.value_at(p)
+                    }
+                    None => {
+                        debug_assert_eq!(blend.value_at(p), 0.0);
+                        coarse.value_at(p)
+                    }
+                };
             }
         });
 
@@ -254,6 +274,43 @@ pub fn field(
     }
     settle(&mut g, truncation, 0);
     Some(g)
+}
+
+/// The nodes of `g` whose value [`Grid::value_at`] of `blend` (a coarser
+/// grid over the same region) may not be 0, `margin` nodes more around: a
+/// range of indices along each axis. `None` if `blend` is 0 everywhere.
+fn reach(blend: &Grid, g: &Grid, margin: usize) -> Option<[Range<usize>; 3]> {
+    let (mut lo, mut hi) = (UVec3::MAX, UVec3::ZERO);
+    for (at, &v) in blend.values.iter().enumerate() {
+        if v != 0.0 {
+            let c = UVec3::from(blend.coords(at).map(|c| c as u32));
+            lo = lo.min(c);
+            hi = hi.max(c);
+        }
+    }
+    if lo.x > hi.x {
+        return None;
+    }
+    Some(std::array::from_fn(|axis| {
+        let n = g.dims[axis];
+        let last = blend.dims[axis].saturating_sub(2) as u32;
+        // A point takes the blend from the corners of the cell it is in,
+        // the cells at the borders reaching on beyond the grid: not 0
+        // only in the cells next to the nodes where it is not.
+        let fine =
+            |cell: u32| (blend.origin[axis] + cell as f32 * blend.step - g.origin[axis]) / g.step;
+        let start = if lo[axis] <= 1 {
+            0
+        } else {
+            (fine(lo[axis] - 1).floor() as isize - margin as isize).clamp(0, n as isize) as usize
+        };
+        let end = if hi[axis] >= last {
+            n
+        } else {
+            (fine(hi[axis] + 1).ceil() as isize + 1 + margin as isize).clamp(0, n as isize) as usize
+        };
+        start..end.max(start)
+    }))
 }
 
 /// How far to trust the finely fused field at each node of `g`, 0..1:
@@ -365,13 +422,31 @@ fn fused(
 ) -> Option<Grid> {
     let seen = observe(splats, align, (min, max), resolution, level)?;
     let mut g = Grid::around(min, max, resolution, PAD, 0.0)?;
-    fuse(
-        &mut g,
-        &seen.frame,
-        &seen.views,
-        &seen.maps,
-        seen.truncation,
-    );
+    let window = g.dims.map(|n| 0..n);
+    fuse(&mut g.values, (g.origin, g.step), &window, &seen);
+    Some(g)
+}
+
+/// [`fused`], only at the nodes `within` (a range of indices along each
+/// axis): a grid of those, with the same values there.
+fn fused_within(
+    splats: &Splats,
+    align: &Alignment,
+    (min, max): (Vec3, Vec3),
+    resolution: u32,
+    level: f32,
+    within: &[Range<usize>; 3],
+) -> Option<Grid> {
+    let seen = observe(splats, align, (min, max), resolution, level)?;
+    let all = Grid::around(min, max, resolution, PAD, 0.0)?;
+    let dims = within.clone().map(|r| r.len());
+    let mut g = Grid {
+        origin: all.point(within[0].start, within[1].start, within[2].start),
+        step: all.step,
+        dims,
+        values: vec![0.0; dims[0] * dims[1] * dims[2]],
+    };
+    fuse(&mut g.values, (all.origin, all.step), within, &seen);
     Some(g)
 }
 
@@ -1092,24 +1167,34 @@ fn weigh(
     map.splat = Vec::new();
 }
 
-/// Fuses the views into `g`: the signed distance, truncated at
-/// `truncation`, where views saw a surface near a node; outside where a
-/// view saw through it; inside where no view saw into it.
-fn fuse(g: &mut Grid, frame: &Frame, views: &[View], maps: &[Depths], truncation: f32) {
-    let [nx, ny, _] = g.dims;
+/// Fuses the views of `seen` into the nodes `within` (a range of indices
+/// along each axis) of a grid from `origin`, `step` apart, whose values
+/// are `values`: the signed distance, truncated, where views saw a surface
+/// near a node; outside where a view saw through it; inside where no view
+/// saw into it.
+fn fuse(values: &mut [f32], (origin, step): (Vec3, f32), within: &[Range<usize>; 3], seen: &Seen) {
+    let Seen {
+        frame,
+        views,
+        maps,
+        truncation,
+    } = seen;
+    let truncation = *truncation;
+    let [nx, ny] = [within[0].len(), within[1].len()];
+    let (i0, j0, k0) = (within[0].start, within[1].start, within[2].start);
     let slab = nx * ny;
-    let origin = g.origin;
-    let step = g.step;
     let inv_pixel = 1.0 / frame.pixel;
     let size = frame.size as isize;
-    let layers: Vec<(usize, &mut [f32])> = g.values.chunks_mut(slab).enumerate().collect();
+    let layers: Vec<(usize, &mut [f32])> = values.chunks_mut(slab).enumerate().collect();
     parallel_mut(layers, |(k, values)| {
+        let k = k0 + *k;
         let mut sum = vec![0f32; slab];
         let mut weight = vec![0f32; slab];
         let mut free = vec![0u16; slab];
         for (view, map) in views.iter().zip(maps) {
             for j in 0..ny {
-                let start = origin + Vec3::new(0.0, j as f32, *k as f32) * step - frame.centre;
+                let start =
+                    origin + Vec3::new(0.0, (j0 + j) as f32, k as f32) * step - frame.centre;
                 let x0 = (start.dot(view.right) + frame.radius) * inv_pixel;
                 let y0 = (frame.radius - start.dot(view.up)) * inv_pixel;
                 let z0 = start.dot(view.forward) + frame.near;
@@ -1119,7 +1204,7 @@ fn fuse(g: &mut Grid, frame: &Frame, views: &[View], maps: &[Depths], truncation
                     view.forward.x * step,
                 );
                 for i in 0..nx {
-                    let fi = i as f32;
+                    let fi = (i0 + i) as f32;
                     let px = (x0 + dx * fi) as isize;
                     let py = (y0 + dy * fi) as isize;
                     if px < 0 || py < 0 || px >= size || py >= size {
@@ -1630,6 +1715,61 @@ mod tests {
         assert!(manifold && pieces == 1 && genus == 0, "genus {genus}");
         for p in &mesh.positions {
             assert!((0.75..0.88).contains(&p.length()), "{p}");
+        }
+    }
+
+    #[test]
+    fn the_fine_fusion_reaches_every_node_the_blend_does() {
+        let fine = Grid::around(Vec3::splat(-1.0), Vec3::splat(1.0), 80, PAD, 0.0).unwrap();
+        let coarse = Grid::around(Vec3::splat(-1.0), Vec3::splat(1.0), 31, PAD, 0.0).unwrap();
+        let mut blend = Grid::around(Vec3::splat(-1.0), Vec3::splat(1.0), 31, PAD, 0.0).unwrap();
+        // Nowhere: not fused finely at all.
+        assert!(reach(&blend, &fine, 2).is_none());
+        // A few nodes, inside and at the borders.
+        let last = coarse.dims.map(|n| n - 1);
+        for nodes in [
+            vec![[12, 20, 7]],
+            vec![[3, 4, 5], [9, 30, 18]],
+            vec![[0, 15, 15], [last[0], 2, last[2]]],
+        ] {
+            blend.values.fill(0.0);
+            for [i, j, k] in nodes {
+                blend.values[coarse.index(i, j, k)] = 0.3;
+            }
+            let window = reach(&blend, &fine, 2).unwrap();
+            for at in 0..fine.len() {
+                let [i, j, k] = fine.coords(at);
+                if blend.value_at(fine.point(i, j, k)) != 0.0 {
+                    assert!(
+                        (0..3).all(|a| {
+                            let n = [i, j, k][a];
+                            n >= window[a].start + 2 || window[a].start == 0
+                        }) && (0..3).all(|a| {
+                            let n = [i, j, k][a];
+                            n + 2 < window[a].end || window[a].end == fine.dims[a]
+                        }),
+                        "{:?} outside {window:?}",
+                        [i, j, k]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fused_within_a_window_is_the_same_there() {
+        let surface = sphere(20_000, Vec3::ZERO, 0.8);
+        let splats = discs(&surface, 0.02, 220);
+        let align = Alignment::default();
+        let region = (Vec3::splat(-0.82), Vec3::splat(0.82));
+        let all = fused(&splats, &align, region, 64, 0.7).unwrap();
+        let window = [10..40, 3..50, 20..all.dims[2]];
+        let part = fused_within(&splats, &align, region, 64, 0.7, &window).unwrap();
+        assert_eq!(part.dims, [30, 47, all.dims[2] - 20]);
+        for at in 0..part.len() {
+            let [i, j, k] = part.coords(at);
+            let full = all.values[all.index(i + 10, j + 3, k + 20)];
+            assert_eq!(part.values[at].to_bits(), full.to_bits());
         }
     }
 
