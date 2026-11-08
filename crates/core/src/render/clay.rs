@@ -78,13 +78,13 @@ pub struct Look {
     /// rather than by its corners' normals smoothed across it.
     pub faceted: bool,
     /// The matcap: a soft studio clay ball's light, read from the normal
-    /// as the eye sees it, with hollows shaded and ridges caught, so
-    /// small forms read; off, the plainer light of [`Lighting`] alone.
+    /// as the eye sees it, with hollows a little darker and ridges a
+    /// little lighter, so small forms read; off, the plainer light of
+    /// [`Lighting`] alone.
     pub matcap: bool,
     /// The mesh's typical edge length (see [`typical_edge`]), for the
-    /// matcap: the curvature it reads is one value per triangle, so its
-    /// hollows and ridges fade out where triangles grow many pixels wide
-    /// and would show as bands. 0 keeps them everywhere.
+    /// matcap: each vertex's curvature is stored against it (see
+    /// [`GpuMesh::write`]). 0 leaves out the hollows and ridges.
     pub edge: f32,
 }
 
@@ -297,7 +297,7 @@ impl GpuMesh {
         let storage = wgpu::BufferUsages::STORAGE;
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("clay vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices()),
+            contents: bytemuck::cast_slice(&clay_vertices(mesh, 0..mesh.positions.len())),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | storage,
         });
         let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -402,9 +402,12 @@ impl GpuMesh {
         }
     }
 
-    /// Uploads the vertices in `range` after sculpting changed them.
+    /// Uploads the vertices in `range` after sculpting changed them. A
+    /// vertex's curvature depends on where its neighbours are, as its
+    /// normal does, so the vertices whose normals a stroke changed are
+    /// the ones to upload for both.
     pub fn write(&self, queue: &wgpu::Queue, mesh: &Mesh, range: std::ops::Range<usize>) {
-        let data: Vec<Vertex> = range.clone().map(|i| mesh.vertex(i)).collect();
+        let data = clay_vertices(mesh, range.clone());
         let offset = (range.start * size_of::<Vertex>()) as u64;
         queue.write_buffer(&self.vertices, offset, bytemuck::cast_slice(&data));
     }
@@ -457,6 +460,64 @@ fn cavity_scale(distance: f32) -> f32 {
 }
 
 const CAVITY_SHARE: f32 = 0.01;
+
+/// The vertices in `range` as the clay's shader reads them: each with its
+/// curvature in its third layer byte (see [`curvature_byte`]), measured
+/// against the mesh's [`typical_edge`], which the matcap is given too.
+fn clay_vertices(mesh: &Mesh, range: std::ops::Range<usize>) -> Vec<Vertex> {
+    let edge = typical_edge(mesh);
+    range
+        .map(|i| {
+            let mut v = mesh.vertex(i);
+            v.layers[2] = curvature_byte(curvature(mesh, i) * edge);
+            v
+        })
+        .collect()
+}
+
+/// How much the clay bends at vertex `i`, per unit of length, the two
+/// principal curvatures added: positive where it bulges (a ball of radius
+/// r gives 2 / r), negative in a hollow. From the vertex's neighbours: how
+/// far their mean lies below it along its normal, over the square of their
+/// mean distance (the umbrella). It depends on the neighbours' positions
+/// alone, so it changes exactly where the normals do. Per vertex and
+/// interpolated across the triangles, it has no steps along their edges,
+/// as a curvature read per pixel from the screen derivatives does.
+pub fn curvature(mesh: &Mesh, i: usize) -> f32 {
+    // A mesh made only to be picked on has no neighbours or normals.
+    if mesh.neighbours.is_empty() || i >= mesh.normals.len() {
+        return 0.0;
+    }
+    let around = mesh.neighbours.of(i as u32);
+    if around.is_empty() {
+        return 0.0;
+    }
+    let p = mesh.positions[i];
+    let (mut sum, mut squares) = (Vec3::ZERO, 0.0);
+    for &j in around {
+        let d = mesh.positions[j as usize] - p;
+        sum += d;
+        squares += d.length_squared();
+    }
+    if squares <= 0.0 {
+        return 0.0;
+    }
+    // The neighbours a distance h away on a ball of radius r sit
+    // h² / 2r below the vertex: four times that over h² is 2 / r.
+    -4.0 * sum.dot(mesh.normals[i]) / squares
+}
+
+/// A curvature times the typical edge (a few hundredths on a smooth ball,
+/// up to about 1 on a crease) as a signed byte, finer near 0: the shader
+/// undoes it with `bend_of`. 0 is flat, so meshes without (references)
+/// read as flat.
+fn curvature_byte(k: f32) -> u8 {
+    let e = k / (CURVATURE_KNEE + k.abs());
+    (e * 127.0).round() as i8 as u8
+}
+
+/// Where [`curvature_byte`] is half its range; also in clay.wgsl.
+const CURVATURE_KNEE: f32 = 0.25;
 
 /// The mean length of the edges of up to a few hundred of `mesh`'s
 /// triangles, spread through it: cheap enough for every frame.
@@ -1057,6 +1118,45 @@ mod tests {
         mesh
     }
 
+    /// The start clay a level up with a few clay strokes across its front, as a hand
+    /// would lay them: dabs every 0.15 radius, each centred where a ray
+    /// from the front meets the clay now, one stroke dug in.
+    fn stroked() -> Mesh {
+        use crate::sculpt::{Brush, Dab, Sculpt};
+        let mut s = Sculpt::new(crate::sculpt::cube_sphere(crate::sculpt::START_LEVEL + 1).0);
+        let strokes = [
+            (glam::vec2(-0.6, 0.35), glam::vec2(0.55, 0.45), 0.12, false),
+            (glam::vec2(-0.5, 0.05), glam::vec2(0.6, -0.05), 0.15, false),
+            (glam::vec2(-0.55, -0.3), glam::vec2(0.5, -0.2), 0.1, true),
+            (glam::vec2(-0.2, -0.55), glam::vec2(0.3, 0.6), 0.09, false),
+        ];
+        for (from, to, radius, invert) in strokes {
+            let step = 0.15 * radius;
+            let count = (from.distance(to) / step) as usize;
+            let direction = (to - from).normalize().extend(0.0);
+            s.begin_stroke();
+            for i in 0..=count {
+                let at = from.lerp(to, i as f32 / count as f32);
+                let hit = s.raycast(at.extend(3.0), -Vec3::Z).unwrap();
+                s.dab(Dab {
+                    brush: Brush::Clay,
+                    centre: hit.point,
+                    radius,
+                    strength: 0.5,
+                    invert,
+                    symmetry: false,
+                    direction: if i == 0 { Vec3::ZERO } else { direction },
+                    buildup: Default::default(),
+                    fill: false,
+                    wipes: false,
+                });
+                s.refresh();
+            }
+            s.end_stroke();
+        }
+        s.mesh
+    }
+
     /// The renders the matcap was judged by, the classic light beside it:
     /// set `SPLATSTUDY_MATCAP_PNGS` to a folder to have them written
     /// there (`cargo test -p splatstudy-core matcap -- --nocapture`).
@@ -1131,8 +1231,19 @@ mod tests {
                 target: Vec3::new(0.2, 0.0, 0.0),
                 ..camera
             };
+            let strokes_mesh = stroked();
+            let strokes_gpu = GpuMesh::new(&device, &strokes_mesh);
+            let strokes = (&strokes_gpu, typical_edge(&strokes_mesh));
+            let strokes_close = OrbitCamera {
+                distance: 1.8,
+                target: Vec3::new(0.0, 0.1, 0.9),
+                ..camera
+            };
             for (name, gpu, camera, background) in [
                 ("start", &start, &camera, theme::VIEW_BG),
+                ("strokes", &strokes, &camera, theme::VIEW_BG),
+                ("strokes-close", &strokes, &strokes_close, theme::VIEW_BG),
+                ("strokes-light-bg", &strokes, &turned, light),
                 ("coarse", &coarse, &close, theme::VIEW_BG),
                 ("sculpted", &fine, &camera, theme::VIEW_BG),
                 ("turned", &fine, &turned, theme::VIEW_BG),
@@ -1179,8 +1290,9 @@ mod tests {
         let groove = on_clay(Vec3::new(0.3, -0.2, 0.93));
         let beside = on_clay(Vec3::new(0.38, -0.2, 0.9));
         let depth = |pixels: &[u8]| grey(pixels, beside)[1] - grey(pixels, groove)[1];
+        // A little darker: the cavity is a quiet aid.
         assert!(
-            depth(&after) > depth(&before) + 6,
+            depth(&after) > depth(&before) + 2,
             "{} {}",
             depth(&after),
             depth(&before)
@@ -1197,6 +1309,98 @@ mod tests {
             render(&gpu, &ink, theme::VIEW_BG, &camera),
             render(&gpu, &ink.with_matcap(true, 0.0), theme::VIEW_BG, &camera)
         );
+    }
+
+    #[test]
+    fn curvature_is_two_over_the_radius_and_survives_its_byte() {
+        let (ball, _) = crate::sculpt::cube_sphere(5);
+        let mut big = ball.clone();
+        big.positions.iter_mut().for_each(|p| *p *= 2.0);
+        big.recompute_normals();
+        for (mesh, expected) in [(&ball, 2.0), (&big, 1.0)] {
+            let mean = (0..mesh.positions.len())
+                .map(|i| curvature(mesh, i))
+                .sum::<f32>()
+                / mesh.positions.len() as f32;
+            assert!((mean - expected).abs() < 0.05 * expected, "{mean}");
+        }
+        // Signed, 0 for flat, and finer near 0 than far out.
+        assert_eq!(curvature_byte(0.0), 0);
+        let signed = |k: f32| curvature_byte(k) as i8;
+        assert!(signed(0.02) > 0 && signed(-0.02) < 0);
+        assert_eq!(signed(0.3), -signed(-0.3));
+        assert!(signed(0.1) - signed(0.0) > signed(2.0) - signed(1.9));
+    }
+
+    /// The matcap's curvature is found per vertex and blended across the
+    /// triangles: along a stroke's dabs and over the triangles' edges it
+    /// changes smoothly, without the steps a curvature read per triangle
+    /// from screen derivatives makes. Measured as the mean jump in the
+    /// change of grey from pixel to pixel over the clay, which steps
+    /// raise and which the plain light, smooth everywhere, sets the
+    /// level of. (The derivative curvature measured 1.5 times the plain
+    /// light's here; per vertex, 1.2.)
+    #[test]
+    fn the_matcap_has_no_steps_along_strokes() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Some((device, queue)) =
+            pollster::block_on(instance.request_adapter(&Default::default()))
+                .ok()
+                .and_then(|a| pollster::block_on(a.request_device(&Default::default())).ok())
+        else {
+            eprintln!("no GPU adapter; skipping render test");
+            return;
+        };
+        let size = [400, 400];
+        let target = ViewTarget::new(&device, size);
+        let clay = ClayPass::new(&device);
+        let mesh = stroked();
+        let gpu = GpuMesh::new(&device, &mesh);
+        let camera = OrbitCamera {
+            pitch: 0.0,
+            distance: 1.8,
+            target: Vec3::new(0.0, 0.1, 0.9),
+            ..OrbitCamera::default()
+        };
+        let render = |look: &Look| {
+            clay.prepare(&queue, Slot::SculptView, &camera, 1.0, look);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = target.begin_pass(&mut encoder, theme::VIEW_BG);
+                clay.draw(&mut pass, Slot::SculptView, &gpu);
+            }
+            let readback = Readback::copy(&device, &mut encoder, &target);
+            queue.submit([encoder.finish()]);
+            readback.map();
+            readback.wait(&device).expect("pixels")
+        };
+        let [w, h] = size.map(|s| s as usize);
+        // The mean of |a - 2b + c| over runs of three clay pixels, across
+        // and down.
+        let roughness = |pixels: &[u8]| {
+            let at = |x: usize, y: usize| pixels[(y * w + x) * 4 + 1];
+            let bg = theme::VIEW_BG.g();
+            let (mut sum, mut count) = (0.0, 0);
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    for [a, b, c] in [
+                        [at(x - 1, y), at(x, y), at(x + 1, y)],
+                        [at(x, y - 1), at(x, y), at(x, y + 1)],
+                    ] {
+                        if [a, b, c].contains(&bg) {
+                            continue;
+                        }
+                        sum += (f32::from(a) - 2.0 * f32::from(b) + f32::from(c)).abs();
+                        count += 1;
+                    }
+                }
+            }
+            sum / count as f32
+        };
+        let plain = Look::lit(theme::CLAY);
+        let matcap = plain.with_matcap(true, typical_edge(&mesh));
+        let (smooth, shaded) = (roughness(&render(&plain)), roughness(&render(&matcap)));
+        assert!(shaded < 1.3 * smooth, "{shaded} against {smooth}");
     }
 
     #[test]

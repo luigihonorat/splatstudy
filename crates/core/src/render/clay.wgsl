@@ -10,8 +10,9 @@
 // the position changes across the screen, rather than by the normals
 // smoothed over its corners.
 // The matcap is a second way to light the clay (see `matcap` below): the
-// soft light of a studio clay ball, with hollows and ridges picked out
-// from how fast the normal turns across the screen.
+// soft light of a studio clay ball, with hollows a little darker and
+// ridges a little lighter, from the curvature found at each vertex on the
+// CPU (see `curvature` in clay.rs) and blended across the triangles.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -36,7 +37,7 @@ struct Uniforms {
     // x: faceted (flat shading), each triangle lit as one plane; y: the
     // matcap; z: the length its curvature is scaled by (a share of the
     // camera's distance), view space; w: the mesh's typical edge length,
-    // 0 if unknown.
+    // which the vertices' curvature is measured against; 0 if unknown.
     shading: vec4<f32>,
 };
 
@@ -47,7 +48,8 @@ struct VsIn {
     @location(1) normal: vec3<f32>,
     // sRGB.
     @location(2) color: vec4<f32>,
-    // x: mask, y: chalk, 0..1.
+    // x: mask, y: chalk, 0..1; z: the curvature times the typical edge,
+    // as a signed byte (see `curvature_byte` in clay.rs).
     @location(3) layers: vec4<f32>,
 };
 
@@ -59,14 +61,22 @@ struct VsOut {
     @location(1) position: vec3<f32>,
     // Linear.
     @location(2) color: vec3<f32>,
-    // x: mask, y: chalk.
-    @location(3) layers: vec2<f32>,
+    // x: mask, y: chalk; z: the curvature times the matcap's scale.
+    @location(3) layers: vec3<f32>,
 };
 
 fn to_linear(c: vec3<f32>) -> vec3<f32> {
     let low = c / 12.92;
     let high = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
     return select(high, low, c <= vec3<f32>(0.04045));
+}
+
+// Undoes `curvature_byte` (clay.rs): the curvature times the typical edge.
+fn unpack_curvature(byte: f32) -> f32 {
+    let b = round(byte * 255.0);
+    let e = select(b, b - 256.0, b > 127.5) / 127.0;
+    // `CURVATURE_KNEE` in clay.rs.
+    return 0.25 * e / max(1.0 - abs(e), 1.0 / 127.0);
 }
 
 @vertex
@@ -76,7 +86,9 @@ fn vs(v: VsIn) -> VsOut {
     out.normal = (u.view * vec4<f32>(v.normal, 0.0)).xyz;
     out.position = (u.view * vec4<f32>(v.position, 1.0)).xyz;
     out.color = select(vec3<f32>(1.0), to_linear(v.color.rgb), u.params.z > 0.5);
-    out.layers = v.layers.xy;
+    let edge = u.shading.w;
+    let curvature = select(0.0, unpack_curvature(v.layers.z) / max(edge, 1e-20), edge > 0.0);
+    out.layers = vec3<f32>(v.layers.xy, curvature * u.shading.z);
     return out;
 }
 
@@ -84,16 +96,6 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
     let low = c * 12.92;
     let high = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055;
     return select(high, low, c <= vec3<f32>(0.0031308));
-}
-
-// How much the surface bends, view space, per unit of length: the normal's
-// turn along each screen direction over the distance moved on the
-// surface, the two added. Positive where it bulges (a ball of radius r
-// gives 2 / r), negative in a hollow, whichever way the screen runs.
-fn curvature(dnx: vec3<f32>, dny: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>) -> f32 {
-    let across = dot(dnx, dx) / max(dot(dx, dx), 1e-20);
-    let down = dot(dny, dy) / max(dot(dy, dy), 1e-20);
-    return across + down;
 }
 
 // Softly brings light above `knee` down towards 1, so the highlight on
@@ -109,8 +111,9 @@ fn shoulder(c: vec3<f32>) -> vec3<f32> {
 // direction. A broad, soft key wrapped well into the shade; a sky from
 // above, darker from below; what turns away from the eye falls off, as
 // on a ball; a soft sheen and a faint rim. `bend` is the curvature times
-// a length: hollows lose light as if half shut in (an occlusion), and
-// ridges catch a little more, so small forms read at a glance.
+// a length: hollows lose a little light, as if partly shut in (an
+// occlusion, a quarter at most), and ridges catch a touch more: a quiet
+// aid to read small forms, not lines drawn round them.
 fn matcap(n: vec3<f32>, v: vec3<f32>, base: vec3<f32>, bend: f32) -> vec3<f32> {
     let l = normalize(u.light.xyz);
     let n_dot_l = dot(n, l);
@@ -123,7 +126,7 @@ fn matcap(n: vec3<f32>, v: vec3<f32>, base: vec3<f32>, bend: f32) -> vec3<f32> {
     let key = pow(max((n_dot_l + wrap) / (1.0 + wrap), 0.0), 1.3);
     let sky = mix(0.15, 1.0, 0.5 + 0.5 * n.y);
     let facing = mix(0.4, 1.0, n_dot_v);
-    let occlusion = 1.0 - 0.65 * hollow;
+    let occlusion = 1.0 - 0.25 * hollow;
     // The key a touch warm, like the plaster casts' light.
     let warm = vec3<f32>(1.0, 0.975, 0.94);
     let diffuse = (1.1 * u.rig.x * key * warm + vec3<f32>(u.rig.y * sky)) * facing * occlusion;
@@ -132,7 +135,7 @@ fn matcap(n: vec3<f32>, v: vec3<f32>, base: vec3<f32>, bend: f32) -> vec3<f32> {
     let sheen = (pow(n_dot_h, 28.0) * 2.4 + pow(n_dot_h, 6.0) * 0.8) * u.rig.w;
     let lit_side = smoothstep(-0.1, 0.3, n_dot_l);
     let rim = pow(1.0 - n_dot_v, 4.0) * u.rig.z * 2.0 * (0.6 + 0.4 * n.y);
-    let colour = base * (diffuse + vec3<f32>(0.3 * ridge)) + vec3<f32>(sheen * lit_side * occlusion + rim);
+    let colour = base * (diffuse + vec3<f32>(0.08 * ridge)) + vec3<f32>(sheen * lit_side * occlusion + rim);
     return shoulder(colour);
 }
 
@@ -141,17 +144,10 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // The triangle's own plane, view space, facing the eye whichever side
     // of it shows: across the screen x goes right and y goes down, so
     // dpdy × dpdx points out of the screen. Taken before any branch, as
-    // derivatives must be, and so is the curvature, from the smoothed
-    // normal.
+    // derivatives must be.
     let dx = dpdx(in.position);
     let dy = dpdy(in.position);
     let plane = cross(dy, dx);
-    let rounded = normalize(in.normal);
-    var bend = curvature(dpdx(rounded), dpdy(rounded), dx, dy);
-    // The curvature is one value per triangle: where triangles are many
-    // pixels wide it would show as bands, so it fades out.
-    let edge_pixels = u.shading.w * inverseSqrt(max(max(dot(dx, dx), dot(dy, dy)), 1e-20));
-    bend *= 1.0 - smoothstep(5.0, 14.0, edge_pixels);
     var base = u.base.rgb * in.color;
     let opacity = u.params.y;
     if u.params.x > 0.5 {
@@ -159,7 +155,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     }
     base = mix(base, u.layers.rgb, in.layers.y);
     base *= mix(1.0, u.layers.w, in.layers.x);
-    var n = rounded;
+    var n = normalize(in.normal);
     if !front {
         n = -n;
     }
@@ -171,7 +167,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if u.shading.y > 0.5 {
         // Seen from inside, a bulge is a hollow.
         let side = select(-1.0, 1.0, front);
-        let colour = matcap(n, v, base, side * bend * u.shading.z);
+        let colour = matcap(n, v, base, side * in.layers.z);
         let srgb = to_srgb(clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0)));
         return vec4<f32>(srgb * opacity, opacity);
     }
