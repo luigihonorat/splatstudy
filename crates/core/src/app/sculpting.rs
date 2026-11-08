@@ -871,7 +871,10 @@ impl App {
             .fill(p.bg)
             .stroke(Stroke::new(1.0, p.border))
             .inner_margin(egui::Margin::symmetric(28, 20));
-        egui::Modal::new(egui::Id::unique("working"))
+        let id = egui::Id::unique("working");
+        // Not faded in: the app stops before the fade would end.
+        egui::Modal::new(id)
+            .area(egui::Modal::default_area(id).fade_in(false))
             .backdrop_color(p.bg.gamma_multiply(0.5))
             .frame(frame)
             .show(ctx, |ui| {
