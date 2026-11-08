@@ -39,7 +39,17 @@ impl Readback {
         encoder: &mut wgpu::CommandEncoder,
         target: &ViewTarget,
     ) -> Self {
-        let size = target.size;
+        Self::copy_texture(device, encoder, &target.resolved)
+    }
+
+    /// Records a copy of a whole RGBA8 `texture` (one sample, made with
+    /// `COPY_SRC`) into `encoder`.
+    pub fn copy_texture(
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+    ) -> Self {
+        let size = [texture.width(), texture.height()];
         let padded_row = (size[0] * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -48,7 +58,7 @@ impl Readback {
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            target.resolved.as_image_copy(),
+            texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {

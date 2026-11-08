@@ -8,6 +8,7 @@
 //! shaders do any conversion explicitly.
 
 pub mod clay;
+pub mod difference;
 pub mod readback;
 pub mod splat;
 
