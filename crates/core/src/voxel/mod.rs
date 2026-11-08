@@ -36,11 +36,17 @@ pub const DEFAULT_THRESHOLD: f32 = 0.7;
 /// surface and the clay comes out spongy; 1 is never quite reached.
 pub const THRESHOLDS: std::ops::RangeInclusive<f32> = 0.3..=0.95;
 
-/// How much the clay from a reference is smoothed: passes of
-/// [`grid::Grid::blur`] over its field, each smoothing the shape by
-/// about half a cell; 0 keeps it as found.
+/// How much the clay from a reference is smoothed, each step by about
+/// half a cell; 0 keeps it as found. For splats, passes of
+/// [`grid::Grid::blur`] over the fused solid. For a mesh, [`MESH_PASSES`]
+/// of [`nets::smooth`] over the clay itself: an open scan's field is only a
+/// thin shell around its surface, which blurring would wear away.
 pub const MAX_SMOOTHNESS: u32 = 10;
 pub const DEFAULT_SMOOTHNESS: u32 = 1;
+
+/// Passes of [`nets::smooth`] per step of smoothness for a mesh
+/// reference: about as smooth as a pass of blur over the field.
+const MESH_PASSES: usize = 3;
 
 /// Holes in a reference mesh up to about twice this many cells wide are
 /// sealed (scans are often open).
@@ -97,26 +103,33 @@ impl Default for FromReference {
 pub fn clay_from_reference(reference: &Reference, how: FromReference) -> Option<Mesh> {
     let resolution = how.resolution.clamp(MIN_RESOLUTION / 4, MAX_RESOLUTION);
     let smoothness = how.smoothness.min(MAX_SMOOTHNESS);
-    let mut field = match &reference.content {
-        Content::Splats(splats) => fusion::field(
-            splats,
-            &reference.align,
-            reference.crop,
-            resolution,
-            how.threshold,
-            smoothness,
-        )?,
+    // Splats are smoothed in their field, a solid; a mesh on its clay.
+    let (mut field, mesh_passes) = match &reference.content {
+        Content::Splats(splats) => {
+            let field = fusion::field(
+                splats,
+                &reference.align,
+                reference.crop,
+                resolution,
+                how.threshold,
+                smoothness,
+            )?;
+            (field, 0)
+        }
         _ => {
             let (positions, triangles) = reference.world_triangles()?;
-            let mut field =
-                sdf::signed_distance(&positions, &triangles, resolution, REFERENCE_CLOSE)?;
-            for _ in 0..smoothness {
-                field.blur();
-            }
-            field
+            let field = sdf::signed_distance(&positions, &triangles, resolution, REFERENCE_CLOSE)?;
+            (field, smoothness as usize * MESH_PASSES)
         }
     };
-    mesh_level(&mut field)
+    let mut mesh = mesh_level(&mut field)?;
+    if mesh_passes > 0 {
+        // Not pulled back onto the level, so the shape itself smooths; the
+        // triangles stay as they are, so a thin shell keeps all of itself.
+        nets::smooth(&mut mesh.positions, &mesh.triangles, mesh_passes, None);
+        mesh.recompute_normals();
+    }
+    Some(mesh)
 }
 
 /// Meshes the zero level of `field`, keeps the largest piece and smooths
@@ -337,6 +350,153 @@ mod tests {
             .filter(|p| (p.length() - 1.0).abs() < 0.06)
             .count();
         assert!(near as f32 > mesh.positions.len() as f32 * 0.95);
+    }
+
+    /// A mesh reference made of these triangles.
+    fn mesh_reference(positions: Vec<Vec3>, triangles: Vec<[u32; 3]>) -> Reference {
+        let mesh = RefMesh {
+            positions,
+            triangles,
+            colors: None,
+        };
+        Reference::new(source(), Content::Mesh(mesh))
+    }
+
+    /// The clay from `reference` at `resolution` and `smoothness`.
+    fn clay(reference: &Reference, resolution: u32, smoothness: u32) -> Mesh {
+        let how = FromReference {
+            smoothness,
+            ..at(resolution)
+        };
+        clay_from_reference(reference, how).unwrap()
+    }
+
+    /// Closed, and all one piece.
+    fn one_closed_piece(mesh: &Mesh) -> bool {
+        let (_, largest) = nets::keep_largest(&mesh.positions, &mesh.triangles);
+        is_closed(&mesh.triangles) && largest.len() == mesh.triangles.len()
+    }
+
+    /// The corners of the box around `mesh`.
+    fn bounds(mesh: &Mesh) -> (Vec3, Vec3) {
+        let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+        for &p in &mesh.positions {
+            (lo, hi) = (lo.min(p), hi.max(p));
+        }
+        (lo, hi)
+    }
+
+    /// An open scan too wide to seal comes out as a thin shell around its
+    /// surface: smoothing it must not wear it away.
+    fn smoothing_keeps(reference: &Reference, resolution: u32) {
+        let found = clay(reference, resolution, 0);
+        assert!(one_closed_piece(&found));
+        for smoothness in [DEFAULT_SMOOTHNESS, 3] {
+            let smoothed = clay(reference, resolution, smoothness);
+            assert!(one_closed_piece(&smoothed), "{smoothness}");
+            let (before, after) = (found.positions.len(), smoothed.positions.len());
+            assert!(
+                after as f32 >= before as f32 * 0.8,
+                "{smoothness}: {after} vertices, {before} unsmoothed"
+            );
+            // Rounded off at its rim at most, not shrunk.
+            let (lo, hi) = (bounds(&found), bounds(&smoothed));
+            assert!(
+                lo.0.distance(hi.0) < 0.05 && lo.1.distance(hi.1) < 0.05,
+                "{smoothness}"
+            );
+        }
+    }
+
+    #[test]
+    fn smoothing_keeps_an_open_hemisphere_scan() {
+        // A face mask: the upper half of a sphere, open all along its rim.
+        let sphere = Mesh::icosphere(4);
+        let triangles = sphere
+            .triangles
+            .iter()
+            .filter(|t| t.iter().all(|&v| sphere.positions[v as usize].y > -0.01))
+            .copied()
+            .collect();
+        let reference = mesh_reference(sphere.positions.clone(), triangles);
+        smoothing_keeps(&reference, 96);
+    }
+
+    #[test]
+    fn smoothing_keeps_an_open_relief() {
+        // A relief: one bumpy sheet, a height field over a square.
+        let n = 48;
+        let mut positions = Vec::new();
+        for i in 0..=n {
+            for j in 0..=n {
+                let (x, z) = (
+                    i as f32 / n as f32 * 2.0 - 1.0,
+                    j as f32 / n as f32 * 2.0 - 1.0,
+                );
+                positions.push(Vec3::new(x, 0.4 * (3.0 * x).sin() * (3.0 * z).cos(), z));
+            }
+        }
+        let at = |i: u32, j: u32| i * (n + 1) + j;
+        let mut triangles = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                triangles.push([at(i, j), at(i, j + 1), at(i + 1, j)]);
+                triangles.push([at(i + 1, j), at(i, j + 1), at(i + 1, j + 1)]);
+            }
+        }
+        smoothing_keeps(&mesh_reference(positions, triangles), 96);
+    }
+
+    #[test]
+    fn smoothing_smooths_a_closed_mesh_reference() {
+        // A ball with a bumpy skin, its bumps a few cells across.
+        let sphere = Mesh::icosphere(5);
+        let positions = sphere
+            .positions
+            .iter()
+            .map(|&p| {
+                let bump = (p * 12.0).to_array().map(f32::sin);
+                p * (1.0 + 0.04 * bump[0] * bump[1] * bump[2])
+            })
+            .collect();
+        let reference = mesh_reference(positions, sphere.triangles.clone());
+        // How far the vertices stray from a sphere.
+        let roughness = |mesh: &Mesh| {
+            let n = mesh.positions.len() as f32;
+            let mean = mesh.positions.iter().map(|p| p.length()).sum::<f32>() / n;
+            let var = mesh
+                .positions
+                .iter()
+                .map(|p| (p.length() - mean).powi(2))
+                .sum::<f32>()
+                / n;
+            (mean, var.sqrt())
+        };
+        let (radius, mut last) = roughness(&clay(&reference, 64, 0));
+        for smoothness in [DEFAULT_SMOOTHNESS, 3, MAX_SMOOTHNESS] {
+            let mesh = clay(&reference, 64, smoothness);
+            assert!(one_closed_piece(&mesh), "{smoothness}");
+            let (mean, rough) = roughness(&mesh);
+            assert!(rough < last * 0.95, "{smoothness}: {rough} after {last}");
+            // Smoothed, not shrunk.
+            assert!(
+                (mean - radius).abs() < 0.02,
+                "{smoothness}: {mean} from {radius}"
+            );
+            last = rough;
+        }
+    }
+
+    #[test]
+    fn no_smoothing_keeps_the_clay_as_found() {
+        // Smoothness 0 is the mesh straight from the field.
+        let sphere = Mesh::icosphere(3);
+        let reference = mesh_reference(sphere.positions.clone(), sphere.triangles.clone());
+        let mesh = clay(&reference, 48, 0);
+        let direct =
+            from_triangles(&sphere.positions, &sphere.triangles, 48, REFERENCE_CLOSE).unwrap();
+        assert_eq!(mesh.positions, direct.positions);
+        assert_eq!(mesh.triangles, direct.triangles);
     }
 
     /// `cargo test --release -p splatstudy-core remesh_timing -- --ignored --nocapture`
