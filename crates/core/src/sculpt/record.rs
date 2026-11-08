@@ -16,7 +16,7 @@ use glam::Vec3;
 use super::subdivide::parents;
 use super::{
     Brush, Buildup, Bvh, Dab, Falloff, LayerOp, Layers, Levels, MAX_HARDNESS, MAX_TRIANGLES,
-    MAX_VERTICES, Mesh, OLD_START_LEVEL, Resume, Sculpt,
+    MAX_VERTICES, Mesh, OLD_START_LEVEL, Resume, Sculpt, Tweak,
 };
 use crate::io::{ReadError, Reader, Writer};
 
@@ -72,6 +72,8 @@ pub enum Event {
     /// A whole layer changed: the mask cleared or inverted, the chalk
     /// added or removed (see `Sculpt::edit_layer`).
     Layer(LayerOp),
+    /// One step of a tweak over the whole clay (see `Sculpt::tweak`).
+    Tweak(Tweak),
 }
 
 impl Event {
@@ -250,6 +252,7 @@ mod tag {
     pub const LEVEL: u8 = 13;
     pub const DELETE_LEVELS: u8 = 14;
     pub const LAYER: u8 = 15;
+    pub const TWEAK: u8 = 16;
 }
 
 impl Entry {
@@ -336,6 +339,9 @@ impl Entry {
             Event::Layer(op) => {
                 w.u8(tag::LAYER).u8(op as u8);
             }
+            Event::Tweak(op) => {
+                w.u8(tag::TWEAK).u8(op as u8);
+            }
         }
     }
 
@@ -410,6 +416,11 @@ impl Entry {
                 *LayerOp::ALL
                     .get(r.u8()? as usize)
                     .ok_or_else(|| r.invalid("unknown layer edit"))?,
+            ),
+            tag::TWEAK => Event::Tweak(
+                *Tweak::ALL
+                    .get(r.u8()? as usize)
+                    .ok_or_else(|| r.invalid("unknown tweak"))?,
             ),
             _ => return Err(r.invalid("unknown log event")),
         };
@@ -651,6 +662,9 @@ impl Sculpt {
             }
             Event::Layer(op) => {
                 self.edit_layer(op);
+            }
+            Event::Tweak(op) => {
+                self.tweak(op);
             }
         }
     }

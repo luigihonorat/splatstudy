@@ -823,7 +823,8 @@ impl App {
 
     /// The sculpt panel, in groups that fold away: the current tool's
     /// settings (the tool is picked on the toolbar), the subdivision levels,
-    /// and the remeshes; those the window menu left in.
+    /// the remeshes, the tweaks and the calipers; those the window menu
+    /// left in.
     pub(super) fn sculpt_panel(&mut self, ui: &mut egui::Ui) {
         if self.playback.is_some() {
             self.playback_panel(ui);
@@ -852,6 +853,7 @@ impl App {
                 self.quad_remesh_controls(ui)
             });
         }
+        self.tweak_group(ui);
         self.calipers_group(ui);
     }
 

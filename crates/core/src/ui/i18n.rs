@@ -17,6 +17,7 @@ pub mod help;
 pub mod mesh;
 pub mod refs;
 pub mod study;
+pub mod tweak;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Lang {
@@ -149,6 +150,7 @@ pub struct Tr {
     pub video: &'static export::ExportTr,
     pub help: &'static help::HelpTr,
     pub calipers: &'static calipers::CalipersTr,
+    pub tweak: &'static tweak::TweakTr,
 }
 
 pub const JA: Tr = Tr {
@@ -250,6 +252,7 @@ Alt＋右：拡大",
     video: &export::JA,
     help: &help::JA,
     calipers: &calipers::JA,
+    tweak: &tweak::JA,
 };
 
 pub const EN: Tr = Tr {
@@ -351,6 +354,7 @@ Alt + right: zoom",
     video: &export::EN,
     help: &help::EN,
     calipers: &calipers::EN,
+    tweak: &tweak::EN,
 };
 
 pub const FR: Tr = Tr {
@@ -452,6 +456,7 @@ Alt + droit : zoomer",
     video: &export::FR,
     help: &help::FR,
     calipers: &calipers::FR,
+    tweak: &tweak::FR,
 };
 
 #[cfg(test)]

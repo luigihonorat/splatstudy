@@ -34,6 +34,7 @@ pub(super) enum Group {
     Subdivision,
     Remeshing,
     QuadRemesh,
+    Tweak,
     Calipers,
     Reference,
     Alignment,
@@ -42,11 +43,12 @@ pub(super) enum Group {
 }
 
 impl Group {
-    pub(super) const ALL: [Group; 9] = [
+    pub(super) const ALL: [Group; 10] = [
         Group::ToolSettings,
         Group::Subdivision,
         Group::Remeshing,
         Group::QuadRemesh,
+        Group::Tweak,
         Group::Calipers,
         Group::Reference,
         Group::Alignment,
@@ -54,11 +56,12 @@ impl Group {
         Group::Credit,
     ];
     /// The sculpt panel's groups, on the left.
-    pub(super) const SCULPT: [Group; 5] = [
+    pub(super) const SCULPT: [Group; 6] = [
         Group::ToolSettings,
         Group::Subdivision,
         Group::Remeshing,
         Group::QuadRemesh,
+        Group::Tweak,
         Group::Calipers,
     ];
     /// The reference panel's groups, on the right.
@@ -76,6 +79,7 @@ impl Group {
             Group::Subdivision => "subdivision",
             Group::Remeshing => "remeshing",
             Group::QuadRemesh => "quad",
+            Group::Tweak => "tweak",
             Group::Calipers => "calipers",
             Group::Reference => "reference",
             Group::Alignment => "alignment",
@@ -91,6 +95,7 @@ impl Group {
             Group::Subdivision => tr.mesh.subdivision,
             Group::Remeshing => tr.mesh.remeshing,
             Group::QuadRemesh => tr.mesh.quad_remesh,
+            Group::Tweak => tr.tweak.tweak,
             Group::Calipers => tr.calipers.calipers,
             Group::Reference => tr.reference_tools,
             Group::Alignment => tr.refs.alignment,
@@ -462,7 +467,7 @@ mod tests {
         // The preferences keep the choice.
         let saved = h.app.preferences();
         assert!(
-            saved.ends_with("&hide=tools,subdivision,quad,calipers"),
+            saved.ends_with("&hide=tools,subdivision,quad,tweak,calipers"),
             "{saved}"
         );
         h.app.apply_preferences("lang=en");
@@ -470,8 +475,9 @@ mod tests {
             !h.app.panels.holds(Group::ToolSettings),
             "no hide key: kept"
         );
-        h.app
-            .apply_preferences(&saved.replace("hide=tools,subdivision,quad,calipers", "hide="));
+        h.app.apply_preferences(
+            &saved.replace("hide=tools,subdivision,quad,tweak,calipers", "hide="),
+        );
         assert_eq!(h.app.panels.removed_names(), "");
     }
 
@@ -524,7 +530,7 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), Group::ALL.len(), "{rows:?}");
 
-        click(&mut h, rows[7].center());
+        click(&mut h, rows[Group::Crop as usize].center());
         assert!(!h.app.panels.holds(Group::Crop));
         assert!(egui::Popup::is_any_open(&h.app.ctx), "still open");
         click(&mut h, rows[0].center());
