@@ -22,7 +22,7 @@ pub(super) use tool_pie::TOOL_PIE_KEY;
 
 use crate::sculpt::{
     Brush, Buildup, Dab, Falloff, Hit, LayerOp, Levels, MAX_HARDNESS, MAX_TRIANGLES, MAX_VERTICES,
-    Mesh, START_LEVEL, Sculpt, cube_sphere,
+    Mesh, START_LEVEL, Sculpt, Tweak, cube_sphere,
 };
 use crate::ui::{self, i18n::Tr, icons, menu};
 use crate::voxel;
@@ -201,7 +201,7 @@ fn choices<T: Copy + PartialEq>(
 }
 
 /// What it switches, then on / off.
-fn switch(ui: &mut egui::Ui, tr: &Tr, on: &mut bool, label: &str) {
+pub(super) fn switch(ui: &mut egui::Ui, tr: &Tr, on: &mut bool, label: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 14.0;
         let muted = ui.visuals().widgets.inactive.fg_stroke.color;
@@ -212,6 +212,18 @@ fn switch(ui: &mut egui::Ui, tr: &Tr, on: &mut bool, label: &str) {
             }
         }
     });
+}
+
+/// A voxel resolution up to `max`. The remesh and the mesh from the
+/// reference share theirs: splats go finer than the remesh, which shows
+/// (and uses) a finer value as its own finest.
+pub(super) fn resolution_slider(ui: &mut egui::Ui, tr: &Tr, value: &mut f32, max: u32) {
+    let range = voxel::MIN_RESOLUTION as f32..=max as f32;
+    let mut shown = value.min(max as f32);
+    let label = tr.mesh.resolution;
+    if ui::slider(ui, label, &mut shown, range, |v| format!("{v:.0}")).changed() {
+        *value = shown;
+    }
 }
 
 pub(super) struct ToolSettings {
@@ -244,6 +256,12 @@ pub(super) struct ToolSettings {
     pub(super) smoothness: f32,
     /// Quad remesh: about how many quads.
     pub(super) quads: f32,
+    /// Whether the tweaks work through a voxel field and mesh the clay
+    /// again (see `voxel::tweak`) rather than move its vertices (see
+    /// `sculpt::tweak`).
+    pub(super) voxel_tweaks: bool,
+    /// The voxel tweaks' resolution: cells across the clay's longest side.
+    pub(super) tweak_resolution: f32,
     /// Asked for in the frame of this number (see
     /// [`egui::Context::cumulative_frame_nr`]), done at the start of a
     /// later one, so what says so shows while it runs (see
@@ -276,16 +294,20 @@ pub(super) enum Pending {
     SaveScene,
     /// Saving a copy of it without its timelapse.
     SaveCopy,
+    /// One step of a tweak in voxel mode (see `tweak.rs`).
+    Tweak(Tweak),
 }
 
 impl Pending {
     /// What the window shown while it waits says, for the operations slow
     /// enough to stop the app for seconds; the others say so in a notice.
-    fn working(self, m: &crate::ui::i18n::mesh::MeshTr) -> Option<&'static str> {
+    fn working(self, tr: &Tr) -> Option<&'static str> {
+        let m = tr.mesh;
         match self {
             Pending::FromReference => Some(m.working_from_reference),
             Pending::Remesh => Some(m.working_remesh),
             Pending::QuadRemesh => Some(m.working_quad_remesh),
+            Pending::Tweak(_) => Some(tr.tweak.working),
             _ => None,
         }
     }
@@ -318,6 +340,8 @@ impl Default for ToolSettings {
             threshold: voxel::DEFAULT_THRESHOLD,
             smoothness: voxel::DEFAULT_SMOOTHNESS as f32,
             quads: quad::DEFAULT_QUADS as f32,
+            voxel_tweaks: true,
+            tweak_resolution: voxel::DEFAULT_RESOLUTION as f32,
             pending: None,
             pie: None,
             quick: None,
@@ -647,7 +671,7 @@ impl App {
     pub(super) fn ask(&mut self, pending: Pending, what: &str) {
         if self.playback.is_none() || matches!(pending, Pending::SaveScene | Pending::SaveCopy) {
             self.tool.pending = Some((pending, self.ctx.cumulative_frame_nr()));
-            if pending.working(self.lang.tr().mesh).is_some() {
+            if pending.working(self.lang.tr()).is_some() {
                 self.dirty = true;
             } else {
                 self.notify(format!("{what}…"));
@@ -669,7 +693,7 @@ impl App {
         let Some((pending, asked)) = self.tool.pending else {
             return;
         };
-        let wait = if pending.working(self.lang.tr().mesh).is_some() {
+        let wait = if pending.working(self.lang.tr()).is_some() {
             2
         } else {
             1
@@ -686,6 +710,7 @@ impl App {
             Pending::Level(up) => self.change_level(up),
             Pending::SaveScene => self.save_scene(),
             Pending::SaveCopy => self.save_copy(),
+            Pending::Tweak(op) => self.voxel_tweak(op),
         }
     }
 
@@ -858,11 +883,12 @@ impl App {
     /// so, over everything, which takes every press: the app stops while
     /// it runs, and this is what shows meanwhile.
     fn working_ui(&self, ctx: &egui::Context) {
-        let m = self.lang.tr().mesh;
+        let tr = self.lang.tr();
+        let m = tr.mesh;
         let Some(what) = self
             .tool
             .pending
-            .and_then(|(pending, _)| pending.working(m))
+            .and_then(|(pending, _)| pending.working(tr))
         else {
             return;
         };
@@ -999,11 +1025,11 @@ impl App {
 
     /// The voxel remesh, its button over its resolution.
     fn remesh_controls(&mut self, ui: &mut egui::Ui) {
-        let m = self.lang.tr().mesh;
-        if ui::choice(ui, m.remesh, false).clicked() {
+        let tr = self.lang.tr();
+        if ui::choice(ui, tr.mesh.remesh, false).clicked() {
             self.ask_remesh();
         }
-        self.resolution_slider(ui, voxel::MAX_RESOLUTION);
+        resolution_slider(ui, tr, &mut self.tool.resolution, voxel::MAX_RESOLUTION);
     }
 
     /// The quad remesh, its button over its number of quads.
@@ -1016,19 +1042,6 @@ impl App {
         ui::typed_slider(ui, m.quads, &mut self.tool.quads, range, 100.0, |v| {
             format!("{v:.0}")
         });
-    }
-
-    /// The voxel resolution, which the remesh and the mesh from the
-    /// reference share, up to `max`: splats go finer than the remesh,
-    /// which shows (and uses) a finer value as its own finest.
-    fn resolution_slider(&mut self, ui: &mut egui::Ui, max: u32) {
-        let m = self.lang.tr().mesh;
-        let range = voxel::MIN_RESOLUTION as f32..=max as f32;
-        let mut shown = self.tool.resolution.min(max as f32);
-        let slider = ui::slider(ui, m.resolution, &mut shown, range, |v| format!("{v:.0}"));
-        if slider.changed() {
-            self.tool.resolution = shown;
-        }
     }
 
     /// The mesh from the reference, in the reference panel: the button,
@@ -1049,7 +1062,7 @@ impl App {
             .current
             .as_ref()
             .map_or(voxel::MAX_RESOLUTION, voxel::max_resolution);
-        self.resolution_slider(ui, max);
+        resolution_slider(ui, self.lang.tr(), &mut self.tool.resolution, max);
         let range = 0.0..=voxel::MAX_SMOOTHNESS as f32;
         ui::slider(ui, m.smoothness, &mut self.tool.smoothness, range, |v| {
             format!("{v:.0}")

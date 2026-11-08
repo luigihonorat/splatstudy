@@ -11,6 +11,11 @@ pub struct TweakTr {
     pub sharpen: &'static str,
     pub shrink: &'static str,
     pub inflate: &'static str,
+    /// The switch between tweaks through a voxel field, which mesh the
+    /// clay again, and tweaks that move its vertices.
+    pub voxel_mode: &'static str,
+    /// The window shown while a voxel tweak runs.
+    pub working: &'static str,
 }
 
 pub const JA: TweakTr = TweakTr {
@@ -19,6 +24,8 @@ pub const JA: TweakTr = TweakTr {
     sharpen: "シャープ",
     shrink: "縮める",
     inflate: "膨らます",
+    voxel_mode: "ボクセル",
+    working: "微調整しています…",
 };
 
 pub const EN: TweakTr = TweakTr {
@@ -27,6 +34,8 @@ pub const EN: TweakTr = TweakTr {
     sharpen: "sharpen",
     shrink: "shrink",
     inflate: "inflate",
+    voxel_mode: "voxel mode",
+    working: "tweaking…",
 };
 
 pub const FR: TweakTr = TweakTr {
@@ -35,4 +44,6 @@ pub const FR: TweakTr = TweakTr {
     sharpen: "accentuer",
     shrink: "rétrécir",
     inflate: "gonfler",
+    voxel_mode: "mode voxel",
+    working: "retouche en cours…",
 };

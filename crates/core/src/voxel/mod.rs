@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 The SplatStudy contributors
 // SPDX-License-Identifier: GPL-3.0-or-later WITH LicenseRef-SplatStudy-app-store-exception
-//! Voxels: rebuilding the clay as an even mesh from a grid (remeshing), and
-//! making clay from a reference.
+//! Voxels: rebuilding the clay as an even mesh from a grid (remeshing),
+//! making clay from a reference, and the tweaks in voxel mode.
 //!
 //! Both go through a grid of signed distances, negative inside the shape:
 //! to a mesh's triangles ([`sdf`]), or to the surface splats show from
@@ -12,6 +12,7 @@ pub mod fusion;
 pub mod grid;
 pub mod nets;
 pub mod sdf;
+pub mod tweak;
 
 use glam::Vec3;
 

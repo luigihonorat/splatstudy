@@ -4,6 +4,11 @@
 //! panel's tweak group. Smooth and sharpen work on the surface's fine
 //! grain; shrink and inflate move the whole surface in or out.
 //!
+//! These move the clay's own vertices, the group's mode with voxel mode
+//! off, logged as [`Event::Tweak`]. In voxel mode the same four work on a
+//! field and mesh the clay again (see `voxel::tweak`), logged as a
+//! checkpoint like a remesh: overused, they don't wear the triangles thin.
+//!
 //! Each is plain arithmetic over the vertices in index order, every new
 //! position worked out from the old ones before any moves: the result
 //! doesn't depend on the order, so a symmetric clay stays symmetric, and a
@@ -442,6 +447,55 @@ mod tests {
         assert!(s.tweak(Tweak::Smooth));
         assert!(s.tweak(Tweak::Inflate));
         s.refresh();
+    }
+
+    #[test]
+    fn a_session_in_both_modes_replays_bit_for_bit() {
+        // Vertex tweaks (tag 16, as logs from before voxel mode have
+        // them), then voxel tweaks (checkpoints), then vertex ones again
+        // on the voxel clay.
+        let mut live = Sculpt::new(Mesh::icosphere(3));
+        let mut clock = 0.0;
+        stroke(&mut live, &mut clock, Brush::Clay, Vec3::new(0.3, 0.0, 1.0));
+        for op in Tweak::ALL {
+            assert!(live.tweak(op));
+        }
+        live.refresh();
+        for op in [Tweak::Smooth, Tweak::Inflate] {
+            clock += 1.0;
+            live.set_clock(clock);
+            let mesh = crate::voxel::tweak::tweaked(&live.mesh, op, 32).unwrap();
+            live.replace_mesh(mesh);
+        }
+        live.undo();
+        live.redo();
+        stroke(
+            &mut live,
+            &mut clock,
+            Brush::Clay,
+            Vec3::new(-0.4, 0.2, 1.0),
+        );
+        assert!(live.tweak(Tweak::Sharpen));
+        live.refresh();
+        let tags = |log: &[crate::sculpt::Entry]| {
+            log.iter()
+                .filter(|e| matches!(e.event, Event::Tweak(_)))
+                .count()
+        };
+        assert_eq!(tags(live.log()), 5);
+        assert_replays(&live);
+
+        // Saved and read back, it replays the same.
+        let mut w = Writer::new();
+        write_log(&mut w, live.log());
+        let log = read_log(&mut Reader::new(&w.finish())).unwrap();
+        assert_eq!(log, live.log());
+        let mut current =
+            Mesh::from_ordered(live.mesh.positions.clone(), live.mesh.triangles.clone());
+        current.layers = live.mesh.layers.clone();
+        let reopened = Sculpt::with_history(current, None, log, live.checkpoints().to_vec());
+        assert_replays(&reopened);
+        assert_eq!(reopened.mesh.positions, live.mesh.positions);
     }
 
     fn assert_replays(live: &Sculpt) {
