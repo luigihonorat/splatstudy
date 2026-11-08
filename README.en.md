@@ -21,25 +21,27 @@ In the browser: <https://app.splatstudy.com> (needs WebGPU: a recent Chrome or E
 
 Nothing to install. Drag and drop a file, or open one from the file menu.
 
-Three plaster cast scans are bundled so you can start right away. Add one to the URL to open it as the reference:
+Nine plaster cast scans are ready to study: pick one under **load from gallery** in the reference panel, or add one to the URL to open it as the reference:
 
 - <https://app.splatstudy.com/?sample=brutus>: Brutus, after Michelangelo
 - <https://app.splatstudy.com/?sample=venus>: Venus de Milo
 - <https://app.splatstudy.com/?sample=david>: Head of David, after Michelangelo
+- `homer`, `socrates`, `caesar`, `hercules` (head of the Farnese Hercules), `foot` (an athlete's right foot), `hands` (Abraham Lincoln's hands)
 
-All three were scanned by SMK, the National Gallery of Denmark, from its Royal Cast Collection and released under CC0 (public domain) at [open.smk.dk](https://open.smk.dk/). The app shows their credit under the reference view and in exported images and videos.
+Eight were scanned by SMK, the National Gallery of Denmark, from its Royal Cast Collection ([open.smk.dk](https://open.smk.dk/)). Lincoln's hands come from the Smithsonian's National Portrait Gallery ([npg.si.edu](https://npg.si.edu/object/npg_S_NPG.71.6)). All nine are released under CC0 (public domain). The app shows their credit under the reference view and in exported images and videos.
 
 ## Features
 
 ### Sculpting
 
 - Brushes: clay, smooth, move, flatten, inflate, crease, pinch. Hold Alt (ZBrush style) or Ctrl (Blender and Maya styles) for the opposite action, Shift to smooth
-- Pen pressure for size and strength, falloff curves, stroke stabiliser, X symmetry, undo and redo
+- Pen pressure for size and strength, a falloff slider from smooth to sharp, stroke stabiliser, X symmetry, undo and redo
+- Clay with a fill mode that builds up hollows without raising their rims
 - Masking: a mask tool, and in ZBrush style Ctrl paints the mask with any tool
 - Multiresolution: subdivide, step between levels, and fix large forms while the detail is kept
 - Voxel remesh and quad remesh (quads only, with a target quad count)
-- Start from the reference (it is voxelized into clay), or import a mesh as the sculpt
-- Mirror one side to the other, chalk (shows where you have worked), wireframe
+- Start from the reference (it is turned into solid clay, with a resolution and a smoothness setting), or import a mesh as the sculpt
+- Mirror one side to the other, chalk (shows where you have worked), wireframe, smooth or flat shading
 - Export as OBJ or STL
 
 ### References
@@ -59,8 +61,9 @@ All three were scanned by SMK, the National Gallery of Denmark, from its Royal C
 - Mirror view: flip the view horizontally to see familiar forms with fresh eyes
 - Plumb line (drag its bob) and grid
 - Proportion measure: draw a line in each view and compare their ratio
+- Calipers: measure between two points, shown in both views and kept with the scene
 - Pose timer (session length, rounds, pause)
-- Lighting presets: studio, raking, top
+- Lighting presets: studio, raking, top; a background colour for each view
 - Each view has its own aids; Shift + click switches an aid in both views
 
 ### Timelapse
@@ -80,7 +83,7 @@ All three were scanned by SMK, the National Gallery of Denmark, from its Royal C
 ### Controls
 
 - Navigation follows ZBrush, Blender or Maya style (navigation menu)
-- Hold Space for a pie menu of the tools; digit keys 1 to 8 pick a tool
+- Hold Space to set the brush size and strength at the pointer, Shift+Space for a pie menu of the tools; digit keys 1 to 8 pick a tool
 - Tab hides the side panels, Shift+Tab the reference view too
 - Every shortcut is listed in the app under **help › keyboard shortcuts**
 
@@ -88,7 +91,9 @@ The interface is in Japanese, English and French.
 
 ## Desktop app
 
-Built on SDL3, with pen pressure. CI currently builds Windows only (GitHub Actions artifacts); macOS and Linux CI is off while the repository is private. Both can be built from source with the steps below.
+Built on SDL3, with pen pressure. CI builds it for Windows (GitHub Actions artifacts); macOS and Linux can be built from source with the steps below.
+
+The gallery casts are not inside the desktop app: the first time you open one, it is downloaded from app.splatstudy.com and kept in a cache folder (`%LOCALAPPDATA%\splatstudy\samples` on Windows, `~/Library/Caches/splatstudy/samples` on macOS, `$XDG_CACHE_HOME/splatstudy/samples` or `~/.cache/splatstudy/samples` on Linux). That is the only network request the app makes.
 
 ## Build
 
