@@ -734,9 +734,16 @@ mod tests {
             let d = open(&mut h, SCULPT);
             h.frames(1);
             let d2 = h.app.background.picker.expect("open").drawn;
-            eprintln!("{lang:?}: square {:?} targets {:?} window {:?}", d.square, d2.targets, d2.window);
+            eprintln!(
+                "{lang:?}: square {:?} targets {:?} window {:?}",
+                d.square, d2.targets, d2.window
+            );
             if d2.targets[2].right() > d2.square.right() + 0.5 {
-                bad.push(format!("{lang:?}: choices reach {} past the picker's {}", d2.targets[2].right(), d2.square.right()));
+                bad.push(format!(
+                    "{lang:?}: choices reach {} past the picker's {}",
+                    d2.targets[2].right(),
+                    d2.square.right()
+                ));
             }
             h.app.background.picker = None;
             h.frames(1);

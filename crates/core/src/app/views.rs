@@ -209,8 +209,9 @@ impl App {
         let flyout = self.flyout_area();
         let on_toolbar =
             |index: usize| hover.is_some_and(|p| toolbars[index].contains(p) || flyout.contains(p));
+        // None while a slow operation waits to run (see `working_ui`).
         for index in [SCULPT, REFERENCE] {
-            if shown(rects[index]) {
+            if shown(rects[index]) && !self.busy() {
                 self.view_input(ui, rects[index], index, on_toolbar(index));
             }
         }

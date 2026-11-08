@@ -1101,10 +1101,13 @@ mod tests {
         for v in ["1 0 0", "-1 0 0", "0 1 0", "0 -1 0", "0 0 1", "0 0 -1"] {
             obj += &format!("v {v}\n");
         }
-        for f in ["1 3 5", "3 2 5", "2 4 5", "4 1 5", "3 1 6", "2 3 6", "4 2 6", "1 4 6"] {
+        for f in [
+            "1 3 5", "3 2 5", "2 4 5", "4 1 5", "3 1 6", "2 3 6", "4 2 6", "1 4 6",
+        ] {
             obj += &format!("f {f}\n");
         }
-        h.app.load_reference("octahedron.obj", obj.into_bytes().into());
+        h.app
+            .load_reference("octahedron.obj", obj.into_bytes().into());
         h.frames(2);
         {
             let st = &mut h.app.reference;
@@ -1140,10 +1143,14 @@ mod tests {
                 let in_sculpt = r.left() >= *sculpt.start() - 0.5 && r.left() < *sculpt.end();
                 let in_refs = r.left() >= *refs.start() - 0.5 && r.left() < *refs.end();
                 if in_sculpt && r.right() > *sculpt.end() + 0.5 {
-                    bad.push(format!("{lang:?} sculpt panel: {r:?} interactive={interactive}"));
+                    bad.push(format!(
+                        "{lang:?} sculpt panel: {r:?} interactive={interactive}"
+                    ));
                 }
                 if in_refs && r.right() > *refs.end() + 0.5 {
-                    bad.push(format!("{lang:?} reference panel: {r:?} interactive={interactive}"));
+                    bad.push(format!(
+                        "{lang:?} reference panel: {r:?} interactive={interactive}"
+                    ));
                 }
             }
             // The texts the new controls show, in the body font.
