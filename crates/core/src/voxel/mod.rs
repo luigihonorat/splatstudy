@@ -134,7 +134,17 @@ pub fn clay_from_reference(reference: &Reference, how: FromReference) -> Option<
 
 /// Meshes the zero level of `field`, keeps the largest piece and smooths
 /// it along itself, pulling the vertices back onto the level each pass.
+///
+/// The grid's outer nodes are first put outside, as surface nets needs:
+/// sealing an open sheet hard (see [`sdf::signed_distance`]) can thicken
+/// its walls past the grid's padding, and a node left inside there would
+/// leave a hole in the mesh. The shape is then closed flat at the border.
 fn mesh_level(field: &mut grid::Grid) -> Option<Mesh> {
+    let outside = field.step * 0.05;
+    for node in field.border() {
+        let v = &mut field.values[node];
+        *v = v.max(outside);
+    }
     nets::untangle(field);
     let (positions, triangles) = nets::surface_nets(field);
     let (mut positions, triangles) = nets::keep_largest(&positions, &triangles);
@@ -497,6 +507,230 @@ mod tests {
             from_triangles(&sphere.positions, &sphere.triangles, 48, REFERENCE_CLOSE).unwrap();
         assert_eq!(mesh.positions, direct.positions);
         assert_eq!(mesh.triangles, direct.triangles);
+    }
+
+    /// What keeps `triangles` from being a solid: open edges (a directed
+    /// edge without exactly one partner going the other way), pinched
+    /// vertices (whose triangles don't make a single fan) and pieces past
+    /// the first. Empty for a closed, manifold mesh in one piece.
+    fn flaws(triangles: &[[u32; 3]]) -> Vec<String> {
+        let mut flaws = Vec::new();
+        let mut edges = std::collections::HashMap::new();
+        for &[a, b, c] in triangles {
+            for e in [(a, b), (b, c), (c, a)] {
+                *edges.entry(e).or_insert(0) += 1;
+            }
+        }
+        let open = edges
+            .iter()
+            .filter(|&(&(a, b), &n)| n != 1 || edges.get(&(b, a)) != Some(&1))
+            .count();
+        if open > 0 {
+            flaws.push(format!("{open} open edges"));
+        }
+        let vertices = triangles
+            .iter()
+            .flatten()
+            .max()
+            .map_or(0, |&v| v as usize + 1);
+        // Around each vertex, from one neighbour to the next.
+        let mut fan: Vec<Vec<(u32, u32)>> = vec![Vec::new(); vertices];
+        for &[a, b, c] in triangles {
+            fan[a as usize].push((b, c));
+            fan[b as usize].push((c, a));
+            fan[c as usize].push((a, b));
+        }
+        let pinched = fan
+            .iter()
+            .filter(|pairs| {
+                let Some(&(first, _)) = pairs.first() else {
+                    return false;
+                };
+                let (mut at, mut steps) = (first, 0);
+                loop {
+                    match pairs.iter().find(|p| p.0 == at) {
+                        Some(&(_, next)) => at = next,
+                        None => return true,
+                    }
+                    steps += 1;
+                    if at == first || steps > pairs.len() {
+                        return steps != pairs.len();
+                    }
+                }
+            })
+            .count();
+        if pinched > 0 {
+            flaws.push(format!("{pinched} pinched or open vertices"));
+        }
+        // Pieces: triangles joined through shared vertices.
+        let mut by_vertex: Vec<Vec<usize>> = vec![Vec::new(); vertices];
+        for (t, tri) in triangles.iter().enumerate() {
+            tri.iter().for_each(|&v| by_vertex[v as usize].push(t));
+        }
+        let mut seen = vec![false; triangles.len()];
+        let mut pieces = 0;
+        for start in 0..triangles.len() {
+            if seen[start] {
+                continue;
+            }
+            pieces += 1;
+            seen[start] = true;
+            let mut todo = vec![start];
+            while let Some(t) = todo.pop() {
+                for &v in &triangles[t] {
+                    for &u in &by_vertex[v as usize] {
+                        if !seen[u] {
+                            seen[u] = true;
+                            todo.push(u);
+                        }
+                    }
+                }
+            }
+        }
+        if pieces != 1 {
+            flaws.push(format!("{pieces} pieces"));
+        }
+        flaws
+    }
+
+    /// Positions and triangles.
+    type Triangles = (Vec<Vec3>, Vec<[u32; 3]>);
+
+    /// A 2 × 2 relief on a 60 × 60 height field, open all round.
+    fn relief(height: impl Fn(f32, f32) -> f32) -> Triangles {
+        let n = 60u32;
+        let mut positions = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                let (x, z) = (
+                    i as f32 / (n - 1) as f32 * 2.0 - 1.0,
+                    j as f32 / (n - 1) as f32 * 2.0 - 1.0,
+                );
+                positions.push(Vec3::new(x, height(x, z), z));
+            }
+        }
+        let mut triangles = Vec::new();
+        for j in 0..n - 1 {
+            for i in 0..n - 1 {
+                let at = j * n + i;
+                triangles.push([at, at + n, at + 1]);
+                triangles.push([at + 1, at + n, at + n + 1]);
+            }
+        }
+        (positions, triangles)
+    }
+
+    /// A relief `amplitude` high: gentle waves.
+    fn shallow(amplitude: f32) -> Triangles {
+        relief(|x, z| amplitude * (x * 3.0).sin() * (z * 2.0).cos())
+    }
+
+    /// Open sheets: reliefs on height fields (bumpy, shallow, flat), a
+    /// single triangle, half a sphere.
+    fn open_sheets() -> Vec<(&'static str, Triangles)> {
+        let (bumpy, grid) = relief(|x, z| {
+            0.08 * (x * 6.0).sin() * (z * 4.5).cos() + 0.1 * (-(x * x + z * z) * 5.0).exp()
+        });
+        let (gentle, gentle_grid) = shallow(0.15);
+        let (flat, flat_grid) = shallow(0.0);
+        let sphere = Mesh::icosphere(4);
+        let half: Vec<[u32; 3]> = sphere
+            .triangles
+            .iter()
+            .filter(|t| t.iter().all(|&v| sphere.positions[v as usize].y > -0.01))
+            .copied()
+            .collect();
+        vec![
+            ("relief", (bumpy, grid)),
+            ("shallow relief", (gentle, gentle_grid)),
+            ("flat relief", (flat, flat_grid)),
+            (
+                "triangle",
+                (
+                    vec![
+                        Vec3::ZERO,
+                        Vec3::new(1.0, 0.0, 0.0),
+                        Vec3::new(0.3, 0.2, 0.8),
+                    ],
+                    vec![[0, 1, 2]],
+                ),
+            ),
+            ("hemisphere", (sphere.positions, half)),
+        ]
+    }
+
+    #[test]
+    fn clay_from_an_open_sheet_is_solid() {
+        let mut failed = Vec::new();
+        for (name, (positions, triangles)) in open_sheets() {
+            assert!(!is_closed(&triangles));
+            for resolution in [32, 96] {
+                for close in [0, 1] {
+                    let mesh = from_triangles(&positions, &triangles, resolution, close)
+                        .unwrap_or_else(|| panic!("{name}"));
+                    let flaws = flaws(&mesh.triangles);
+                    if !flaws.is_empty() {
+                        failed.push(format!("{name} at {resolution}, close {close}: {flaws:?}"));
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn clay_from_an_open_sheet_reference_is_solid() {
+        let mut failed = Vec::new();
+        for (name, (positions, triangles)) in open_sheets() {
+            let sheet = RefMesh {
+                positions,
+                triangles,
+                colors: None,
+            };
+            let reference = Reference::new(source(), Content::Mesh(sheet));
+            for resolution in [32, 96] {
+                let mesh = clay_from_reference(&reference, at(resolution))
+                    .unwrap_or_else(|| panic!("{name}"));
+                let flaws = flaws(&mesh.triangles);
+                if !flaws.is_empty() {
+                    failed.push(format!("{name} at {resolution}: {flaws:?}"));
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn clay_from_a_flat_or_shallow_relief_reference_is_solid() {
+        // Thin in one axis: the sealing reaches the grid's border.
+        let mut failed = Vec::new();
+        for amplitude in [0.0, 0.15] {
+            let (positions, triangles) = shallow(amplitude);
+            let sheet = RefMesh {
+                positions,
+                triangles,
+                colors: None,
+            };
+            let reference = Reference::new(source(), Content::Mesh(sheet));
+            for resolution in [64, 160] {
+                for smoothness in [0, DEFAULT_SMOOTHNESS] {
+                    let how = FromReference {
+                        smoothness,
+                        ..at(resolution)
+                    };
+                    let mesh = clay_from_reference(&reference, how)
+                        .unwrap_or_else(|| panic!("{amplitude}"));
+                    let flaws = flaws(&mesh.triangles);
+                    if !flaws.is_empty() {
+                        let what = format!(
+                            "amplitude {amplitude} at {resolution}, smoothness {smoothness}"
+                        );
+                        failed.push(format!("{what}: {flaws:?}"));
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
     }
 
     /// `cargo test --release -p splatstudy-core remesh_timing -- --ignored --nocapture`
