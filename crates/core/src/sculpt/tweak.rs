@@ -311,8 +311,7 @@ mod tests {
             }
             let before = s.mesh.positions.clone();
             assert!(s.tweak(op), "{op:?}");
-            for v in 0..n {
-                let (now, was) = (s.mesh.positions[v], before[v]);
+            for (v, (&now, &was)) in s.mesh.positions.iter().zip(&before).enumerate() {
                 if was.x > 0.0 {
                     assert_eq!(now, was, "{op:?} moved masked vertex {v}");
                 }
