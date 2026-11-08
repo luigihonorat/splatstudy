@@ -13,6 +13,8 @@
 //! - `gallery`: the bundled casts to choose a reference from
 //! - `study`: comparison aids (camera link, silhouette, ghost, guides, timer)
 //! - `calipers`: lengths set between two points, over both views
+//! - `tweak`: one step of smoothing, sharpening, shrinking or inflating
+//!   over the whole clay, from the sculpt panel
 //! - `toolbar`: each view's toolbar of view options
 //! - `background`: each view's background colour, and the window that
 //!   picks it
@@ -43,6 +45,7 @@ mod start;
 pub use start::StartOptions;
 mod study;
 mod toolbar;
+mod tweak;
 mod views;
 
 use egui::{CursorIcon, Frame, Key, Margin, PointerButton, Pos2, Rect};
